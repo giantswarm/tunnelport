@@ -177,15 +177,23 @@ CR arrives before the Secret.
 
 ### NetworkPolicy
 
-The operator never renders a `NetworkPolicy` — not even a default-deny.
-Reason: enforcement varies by CNI, baseline policies vary by org, and
-generating one creates an awkward interaction with whatever the platform team
-already runs. The chart README documents the canonical pod labels
-(`tunnelport.giantswarm.io/role=tbot`,
-`tunnelport.giantswarm.io/remoteapp=<name>`) so the platform team's
-hand-written `NetworkPolicy` has a stable selector to target. tbot egress to
-`proxyAddr:443` and ingress from approved caller pods is the platform team's
-to enforce.
+Two distinct things, decided differently:
+
+- **For tenant resources (the rendered tbot pods)**: the operator does **not**
+  render a `NetworkPolicy`. Reason: enforcement varies by CNI, baseline
+  policies vary by org, and generating one creates an awkward interaction
+  with whatever the platform team already runs. The chart README documents
+  the canonical pod labels (`tunnelport.giantswarm.io/role=tbot`,
+  `tunnelport.giantswarm.io/remoteapp=<name>`) so the platform team's
+  hand-written `NetworkPolicy` has a stable selector to target. tbot egress
+  to `proxyAddr:443` and ingress from approved caller pods is the platform
+  team's to enforce.
+- **For the operator's own manager pod**: the chart **does** render a
+  `NetworkPolicy` locking down the operator Deployment, per GS convention
+  for kubebuilder operators. Default-deny with explicit allow rules for
+  kube-apiserver egress and metrics scraping ingress. This is operator
+  hygiene, not tenant policy — the rule above only applies to the tbot
+  pods we render on behalf of `RemoteApp`s.
 
 ### Roles (cluster topology)
 

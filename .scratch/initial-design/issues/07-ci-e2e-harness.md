@@ -16,10 +16,15 @@ down.
 The HITL coordination required:
 
 - Decide which Teleport instance backs CI (cloud test tenant credentials
-  in CI secrets, or a locally-run Teleport binary started inside the
-  CI job).
-- Decide CI infrastructure (GitHub Actions vs Tekton — the Giant Swarm
-  e2e-testing skill suggests Tekton may be the org default; confirm).
+  in CircleCI context, or a locally-run Teleport binary started inside
+  the CI job).
+- CI infrastructure: **CircleCI + the `architect` orb**, per GS
+  convention (see `docs/gs-operator-conventions.md`). The
+  `.github/workflows/` directory in GS operator repos contains only
+  `zz_generated.*` files owned by `devctl`; real CI is in
+  `.circleci/config.yml`. Cluster-tier e2e via Tekton
+  (`cluster-test-suites`) is a separate concern that may slot in
+  later — out of scope for this slice.
 - Decide how the `TeleportBot`/role/token are provisioned each run
   (idempotent script via Teleport API, or pre-provisioned and reused).
 
@@ -60,14 +65,15 @@ curl-pod assertion, then tears down. Green on `main`. Red on
 intentional regressions (e.g. an invalid token Secret).
 
 **Why human-only (cannot be delegated to an AFK agent):**
-- CI infra choice (GitHub Actions vs Tekton — the Giant Swarm
-  `e2e-testing` skill suggests Tekton may be the org default; needs
-  confirmation by a human who knows the platform conventions).
-- Test Teleport credentials in CI secrets — credential management is a
-  platform-engineer-only decision involving the team's secret store.
+- Test Teleport credentials in the CircleCI context — credential
+  management is a platform-engineer-only decision involving the team's
+  secret store.
 - Idempotent `TeleportBot`/role/token provisioning per run requires
   decisions about Teleport API access, account scoping, and which
   tenant CI runs against.
+- Whether the architect-orb job needs additional Tekton-tier
+  cluster-test-suites coverage in a follow-up ticket (the per-PR e2e
+  is CircleCI; cluster-tier e2e is a separate org concern).
 
 **Key interfaces (where the design is locked):**
 - Reuses the manifests, runbook, and curl-pod assertion from slice 3 — this slice is the wrapping that makes them runnable headlessly.

@@ -69,3 +69,10 @@ schema validation, with the operator process not running.
 - Helm chart packaging — that's slice 6.
 - The original-draft `bot:` block — explicitly removed per `CONTEXT.md`; do not reintroduce.
 - Service-name / service-type fields — rejected during design.
+
+**References:**
+- **Read first**: `docs/gs-operator-conventions.md` for canonical layout, build tooling, image registry (`gsoci.azurecr.io/giantswarm/<name>`), and the `Makefile.kubebuilder.mk` pattern. The "Resolved choices" table at the bottom is authoritative for owning team, catalog, image-pull secret, and scaffold style.
+- **Canonical exemplar**: `giantswarm/silence-operator` — copy its directory layout, `Makefile`/`Makefile.kubebuilder.mk` split, and `config/` shape largely as-is.
+- **Multi-version-CRD reference (later, not for v1)**: `giantswarm/observability-operator`.
+- **Scaffold**: full kubebuilder v4 (`kubebuilder init` + `kubebuilder create api`), with `cmd/main.go`, marker-driven RBAC, and the standard `Makefile.kubebuilder.mk` split. Do **not** hand-roll types.
+- This repo is `tunnelport`; image will live at `gsoci.azurecr.io/giantswarm/tunnelport`. Owning team: `bumblebee`.

@@ -28,11 +28,16 @@ Chart README documents:
 - The operator does **not** create `RoleBinding`s granting
   create-`RemoteApp` to anyone — that's an explicit per-cluster
   decision.
-- The operator does **not** render `NetworkPolicy`. Document the
-  canonical pod labels (`tunnelport.giantswarm.io/role=tbot`,
+- The operator does **not** render `NetworkPolicy` for the rendered
+  *tbot pods*. Document the canonical pod labels
+  (`tunnelport.giantswarm.io/role=tbot`,
   `…/remoteapp=<name>`) so the platform team's hand-written policy has
   a stable selector. tbot egress to `proxyAddr:443` and ingress from
   approved callers is the platform team's to enforce.
+- The chart **does** render a `NetworkPolicy` for the operator's own
+  *manager pod*, per GS kubebuilder-operator convention (default-deny
+  with explicit allow rules for kube-apiserver egress and metrics
+  ingress). This is operator hygiene, not tenant policy.
 - Expected `tokenRef` Secret-delivery pattern (out-of-band via GitOps +
   sealed/sync). The operator never reads the Secret.
 - Central-side preconditions per `RemoteApp`: a `TeleportBot` with a
@@ -86,7 +91,10 @@ first time knows what they need to set up themselves.
   - **no** `pods/log` — verifiable in the rendered manifests; enforced by ADR 0003
 - Chart bundles the CRD from slice 1.
 - Chart does **not** bundle any `RoleBinding` granting create-`RemoteApp` to anyone — per-cluster decision.
-- Chart does **not** render `NetworkPolicy`. README documents the canonical pod labels (`tunnelport.giantswarm.io/role=tbot`, `tunnelport.giantswarm.io/remoteapp=<name>`) so platform teams have a stable selector for hand-written policies.
+- Chart does **not** render `NetworkPolicy` for the rendered *tbot pods* (tenant resources). README documents the canonical pod labels (`tunnelport.giantswarm.io/role=tbot`, `tunnelport.giantswarm.io/remoteapp=<name>`) so platform teams have a stable selector for hand-written policies.
+- Chart **does** render a `NetworkPolicy` for the operator's own *manager pod*, per GS convention — default-deny with explicit allow rules for kube-apiserver egress and metrics scraping ingress.
+- Chart bundles the CRD at `templates/crds.yml` with `helm.sh/resource-policy: keep` and gated by `crds.install` (per GS convention; see `docs/gs-operator-conventions.md`). A `make update-helm-crds` target keeps it in sync from `config/crd/bases/`.
+- `Chart.yaml` carries the `application.giantswarm.io/team: bumblebee` annotation. Chart publishes to `control-plane-catalog`. The manager pod template references the cluster-managed `gsoci.azurecr.io` pull-secret via `imagePullSecrets:` — the chart does not render the Secret itself. See the "Resolved choices" table in `docs/gs-operator-conventions.md`.
 
 **Acceptance criteria:**
 - [ ] `helm install tunnelport ./chart` on a fresh kind cluster yields a running operator and a registered CRD
@@ -97,7 +105,7 @@ first time knows what they need to set up themselves.
 - [ ] `helm lint` is clean
 
 **Out of scope:**
-- Generating any `NetworkPolicy` from the chart — rejected during design.
+- Generating any `NetworkPolicy` for the *rendered tbot pods* (tenant resources) — rejected during design. The operator-manager `NetworkPolicy` *is* in scope.
 - Generating `RoleBinding`s that grant `RemoteApp` creation rights — left for each cluster's platform team.
 - Multi-tenant RBAC profiles or values-templated tenant scoping.
 - Per-`RemoteApp` overrides for image or resources — those stay cluster-wide.
