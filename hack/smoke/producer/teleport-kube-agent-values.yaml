@@ -1,0 +1,33 @@
+# teleport-kube-agent Helm chart values for the producer cluster.
+# Pinned to chart version 18.7.3 — keep in lockstep with the teleport
+# control plane (hack/smoke/teleport/helm-values.yaml).
+#
+# Registers the http-echo Service in the `smoke` namespace as a
+# Teleport application named `smoke-app`. The role bound to the bot
+# (hack/smoke/teleport/role.yaml) selects on the `app-name=smoke-app`
+# label so this is the only app the bot can tunnel to.
+
+# REPLACE: produced by `tctl tokens add --type=node,app …` on the
+# Teleport control plane, OR matches `producer-agent-token` from
+# hack/smoke/teleport/tokens.yaml.
+authToken: REPLACE_WITH_PRODUCER_AGENT_TOKEN
+
+# REPLACE: the Teleport proxy address discovered in step "Network
+# setup" of the runbook. Format: "<ip>:443" — for example,
+# "172.18.0.4:443". The teleport-cluster proxyListenerMode=multiplex
+# lets every Teleport protocol share this one port.
+proxyAddr: REPLACE_WITH_TELEPORT_PROXY_ADDR
+
+# Self-signed CA on the smoke control plane — skip cert verification
+# rather than wiring a CA bundle. NEVER set this in production.
+insecureSkipProxyTLSVerify: true
+
+# We're an app service, not a kube/database/discovery agent.
+roles: app
+
+apps:
+  - name: smoke-app
+    uri: http://http-echo.smoke.svc.cluster.local:5678
+    # The role's app_labels selector matches on this label exactly.
+    labels:
+      app-name: smoke-app

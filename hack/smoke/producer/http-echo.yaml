@@ -1,0 +1,50 @@
+# Sample app served from the producer cluster. teleport-kube-agent
+# registers this Service with Teleport as "smoke-app" so the consumer
+# cluster's RemoteApp + tbot can tunnel to it.
+#
+# The body of the HTTP response is what the smoke test asserts on:
+# the curl in the consumer cluster must read back this exact string.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: smoke
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-echo
+  namespace: smoke
+  labels:
+    app: http-echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-echo
+  template:
+    metadata:
+      labels:
+        app: http-echo
+    spec:
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen=:5678"
+            - "-text=hello-from-producer"
+          ports:
+            - name: http
+              containerPort: 5678
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-echo
+  namespace: smoke
+spec:
+  selector:
+    app: http-echo
+  ports:
+    - name: http
+      port: 5678
+      targetPort: http

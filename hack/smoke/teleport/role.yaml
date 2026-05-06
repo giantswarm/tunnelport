@@ -1,0 +1,20 @@
+# Teleport role granting access to the smoke app via Application Access.
+# The bot (see bot.yaml) is bound to this role so its issued certs can
+# tunnel to the app named "smoke-app". The runbook applies this with:
+#   tctl create -f hack/smoke/teleport/role.yaml
+kind: role
+version: v7
+metadata:
+  name: smoke-app-tunnel
+spec:
+  allow:
+    # The role is scoped to exactly one app — the smoke responder.
+    # Matching app_name keeps the bot's blast radius minimal: even if
+    # the bot's cert leaks, only this one app is reachable.
+    app_labels:
+      app-name: smoke-app
+    # No login matters for application-tunnel — but Teleport's role
+    # validator requires logins to be non-empty for any role that
+    # touches `app_labels`. "tunneluser" is a placeholder principal.
+    logins:
+      - tunneluser

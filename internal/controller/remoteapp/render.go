@@ -349,36 +349,43 @@ func configHash(cr *accessv1alpha1.RemoteApp) string {
 }
 
 // tbotConfig renders the tbot YAML config for an application-tunnel mode
-// pod. Format mirrors the upstream tbot config schema: a top-level
-// onboarding block with token join method, plus a services list with one
-// application-tunnel entry. The token's value lives only in the mounted
-// Secret — we reference it by file path inside the pod, not by value.
+// pod. Schema source: gravitational/teleport `lib/tbot/...`:
+//
+//   - top-level: `version`, `proxy_server`, `onboarding`, `storage`,
+//     `diag_addr`, `services` (see `lib/tbot/config/config.go`).
+//   - `onboarding.token` accepts either a literal token value OR a file
+//     path; tbot dereferences a path automatically. We point it at the
+//     mounted Secret's key, so the literal token never leaves the
+//     Secret volume — the operator has no need to read `Secret.Data`.
+//   - `services.application-tunnel.listen` (NOT `listener`) — the
+//     upstream YAML tag is `listen` (see
+//     `lib/tbot/services/application/tunnel_config.go`).
+//   - `diag_addr` enables tbot's diag HTTP listener that serves
+//     `/readyz`, which slice 4's pod readiness probe targets. Without
+//     this field tbot does not bind the diag listener and pod-Ready
+//     would never flip true.
 func tbotConfig(cr *accessv1alpha1.RemoteApp) string {
 	// Path matches the volumeMount used in renderDeployment.
 	tokenPath := fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key)
 
 	return fmt.Sprintf(`version: v2
-auth_server: %[1]s
 proxy_server: %[1]s
 onboarding:
   join_method: token
   token: %[2]s
-  token_secret_ref:
-    name: %[3]s
-    key: %[4]s
 storage:
   type: directory
   path: /var/lib/tbot
+diag_addr: 0.0.0.0:%[5]d
 services:
   - type: application-tunnel
-    app_name: %[5]s
-    listener: tcp://0.0.0.0:%[6]d
+    app_name: %[3]s
+    listen: tcp://0.0.0.0:%[4]d
 `,
 		cr.Spec.ProxyAddr,
 		tokenPath,
-		cr.Spec.TokenRef.Name,
-		cr.Spec.TokenRef.Key,
 		cr.Spec.AppName,
 		cr.Spec.Port,
+		tbotDiagPort,
 	)
 }

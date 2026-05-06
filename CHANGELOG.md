@@ -96,5 +96,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `renderDeployment` now takes a `tokenSecretVersion string` argument
   threaded from the reconciler's pre-render Secret read.
+- Fixed the rendered tbot YAML config to match the upstream tbot
+  schema. The previous renderer would have been rejected by
+  `tbot start`. Specifically: `listener:` is now `listen:` (per
+  `lib/tbot/services/application/tunnel_config.go`), the invented
+  `token_secret_ref:` block is removed (the existing `token:` field
+  is a path that tbot dereferences), the redundant `auth_server:`
+  copy of `proxy_server:` is dropped, and `diag_addr: 0.0.0.0:3001`
+  is now set so the readiness probe added in slice 4 has a listener
+  to hit. Regression-guarded in `render_test.go`.
+
+### Added
+
+- Smoke-test scaffold under `hack/smoke/` covering a three-cluster
+  kind topology (teleport / producer / consumer): kind configs,
+  teleport-cluster + teleport-kube-agent Helm values pinned to
+  **18.7.3**, role / bot / token YAML for `tctl`, a sample
+  `hashicorp/http-echo` producer, the `RemoteApp` CR, and a curl
+  Job that asserts on the response body. The runbook
+  (`hack/smoke/README.md`) walks a developer from zero to a green
+  curl: kind clusters, network discovery, `tctl` provisioning,
+  plain `kubectl create secret` for the bot token, troubleshooting,
+  and a smoke-vs-production differences table.
 
 [Unreleased]: https://github.com/giantswarm/tunnelport/tree/master

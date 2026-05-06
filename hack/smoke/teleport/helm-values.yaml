@@ -1,0 +1,33 @@
+# teleport-cluster Helm chart values for the smoke environment.
+# Pinned to chart version 18.7.3 — bump in lockstep with the producer's
+# teleport-kube-agent and the smoke runbook.
+#
+# This config is INTENTIONALLY MINIMAL and INSECURE for a kind smoke
+# test. Do not copy into production.
+
+# Self-signed certs are fine for smoke — peer clusters connect with
+# --insecure or the discovered IP will not match a cert SAN anyway.
+clusterName: smoke.tunnelport.local
+
+# multiplex serves all Teleport protocols (proxy SSH, app, kube, tunnel)
+# over a single TLS port so peer clusters only need ":443".
+proxyListenerMode: multiplex
+
+# No public DNS in kind, so disable cert provisioning. The chart falls
+# back to a self-signed CA which Teleport regenerates on install.
+acme: false
+
+# We expose Teleport via the kind container's IP on the `kind` Docker
+# network — no host-port mapping needed. See README "Network setup".
+service:
+  type: ClusterIP
+
+# Single-replica auth + proxy is enough for smoke; the chart's default
+# storage backend (sqlite on a PVC) is fine because we tear the cluster
+# down after the test.
+chartMode: standalone
+
+# Resource budget: kind nodes are constrained. Trim defaults so the
+# smoke test fits on a developer laptop.
+highAvailability:
+  replicaCount: 1
