@@ -1,0 +1,37 @@
+# Sample RemoteApp CR for the smoke environment. The operator
+# materialises this into a tbot Deployment, ConfigMap, and ClusterIP
+# Service in the `smoke` namespace.
+#
+# After this is applied, the curl-pod (curl-pod.yaml) hits
+# http://smoke-app.smoke.svc.cluster.local:8080 and the response body
+# should be `hello-from-producer`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: smoke
+---
+apiVersion: access.giantswarm.io/v1alpha1
+kind: RemoteApp
+metadata:
+  name: smoke-app
+  namespace: smoke
+spec:
+  # Must match the `name` registered by teleport-kube-agent on the
+  # producer cluster (see producer/teleport-kube-agent-values.yaml).
+  appName: smoke-app
+
+  # Local Service port the tunnel listens on. The curl pod targets
+  # this port via the Service `smoke-app.smoke.svc.cluster.local`.
+  port: 8080
+
+  # REPLACE with the same Teleport proxy address used by the
+  # producer's kube-agent — see runbook "Network setup". Format:
+  # "<ip>:443".
+  proxyAddr: REPLACE_WITH_TELEPORT_PROXY_ADDR
+
+  # Reference (NOT contents) of the Secret holding the bot token.
+  # The operator only reads the Secret's metadata.resourceVersion to
+  # detect rotations; the token value lives in the mounted volume.
+  tokenRef:
+    name: smoke-bot-token
+    key: token

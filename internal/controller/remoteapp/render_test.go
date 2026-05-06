@@ -93,14 +93,33 @@ func TestRenderConfigMap_ContainsTbotApplicationTunnelConfig(t *testing.T) {
 	wants := []string{
 		"proxy_server: teleport.example.com:443",
 		"app_name: myapp",
-		"tcp://0.0.0.0:8080",
+		"listen: tcp://0.0.0.0:8080",
 		"type: application-tunnel",
 		"join_method: token",
-		"name: myapp-token",
+		// onboarding.token must be the path to the mounted Secret key,
+		// not a literal value — tbot dereferences a path automatically.
+		"token: /etc/tbot-token/token",
+		// diag_addr binds the /readyz HTTP endpoint that the pod's
+		// readiness probe (slice 4) targets.
+		"diag_addr: 0.0.0.0:3001",
 	}
 	for _, want := range wants {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("tbot.yaml missing %q\n---\n%s\n---", want, cfg)
+		}
+	}
+
+	// Regression guards: these are upstream-tbot field names that
+	// earlier drafts of the renderer invented. If they reappear, tbot
+	// will reject the config at startup.
+	bannedSubstrings := []string{
+		"token_secret_ref", // not a real tbot field; only `token:` exists
+		"listener:",        // wrong spelling — upstream tag is `listen`
+		"auth_server:",     // we use proxy_server only; auth_server here was a copy-paste
+	}
+	for _, banned := range bannedSubstrings {
+		if strings.Contains(cfg, banned) {
+			t.Errorf("tbot.yaml must not contain %q (rejected by tbot at startup)\n---\n%s\n---", banned, cfg)
 		}
 	}
 }

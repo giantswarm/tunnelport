@@ -1,0 +1,42 @@
+# Two static join tokens for the smoke environment.
+#
+#  1) producer-agent-token    — used by the producer cluster's
+#     teleport-kube-agent to register the smoke app with Teleport.
+#     Roles: [Node, App].
+#
+#  2) smoke-bot-token         — used by the consumer cluster's tbot
+#     (rendered by the operator) to join as the smoke-bot identity.
+#     Role: [Bot]. The `bot_name` field MUST match the bot's metadata
+#     name in bot.yaml.
+#
+# Apply with:
+#   tctl create -f hack/smoke/teleport/tokens.yaml
+#
+# The runbook captures the literal token strings — these YAML values
+# are placeholders. Replace before applying, or generate via
+# `tctl tokens add` and skip this file entirely.
+kind: token
+version: v2
+metadata:
+  name: producer-agent-token
+spec:
+  roles:
+    - Node
+    - App
+  join_method: token
+  # Replace before applying. Generate one with:
+  #   openssl rand -hex 16
+  token: REPLACE_WITH_PRODUCER_AGENT_TOKEN
+---
+kind: token
+version: v2
+metadata:
+  name: smoke-bot-token
+spec:
+  roles:
+    - Bot
+  bot_name: smoke-bot
+  join_method: token
+  # Replace before applying. The same value goes into the consumer
+  # cluster's token Secret (token-secret.yaml.template).
+  token: REPLACE_WITH_SMOKE_BOT_TOKEN

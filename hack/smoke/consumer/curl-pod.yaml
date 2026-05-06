@@ -1,0 +1,33 @@
+# Workload that exercises the tunnel. After the operator's tbot
+# Deployment becomes Ready, this pod's curl should print
+# "hello-from-producer" — the literal body served by http-echo on
+# the producer cluster.
+#
+# Run with:
+#   kubectl apply -f hack/smoke/consumer/curl-pod.yaml
+#   kubectl -n smoke logs job/smoke-curl --follow
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: smoke-curl
+  namespace: smoke
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: curl
+          image: curlimages/curl:8.10.1
+          # --retry handles the race between the Job starting and the
+          # tbot pod becoming Ready. --fail-with-body makes a non-2xx
+          # exit non-zero so the Job actually fails (and shows the
+          # body in logs).
+          args:
+            - --silent
+            - --show-error
+            - --fail-with-body
+            - --retry=20
+            - --retry-delay=3
+            - --retry-connrefused
+            - http://smoke-app.smoke.svc.cluster.local:8080

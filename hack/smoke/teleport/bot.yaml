@@ -1,0 +1,15 @@
+# TeleportBot resource: a Machine ID identity that tbot uses to join
+# Teleport. Bound to the smoke-app-tunnel role so its issued certs
+# can only reach the smoke app.
+#
+# Apply with:
+#   tctl create -f hack/smoke/teleport/bot.yaml
+kind: bot
+version: v1
+metadata:
+  name: smoke-bot
+spec:
+  roles:
+    - smoke-app-tunnel
+  # Default cert TTL is fine for smoke. Production deployments may
+  # want a tighter ttl + renewal interval pair.

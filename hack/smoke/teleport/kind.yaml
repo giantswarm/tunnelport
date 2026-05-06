@@ -1,0 +1,9 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: teleport
+# All three smoke clusters (teleport / producer / consumer) sit on the
+# default `kind` Docker network so peer clusters can reach this one's
+# proxy by container IP. No host-port mappings — see the runbook's
+# "Network setup" section.
+nodes:
+  - role: control-plane
