@@ -9,6 +9,7 @@ workflows:
       - architect/go-build:
           name: go-build
           binary: tunnelport
+          path: ./cmd
           filters:
             tags:
               only: /^v.*/
