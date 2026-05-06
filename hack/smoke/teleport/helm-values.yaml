@@ -9,6 +9,16 @@
 # --insecure or the discovered IP will not match a cert SAN anyway.
 clusterName: smoke.tunnelport.local
 
+# publicAddr is what the proxy advertises to clients (kube-agent, tbot)
+# for reverse-tunnel reconnects. Without it the proxy hands out
+# "smoke.tunnelport.local:443" and peer kind clusters cannot resolve
+# that name. Replace via `helm upgrade --set` after the
+# teleport-control-plane node IP is discovered (see runbook step 2).
+# The placeholder here keeps the chart installable on first try; the
+# runbook re-installs with the real IP.
+publicAddr:
+  - "REPLACE_WITH_TELEPORT_PROXY_ADDR"
+
 # multiplex serves all Teleport protocols (proxy SSH, app, kube, tunnel)
 # over a single TLS port so peer clusters only need ":443".
 proxyListenerMode: multiplex
@@ -17,10 +27,19 @@ proxyListenerMode: multiplex
 # back to a self-signed CA which Teleport regenerates on install.
 acme: false
 
-# We expose Teleport via the kind container's IP on the `kind` Docker
-# network — no host-port mapping needed. See README "Network setup".
+# Expose the proxy as NodePort so peer kind clusters can reach it on
+# the kind Docker network via the control-plane node container's IP.
+# (LoadBalancer is the chart default, but kind has no LB controller —
+# the Service would sit Pending forever.)
 service:
-  type: ClusterIP
+  type: NodePort
+  spec:
+    ports:
+      - name: tls
+        port: 443
+        targetPort: 3080
+        nodePort: 30443
+        protocol: TCP
 
 # Single-replica auth + proxy is enough for smoke; the chart's default
 # storage backend (sqlite on a PVC) is fine because we tear the cluster

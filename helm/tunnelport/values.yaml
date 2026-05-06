@@ -36,6 +36,11 @@ resources:
 # authors override them.
 tbot:
   image: public.ecr.aws/gravitational/teleport-distroless:16
+  # Development-only: render tbot configs with `insecure: true` so the
+  # pods skip Teleport proxy TLS verification. Useful for kind-based
+  # smoke tests where the proxy is reached by IP and the cert SAN does
+  # not match. NEVER enable this in production.
+  insecure: false
   resources:
     requests:
       cpu: 50m

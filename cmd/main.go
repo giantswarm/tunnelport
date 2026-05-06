@@ -80,6 +80,12 @@ func main() {
 		"CPU limit applied to the tbot container.")
 	flag.StringVar(&tbotMemLimit, "tbot-memory-limit", "256Mi",
 		"Memory limit applied to the tbot container.")
+	var tbotInsecure bool
+	flag.BoolVar(&tbotInsecure, "tbot-insecure", false,
+		"Render tbot configs with `insecure: true` so pods skip Teleport proxy "+
+			"TLS verification. Development-only — never set in production. Useful for "+
+			"kind-based smoke tests where the proxy is reached by IP and the cert SAN "+
+			"does not match.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -211,6 +217,7 @@ func main() {
 					corev1.ResourceMemory: resource.MustParse(tbotMemLimit),
 				},
 			},
+			Insecure: tbotInsecure,
 		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up RemoteApp controller")
