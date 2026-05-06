@@ -51,7 +51,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -110,11 +109,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.reconcileConfigMap(ctx, cr); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile ConfigMap: %w", err)
 	}
-	tokenSecretVersion, err := r.observeTokenSecretVersion(ctx, cr)
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("observe token Secret version: %w", err)
+	view := r.observeTokenSecret(ctx, cr)
+	if view.FetchErr != nil {
+		return ctrl.Result{}, fmt.Errorf("observe token Secret: %w", view.FetchErr)
 	}
-	if err := r.reconcileDeployment(ctx, cr, tokenSecretVersion); err != nil {
+	if err := r.reconcileDeployment(ctx, cr, view.ResourceVersion); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile Deployment: %w", err)
 	}
 	if err := r.reconcileService(ctx, cr); err != nil {
@@ -124,7 +123,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Status: derived from k8s-visible state only (ADR 0003). This must
 	// run last so observedGeneration only catches up after the owned
 	// objects above are applied successfully.
-	if err := r.reconcileStatus(ctx, cr); err != nil {
+	if err := r.reconcileStatus(ctx, cr, view); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile status: %w", err)
 	}
 
@@ -242,33 +241,43 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-// observeTokenSecretVersion fetches the tokenRef Secret and returns its
-// `metadata.resourceVersion`. The reconciler stamps the value onto the
-// pod-template annotation `tunnelport.giantswarm.io/token-secret-version`,
-// so a content rotation — which always changes resourceVersion — rolls
-// the Deployment via its existing RollingUpdate strategy.
-//
-// A missing Secret returns "" rather than an error: the GitOps-race case
-// where the CR is applied before the Secret is delivered is expected,
-// and the rendered pod stays Pending on the volume mount until the
-// Secret appears. status.TokenSecretBound surfaces the absence
-// independently in reconcileStatus.
-//
-// Only ObjectMeta is read. The function intentionally does NOT type the
-// access through `.Data`, and the package-level static check in
-// secret_watch_test.go enforces no `secret.Data`-style references exist
-// anywhere in the controller code outside reconcileStatus's
-// key-presence check.
-func (r *Reconciler) observeTokenSecretVersion(ctx context.Context, cr *accessv1alpha1.RemoteApp) (string, error) {
-	key := client.ObjectKey{Namespace: cr.Namespace, Name: cr.Spec.TokenRef.Name}
-	var sec corev1.Secret
-	if err := r.Get(ctx, key, &sec); err != nil {
-		if apierrors.IsNotFound(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("get token Secret %s/%s: %w", key.Namespace, key.Name, err)
+// TokenSecretView is the operator's narrow view of the tokenRef Secret.
+// Built once per reconcile from a single Get; carries everything the
+// reconciler and computeStatus need without re-fetching. Only ObjectMeta
+// and the named-key presence are observed — the package-level static
+// check in secret_watch_test.go enforces that no controller code reads
+// other Secret bytes.
+type TokenSecretView struct {
+	Name            string
+	Key             string
+	ResourceVersion string // empty when the Secret was not found
+	KeyExists       bool   // false if Secret missing OR key absent
+	FetchErr        error  // non-nil only on non-NotFound errors
+}
+
+// observeTokenSecret performs the one Secret Get per reconcile. NotFound
+// is normalised to (KeyExists=false, ResourceVersion="") to match the
+// GitOps-race semantics — the rendered pod stays Pending on the volume
+// mount until the Secret appears, and TokenSecretBound surfaces the
+// absence in status. Receiver name `s` deliberately stays outside the
+// banned-receiver set in TestController_NoSecretDataAccess.
+func (r *Reconciler) observeTokenSecret(ctx context.Context, cr *accessv1alpha1.RemoteApp) TokenSecretView {
+	view := TokenSecretView{
+		Name: cr.Spec.TokenRef.Name,
+		Key:  cr.Spec.TokenRef.Key,
 	}
-	return sec.ResourceVersion, nil
+	s := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: cr.Namespace, Name: cr.Spec.TokenRef.Name}
+	if err := r.Get(ctx, key, s); err != nil {
+		if apierrors.IsNotFound(err) {
+			return view
+		}
+		view.FetchErr = fmt.Errorf("get token Secret %s/%s: %w", key.Namespace, key.Name, err)
+		return view
+	}
+	view.ResourceVersion = s.ResourceVersion
+	_, view.KeyExists = s.Data[cr.Spec.TokenRef.Key]
+	return view
 }
 
 // mapSecretToRemoteApps fans a Secret event out to the RemoteApps that
@@ -329,86 +338,23 @@ func (r *Reconciler) mapPodToRemoteApp(_ context.Context, obj client.Object) []r
 	}
 }
 
-// reconcileStatus computes the RemoteApp's status from k8s-visible state
-// and writes it via the Status subresource. ADR 0003 forbids reading
-// pod logs; this method touches Pod metadata only.
-//
-// Order:
-//  1. Compute TokenSecretBound from Secret + key existence.
-//  2. List the RemoteApp's tbot pods and derive (ready, lastError).
-//  3. Set Ready and TokenSecretBound conditions, observedGeneration,
-//     and the top-level Ready / LastError shorthand fields.
-//  4. r.Status().Update — sub-resource client to avoid spec/status
-//     conflicts.
-func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.RemoteApp) error {
-	// Snapshot the pre-update status so we can no-op when nothing changed
-	// (avoids a hot-loop reconcile when a Pod event lands but state is
-	// already accurate).
-	before := cr.Status.DeepCopy()
-
-	// 1. TokenSecretBound: read the named Secret and check the key.
-	tokenBound, tokenReason, tokenMsg := r.evalTokenSecretBound(ctx, cr)
-
-	// 2. Pod state.
+// reconcileStatus is I/O-only: list pods, build the new status via the
+// pure computeStatus function, write via Status subresource if changed.
+// ADR 0003 forbids reading pod logs; only Pod metadata is touched.
+func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.RemoteApp, view TokenSecretView) error {
 	pods, err := r.listTbotPods(ctx, cr)
 	if err != nil {
 		return fmt.Errorf("list tbot pods: %w", err)
 	}
-	ready, lastError := summarizeStatus(pods)
 
-	// 3. Build the new status.
-	newStatus := cr.Status.DeepCopy()
-	newStatus.Ready = ready
-	newStatus.LastError = lastError
-	newStatus.ObservedGeneration = cr.Generation
-
-	readyCond := metav1.Condition{
-		Type:               accessv1alpha1.ConditionTypeReady,
-		Status:             boolToConditionStatus(ready),
-		ObservedGeneration: cr.Generation,
-		Reason:             readyConditionReason(ready, lastError),
-		Message:            lastError,
-	}
-	if ready {
-		readyCond.Message = "tbot tunnel ready"
-	}
-	meta.SetStatusCondition(&newStatus.Conditions, readyCond)
-
-	tokenCond := metav1.Condition{
-		Type:               accessv1alpha1.ConditionTypeTokenSecretBound,
-		Status:             boolToConditionStatus(tokenBound),
-		ObservedGeneration: cr.Generation,
-		Reason:             tokenReason,
-		Message:            tokenMsg,
-	}
-	meta.SetStatusCondition(&newStatus.Conditions, tokenCond)
-
-	if statusEqual(before, newStatus) {
+	before := cr.Status.DeepCopy()
+	newStatus := computeStatus(cr, pods, view, before.Conditions)
+	if statusEqual(before, &newStatus) {
 		return nil
 	}
 
-	cr.Status = *newStatus
+	cr.Status = newStatus
 	return r.Status().Update(ctx, cr)
-}
-
-// evalTokenSecretBound checks the referenced Secret and the named key.
-// We never log or pass through the Secret's bytes — only key presence
-// matters. Returns (bound, reason, human-readable message).
-func (r *Reconciler) evalTokenSecretBound(ctx context.Context, cr *accessv1alpha1.RemoteApp) (bool, string, string) {
-	s := &corev1.Secret{}
-	key := types.NamespacedName{Namespace: cr.Namespace, Name: cr.Spec.TokenRef.Name}
-	if err := r.Get(ctx, key, s); err != nil {
-		if apierrors.IsNotFound(err) {
-			return false, "SecretNotFound",
-				fmt.Sprintf("Secret %q not found in namespace %q", cr.Spec.TokenRef.Name, cr.Namespace)
-		}
-		return false, "SecretGetError", err.Error()
-	}
-	if _, ok := s.Data[cr.Spec.TokenRef.Key]; !ok {
-		return false, "KeyNotFound",
-			fmt.Sprintf("Secret %q has no key %q", cr.Spec.TokenRef.Name, cr.Spec.TokenRef.Key)
-	}
-	return true, "Bound", fmt.Sprintf("Secret %q key %q present", cr.Spec.TokenRef.Name, cr.Spec.TokenRef.Key)
 }
 
 // listTbotPods returns the pods labelled as belonging to this RemoteApp.
@@ -451,22 +397,3 @@ func statusEqual(a, b *accessv1alpha1.RemoteAppStatus) bool {
 	return equality.Semantic.DeepEqual(ac, bc)
 }
 
-func boolToConditionStatus(b bool) metav1.ConditionStatus {
-	if b {
-		return metav1.ConditionTrue
-	}
-	return metav1.ConditionFalse
-}
-
-// readyConditionReason picks a stable Reason string for the Ready
-// condition. Reasons are not free-form per Kubernetes conventions —
-// stick to a small finite set that automation can pattern-match on.
-func readyConditionReason(ready bool, lastError string) string {
-	if ready {
-		return "TunnelReady"
-	}
-	if lastError == noTbotPodsMsg {
-		return "NoPods"
-	}
-	return "PodNotReady"
-}
