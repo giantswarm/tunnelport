@@ -8,3 +8,5 @@ TODO
 /dist/
 cover.out
 *.test
+.claude
+.scratch
