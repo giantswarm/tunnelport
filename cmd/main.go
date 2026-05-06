@@ -128,6 +128,24 @@ func parseFlags() flags {
 	return f
 }
 
+// leaderElectionNamespaceOrExit returns the POD_NAMESPACE env var or
+// exits cleanly with a directional error. controller-runtime accepts
+// an empty namespace and falls back to in-cluster-config detection,
+// but that's fragile (the Lease silently lands in the wrong place
+// if the in-cluster path resolves a stale namespace), so the chart
+// is the single source of truth via the downward API.
+func leaderElectionNamespaceOrExit() string {
+	ns := os.Getenv("POD_NAMESPACE")
+	if ns == "" {
+		setupLog.Error(nil, "POD_NAMESPACE is empty",
+			"hint", "the helm chart sets this via the downward API; "+
+				"set POD_NAMESPACE explicitly when running the binary "+
+				"outside the chart")
+		os.Exit(1)
+	}
+	return ns
+}
+
 // parseQuantityOrExit parses a Kubernetes resource.Quantity from a flag
 // value and exits cleanly on error. The kubebuilder default uses
 // resource.MustParse, which panics with a stack trace on a typo — useless
@@ -279,12 +297,12 @@ func main() {
 		LeaderElection:         f.enableLeaderElection,
 		LeaderElectionID:       "21e2b113.giantswarm.io",
 		// Scope the leader-election Lease to the operator's own pod
-		// namespace. Reading POD_NAMESPACE from the env relies on the
-		// Helm chart's Deployment template injecting it via the
-		// downward API; the chart change lives in a separate bundle.
-		// TODO: confirm the Helm Deployment sets POD_NAMESPACE via the
-		// downward API once that bundle lands.
-		LeaderElectionNamespace: os.Getenv("POD_NAMESPACE"),
+		// namespace. POD_NAMESPACE is injected via the downward API
+		// in helm/tunnelport/templates/deployment.yaml; out-of-chart
+		// deployments must set the env var explicitly. Empty would
+		// fall through to controller-runtime's in-cluster-config
+		// detection — fragile, so we fail fast instead.
+		LeaderElectionNamespace: leaderElectionNamespaceOrExit(),
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
 		// Manager is stopped, otherwise, this setting is unsafe. Setting this significantly

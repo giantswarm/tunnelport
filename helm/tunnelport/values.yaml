@@ -5,6 +5,21 @@
 # this one.
 installNamespace: tunnelport-system
 
+# Replica count for the operator Deployment. controller-runtime
+# leader election keeps exactly one replica reconciling; the second
+# is a hot standby that absorbs node drains and chart upgrades
+# without a reconcile gap. Set to 1 only if cluster scheduling
+# pressure forces it; pair with podDisruptionBudget.enabled=false
+# in that case so a drain isn't blocked.
+replicaCount: 2
+
+# PodDisruptionBudget for the operator. minAvailable: 1 lets one
+# replica be evicted at a time while keeping a leader-electable
+# replica online. Disable when replicaCount: 1.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
 # Operator container image. `tag` falls back to .Chart.AppVersion (which
 # app-build-suite rewrites from the git tag at release time).
 image:

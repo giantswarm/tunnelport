@@ -155,17 +155,31 @@ const (
 	mountPathTbotStorage = "/var/lib/tbot"
 	mountPathTbotTmp     = "/tmp"
 
-	// tbotDiagPort is tbot's diagnostics HTTP listener. tbot binds it on
-	// 127.0.0.1:3001 by default and exposes /readyz which only returns 200
-	// once the application-tunnel is established. Wiring k8s readiness to
-	// this endpoint makes pod-Ready mean "tunnel-up" rather than just
-	// "process-up", which is the contract status.ready relies on.
+	// tbotDiagPort is tbot's diagnostics HTTP listener. We render
+	// `diag_addr: 0.0.0.0:tbotDiagPort` in tbot.yaml (see
+	// tbot_config.go) so the listener is reachable on the pod IP.
+	// kubelet HTTP probes are issued from the kubelet process on the
+	// node — not from inside the pod netns — so a localhost-only
+	// binding is unreachable to the probe; switching to an exec probe
+	// is not viable because the tbot image is distroless and ships no
+	// shell.
 	//
-	// HTTPGet vs exec: the diag endpoint binds to localhost only, but the
-	// kubelet executes HTTP probes from the pod network namespace, so a
-	// straight HTTPGet on the named container port works without needing
-	// tbot to bind on 0.0.0.0. We pick HTTPGet over exec because no shell
-	// is required in the tbot image.
+	// /readyz returns 200 only once the application-tunnel is
+	// established, so wiring pod readiness to it makes pod-Ready mean
+	// "tunnel-up" rather than just "process-up" — the contract
+	// `status.ready` relies on.
+	//
+	// Trade-off: any pod that can route to a tbot pod's IP can reach
+	// /readyz on tbotDiagPort. Per CONTEXT.md "NetworkPolicy", the
+	// chart deliberately does NOT render a NetworkPolicy for tenant
+	// tbot pods; the rendered pods carry stable selectors
+	// (`tunnelport.giantswarm.io/role=tbot`,
+	// `tunnelport.giantswarm.io/remoteapp=<name>`) so the platform
+	// team's hand-written NetworkPolicy can target them. If tbot's
+	// diag surface ever exposes routes beyond /readyz that warrant
+	// defence-in-depth, revisit by either splitting probe vs. diag
+	// onto two listeners or shipping a default-deny NetworkPolicy
+	// alongside the rendered Deployment.
 	tbotDiagPort     int32 = 3001
 	tbotDiagPortName       = "diag"
 	tbotDiagReadyz         = "/readyz"
@@ -229,6 +243,13 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 	allowPrivilegeEscalation := false
 	readOnlyRootFilesystem := true
 
+	// tbot speaks only to the Teleport proxy and to the kube-apiserver
+	// is irrelevant to its job: it has no need for a ServiceAccount
+	// JWT mounted into the pod. Disabling automount keeps the SA token
+	// off the pod's filesystem, narrowing the blast radius of a tbot
+	// pod compromise to the Teleport credentials it already needs.
+	automountServiceAccountToken := false
+
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
@@ -268,6 +289,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 					},
 				},
 				Spec: corev1.PodSpec{
+					AutomountServiceAccountToken: &automountServiceAccountToken,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
 						RunAsUser:    &runAsUser,

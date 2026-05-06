@@ -147,13 +147,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// Snapshot the CR as it was fetched so we can build a strategic-merge
-	// status patch from the as-fetched resourceVersion. Without this, the
-	// status update path would race with mutations elsewhere in this
-	// reconcile (none today, but the contract is stable as the apply path
-	// gains pre-status writes — finalizers, labels, etc.).
-	crBefore := cr.DeepCopy()
-
 	if err := r.applyOwned(ctx, cr, renderConfigMap(cr, r.PodDefaults)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile ConfigMap: %w", err)
 	}
@@ -171,7 +164,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Status: derived from k8s-visible state only (ADR 0003). This must
 	// run last so observedGeneration only catches up after the owned
 	// objects above are applied successfully.
-	if err := r.reconcileStatus(ctx, crBefore, cr, view); err != nil {
+	if err := r.reconcileStatus(ctx, cr, view); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile status: %w", err)
 	}
 
@@ -439,21 +432,23 @@ func (r *Reconciler) mapPodToRemoteApp(_ context.Context, obj client.Object) []r
 // pure computeStatus function, write via Status subresource if changed.
 // ADR 0003 forbids reading pod logs; only Pod metadata is touched.
 //
-// The write uses `client.MergeFrom(crBefore)` rather than `Status().Update`
-// so the patch carries the as-fetched resourceVersion as its
-// optimistic-lock baseline. The previous client-side `Update` path serialised
-// the full CR including any spec mutations the API server may have applied
-// in parallel (defaulting webhooks, validating-admission updates), and a
-// stale resourceVersion would surface as a Conflict on every reconcile that
-// raced one of those mutations. A strategic-merge patch from `crBefore`
-// touches only the status subresource and is robust to those races.
+// The write uses `client.MergeFrom` against a snapshot taken right
+// before the patch, so the strategic-merge patch only carries the
+// status diff — no spec fields, no stale baseline. `MergeFrom`
+// without `MergeFromWithOptimisticLock` does not include
+// resourceVersion in the patch body, which is what we want for status:
+// any concurrent reconcile pass re-derives status from k8s-visible
+// state and converges. Snapshotting just before the assignment
+// (rather than at the top of Reconcile) keeps the diff window
+// minimal and removes the prose about racing parallel writers, which
+// MergeFrom doesn't actually guard against.
 //
 // Server-Side Apply for status is deliberately not used: status SSA requires
 // every condition list element to carry the controller's field-manager
 // imprint, and `meta.SetStatusCondition` doesn't speak that protocol — we'd
-// have to fork the helper. MergeFrom gets the race semantics we need without
-// that surgery.
-func (r *Reconciler) reconcileStatus(ctx context.Context, crBefore, cr *accessv1alpha1.RemoteApp, view tokenSecretMeta) error {
+// have to fork the helper. MergeFrom gets the convergence semantics we need
+// without that surgery.
+func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.RemoteApp, view tokenSecretMeta) error {
 	pods, err := r.listTbotPods(ctx, cr)
 	if err != nil {
 		return fmt.Errorf("list tbot pods: %w", err)
@@ -465,9 +460,9 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, crBefore, cr *accessv1
 		return nil
 	}
 
-	patch := client.MergeFrom(crBefore.DeepCopy())
+	patchBase := cr.DeepCopy()
 	cr.Status = newStatus
-	return r.Status().Patch(ctx, cr, patch)
+	return r.Status().Patch(ctx, cr, client.MergeFrom(patchBase))
 }
 
 // listTbotPods returns the pods labelled as belonging to this RemoteApp.
