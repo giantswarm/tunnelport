@@ -129,5 +129,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   curl: kind clusters, network discovery, `tctl` provisioning,
   plain `kubectl create secret` for the bot token, troubleshooting,
   and a smoke-vs-production differences table.
+- `hack/smoke/run.sh` wraps the runbook as a single-shot script
+  suitable for CI: spins up the three kind clusters in parallel,
+  builds and loads the operator image, provisions Teleport state
+  via `tctl exec`, applies the sample `RemoteApp`, waits for
+  `status.ready=true`, asserts the curl response body matches
+  `hello-from-producer`. A bash `trap` tears down every kind
+  cluster and tmp file on exit (success or failure); on failure
+  the trap also dumps pod state and tbot/kube-agent logs from all
+  three clusters. Locally verified: empty Docker to ✅ in under
+  four minutes.
+- `.circleci/config.yml` gains an `e2e-smoke` job (`machine`
+  executor — kind needs real Docker, not the `remote-docker`
+  shim) that installs kind/kubectl/helm/jq and runs
+  `hack/smoke/run.sh`. The job sits between `architect/go-build`
+  and `architect/push-to-registries`, so a red smoke blocks the
+  release path. Self-contained — no external Teleport tenant, no
+  CI secret context — which sidesteps the original HITL gate on
+  test-credentials management.
 
 [Unreleased]: https://github.com/giantswarm/tunnelport/tree/master

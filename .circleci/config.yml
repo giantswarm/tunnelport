@@ -3,6 +3,47 @@ version: 2.1
 orbs:
   architect: giantswarm/architect@7.1.0
 
+# Custom job: end-to-end smoke. Spins up three local kind clusters
+# (teleport / producer / consumer), runs the operator against a real
+# Teleport, and asserts a curl pod in the consumer reaches a sample
+# app in the producer via the operator-rendered tbot tunnel.
+#
+# Self-contained on purpose: no external Teleport tenant, no CI
+# secrets to manage. The architect orb handles build/push/release.
+# This job is the e2e signal on PRs.
+jobs:
+  e2e-smoke:
+    machine:
+      # Latest Ubuntu LTS image with Docker preinstalled. kind needs
+      # real Docker, not a remote-docker shim.
+      image: ubuntu-2404:current
+      resource_class: large
+    environment:
+      KIND_VERSION: v0.31.0
+      KUBECTL_VERSION: v1.31.0
+      HELM_VERSION: v3.16.0
+    steps:
+      - checkout
+      - run:
+          name: Install kind, kubectl, helm, jq
+          command: |
+            set -euxo pipefail
+            curl -sSLo /tmp/kind https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64
+            sudo install -m 0755 /tmp/kind /usr/local/bin/kind
+            curl -sSLo /tmp/kubectl https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl
+            sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+            curl -sSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz -C /tmp
+            sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+            sudo apt-get update -qq && sudo apt-get install -y -qq jq
+            kind version && kubectl version --client && helm version --short && jq --version
+      - run:
+          name: Run end-to-end smoke
+          # Wall-clock target: under 10 min. Match the run.sh script's
+          # internal timeouts so a stuck step fails the job, rather
+          # than CircleCI's outer no-output-timeout.
+          no_output_timeout: 12m
+          command: bash hack/smoke/run.sh
+
 workflows:
   build:
     jobs:
@@ -16,11 +57,22 @@ workflows:
             tags:
               only: /^v.*/
 
+      # End-to-end smoke. Runs on every push that triggers go-build —
+      # this gates merges to main.
+      - e2e-smoke:
+          name: e2e-smoke
+          requires:
+            - go-build
+          filters:
+            tags:
+              only: /^v.*/
+
       - architect/push-to-registries:
           context: "architect"
           name: push-to-registries
           requires:
             - go-build
+            - e2e-smoke
           filters:
             tags:
               only: /^v.*/
