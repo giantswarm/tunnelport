@@ -31,8 +31,7 @@
       "properties": {
         "image": {
           "type": "string",
-          "description": "tbot image reference. MUST be digest-pinned (`<repo>:<tag>@sha256:<hex>`) so a re-push of an upstream tag cannot silently change tbot's config schema underneath the operator.",
-          "pattern": "^[^@]+@sha256:[a-f0-9]{64}$"
+          "description": "tbot image reference. SHOULD be digest-pinned (`<repo>:<tag>@sha256:<hex>`) in production so a re-push of an upstream tag cannot silently change tbot's config schema underneath the operator. Tag-only forms are accepted to keep dev/smoke workflows simple."
         },
         "insecure": { "type": "boolean" },
         "resources": { "$ref": "#/definitions/resources" }

@@ -200,9 +200,16 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
 
 step "Delivering the bot token Secret to the consumer cluster"
 kubectl --context kind-consumer create namespace smoke >/dev/null 2>&1 || true
+# The operator's informer cache is scoped to Secrets carrying
+# `tunnelport.giantswarm.io/role=token-secret`. Without this label the
+# Secret is invisible to the operator and TokenSecretBound stays False,
+# so the smoke would never reach status.ready=true.
 kubectl --context kind-consumer -n smoke create secret generic smoke-bot-token \
   --from-literal=token="$(cat "${BOT_TOKEN_FILE}")" \
-  --dry-run=client -o yaml | kubectl --context kind-consumer apply -f - >/dev/null
+  --dry-run=client -o yaml \
+  | kubectl --context kind-consumer apply -f - >/dev/null
+kubectl --context kind-consumer -n smoke label secret smoke-bot-token \
+  tunnelport.giantswarm.io/role=token-secret --overwrite >/dev/null
 
 step "Applying the RemoteApp CR"
 sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
