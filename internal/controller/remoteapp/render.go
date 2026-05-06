@@ -33,7 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/yaml"
+
+	"gopkg.in/yaml.v3"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
@@ -373,31 +374,31 @@ func configHash(cr *accessv1alpha1.RemoteApp, cfg Config) string {
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
 //     which the pod readiness probe targets.
 type tbotFile struct {
-	Version     string `json:"version"`
-	ProxyServer string `json:"proxy_server"`
+	Version     string         `yaml:"version"`
+	ProxyServer string         `yaml:"proxy_server"`
+	Onboarding  tbotOnboarding `yaml:"onboarding"`
+	Storage     tbotStorage    `yaml:"storage"`
+	DiagAddr    string         `yaml:"diag_addr"`
+	Services    []tbotService  `yaml:"services"`
 	// Insecure uses bool+omitempty so `false` drops the key entirely —
 	// the production render must not include `insecure:` at all.
-	Insecure   bool           `json:"insecure,omitempty"`
-	Onboarding tbotOnboarding `json:"onboarding"`
-	Storage    tbotStorage    `json:"storage"`
-	DiagAddr   string         `json:"diag_addr"`
-	Services   []tbotService  `json:"services"`
+	Insecure bool `yaml:"insecure,omitempty"`
 }
 
 type tbotOnboarding struct {
-	JoinMethod string `json:"join_method"`
-	Token      string `json:"token"`
+	JoinMethod string `yaml:"join_method"`
+	Token      string `yaml:"token"`
 }
 
 type tbotStorage struct {
-	Type string `json:"type"`
-	Path string `json:"path"`
+	Type string `yaml:"type"`
+	Path string `yaml:"path"`
 }
 
 type tbotService struct {
-	Type    string `json:"type"`
-	AppName string `json:"app_name,omitempty"`
-	Listen  string `json:"listen,omitempty"`
+	Type    string `yaml:"type"`
+	AppName string `yaml:"app_name,omitempty"`
+	Listen  string `yaml:"listen,omitempty"`
 }
 
 func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg Config) string {
