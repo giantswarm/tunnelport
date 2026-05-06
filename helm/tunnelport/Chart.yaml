@@ -7,6 +7,7 @@ description: |
   Teleport-exposed app as if it were a local Service.
 type: application
 home: https://github.com/giantswarm/tunnelport
+icon: https://s.giantswarm.io/app-icons/giantswarm/1/light.svg
 sources:
   - https://github.com/giantswarm/tunnelport
 # Both `version` and `appVersion` are rewritten by app-build-suite at

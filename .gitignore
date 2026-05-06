@@ -9,3 +9,5 @@ TODO
 cover.out
 *.test
 .claude/scheduled_tasks.lock
+
+build
