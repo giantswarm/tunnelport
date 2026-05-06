@@ -11,3 +11,6 @@ cover.out
 .claude/scheduled_tasks.lock
 
 build
+
+# agent scratch space
+.scratch/
