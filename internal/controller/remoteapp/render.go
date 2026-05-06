@@ -22,6 +22,7 @@ limitations under the License.
 package remoteapp
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -374,15 +375,15 @@ func configHash(cr *accessv1alpha1.RemoteApp, cfg Config) string {
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
 //     which the pod readiness probe targets.
 type tbotFile struct {
-	Version     string         `yaml:"version"`
-	ProxyServer string         `yaml:"proxy_server"`
-	Onboarding  tbotOnboarding `yaml:"onboarding"`
-	Storage     tbotStorage    `yaml:"storage"`
-	DiagAddr    string         `yaml:"diag_addr"`
-	Services    []tbotService  `yaml:"services"`
+	Version     string `yaml:"version"`
+	ProxyServer string `yaml:"proxy_server"`
 	// Insecure uses bool+omitempty so `false` drops the key entirely —
 	// the production render must not include `insecure:` at all.
-	Insecure bool `yaml:"insecure,omitempty"`
+	Insecure   bool           `yaml:"insecure,omitempty"`
+	Onboarding tbotOnboarding `yaml:"onboarding"`
+	Storage    tbotStorage    `yaml:"storage"`
+	DiagAddr   string         `yaml:"diag_addr"`
+	Services   []tbotService  `yaml:"services"`
 }
 
 type tbotOnboarding struct {
@@ -423,11 +424,19 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg Config) string {
 			},
 		},
 	}
-	out, err := yaml.Marshal(&doc)
-	if err != nil {
-		// Fixed-shape struct of scalars/slices: yaml.Marshal cannot fail
-		// here. Panic preserves the previous "no error path" interface.
-		panic(fmt.Errorf("tbotConfig marshal: %w", err))
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	// 2-space indent matches the format tbot's existing config docs ship
+	// with; gopkg.in/yaml.v3 defaults to 4-space which is YAML-valid but
+	// drifts from the historical render and indents list items further
+	// than necessary.
+	enc.SetIndent(2)
+	if err := enc.Encode(&doc); err != nil {
+		// Fixed-shape struct of scalars/slices: encode cannot fail here.
+		panic(fmt.Errorf("tbotConfig encode: %w", err))
 	}
-	return string(out)
+	if err := enc.Close(); err != nil {
+		panic(fmt.Errorf("tbotConfig close: %w", err))
+	}
+	return buf.String()
 }
