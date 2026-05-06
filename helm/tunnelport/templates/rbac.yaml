@@ -49,6 +49,20 @@ rules:
   - list
   - watch
 
+# Pod metadata — read-only. Slice 4's status loop derives
+# `status.lastError` from pod Phase / ContainerStatuses / RestartCount /
+# last termination reason and watches Pods labelled with the canonical
+# `tunnelport.giantswarm.io/remoteapp` label so status refreshes on pod
+# events. ADR 0003 forbids `pods/log`; we deliberately do not list it.
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+
 # Owned objects rendered in the CR's namespace. The operator reconciles
 # RemoteApps cluster-wide, so these have to be cluster-scoped via the
 # ClusterRole — but the operator only ever writes them in the namespace

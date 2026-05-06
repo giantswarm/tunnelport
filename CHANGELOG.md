@@ -108,6 +108,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--tbot-insecure` flag on the operator manager (`tbot.insecure`
+  Helm value) renders tbot configs with `insecure: true` so pods
+  skip Teleport proxy TLS verification. Development-only; required
+  for kind-based smoke tests where the proxy is reached by IP and
+  the cert SAN does not match. Off by default; a regression test in
+  `render_test.go` asserts the line never appears in a default
+  render.
+- Chart `ClusterRole` now grants `get;list;watch` on `pods`. Slice 4
+  added the Pod watch on the Go side; the chart RBAC was missed in
+  slice 6 and the operator hit `pods is forbidden` at startup until
+  patched.
 - Smoke-test scaffold under `hack/smoke/` covering a three-cluster
   kind topology (teleport / producer / consumer): kind configs,
   teleport-cluster + teleport-kube-agent Helm values pinned to

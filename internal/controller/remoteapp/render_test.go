@@ -132,6 +132,37 @@ func keys(m map[string]string) []string {
 	return out
 }
 
+// TestRenderConfigMap_Insecure verifies that `Config.Insecure` adds
+// `insecure: true` at the top level of the rendered tbot YAML so the
+// pod skips Teleport proxy TLS verification. Off by default — the
+// regression guard in the main config-content test already asserts
+// the line is absent when not set.
+func TestRenderConfigMap_Insecure(t *testing.T) {
+	cr := fixtureRemoteApp()
+	cfg := fixtureConfig()
+	cfg.Insecure = true
+
+	cm := renderConfigMap(cr, cfg)
+	yaml := cm.Data["tbot.yaml"]
+
+	if !strings.Contains(yaml, "insecure: true") {
+		t.Errorf("Config.Insecure=true should add `insecure: true` to tbot.yaml\n---\n%s\n---", yaml)
+	}
+}
+
+// TestRenderConfigMap_NotInsecureByDefault is the explicit regression
+// guard against the insecure flag leaking into production renders.
+func TestRenderConfigMap_NotInsecureByDefault(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	cm := renderConfigMap(cr, fixtureConfig())
+	yaml := cm.Data["tbot.yaml"]
+
+	if strings.Contains(yaml, "insecure:") {
+		t.Errorf("default Config must not render `insecure:` — it would disable TLS verification in production\n---\n%s\n---", yaml)
+	}
+}
+
 func TestRenderDeployment_DefaultsAndStrategy(t *testing.T) {
 	cr := fixtureRemoteApp()
 

@@ -27,7 +27,9 @@ spec:
             - --silent
             - --show-error
             - --fail-with-body
-            - --retry=20
-            - --retry-delay=3
+            - --retry
+            - "20"
+            - --retry-delay
+            - "3"
             - --retry-connrefused
             - http://smoke-app.smoke.svc.cluster.local:8080

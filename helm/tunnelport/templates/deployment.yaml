@@ -46,6 +46,9 @@ spec:
         - --tbot-memory-request={{ .Values.tbot.resources.requests.memory }}
         - --tbot-cpu-limit={{ .Values.tbot.resources.limits.cpu }}
         - --tbot-memory-limit={{ .Values.tbot.resources.limits.memory }}
+        {{- if .Values.tbot.insecure }}
+        - --tbot-insecure=true
+        {{- end }}
         ports:
         - name: metrics
           containerPort: {{ .Values.ports.metrics }}

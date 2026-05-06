@@ -55,53 +55,76 @@ kind create cluster --config hack/smoke/teleport/kind.yaml
 helm repo add teleport https://charts.releases.teleport.dev
 helm repo update
 
+# First install — uses the placeholder publicAddr in helm-values.yaml.
+# We come back in step 2 with the real proxy address.
 helm --kube-context kind-teleport upgrade --install teleport-cluster \
-  teleport/teleport-cluster --version 18.7.3 \
+  teleport/teleport-cluster --version 18.4.0 \
   --create-namespace --namespace teleport \
-  --values hack/smoke/teleport/helm-values.yaml
-
-kubectl --context kind-teleport -n teleport rollout status \
-  statefulset/teleport-cluster --timeout=5m
+  --values hack/smoke/teleport/helm-values.yaml \
+  --wait --timeout 5m
 ```
 
-What's happening: the chart deploys a single-replica Teleport auth +
-proxy with `proxyListenerMode=multiplex`, so every Teleport protocol
-shares port 443 on the cluster's pod IP. The chart generates its own
-self-signed CA on first install — that CA is private to this kind
-cluster, which is why the producer and consumer connect with
-`--insecure` later.
+What's happening: the chart deploys split auth + proxy `Deployments`
+with `proxyListenerMode=multiplex`, so every Teleport protocol shares
+one TLS port on the proxy pod. The chart generates its own self-signed
+CA on first install — that CA is private to this kind cluster, which
+is why the consumer's tbot (`--tbot-insecure=true`) and the producer's
+kube-agent (`insecureSkipProxyTLSVerify: true`) skip TLS verification
+in step 5+.
 
-## 2. Network setup: discover the proxy address
+The proxy is exposed via a `NodePort` Service so peer kind clusters
+can reach it on the kind-teleport node container's IP within the
+`kind` Docker network.
 
-All three kind clusters share the `kind` Docker network. The producer
-and consumer reach the Teleport proxy by the teleport cluster's
-control-plane node IP within that network.
+## 2. Network setup: discover the proxy address, then re-apply with publicAddr
+
+The proxy advertises a `publicAddr` to clients for reverse-tunnel
+reconnects. Without overriding it, the proxy hands out
+`smoke.tunnelport.local:443` — a name peer kind clusters cannot
+resolve — and kube-agent / tbot fail with DNS errors. We discover the
+real address and re-apply the chart with it.
 
 ```bash
-TELEPORT_PROXY_IP=$(docker inspect kind-teleport-control-plane \
+# Discover the kind container's IP on the `kind` Docker network.
+TELEPORT_PROXY_IP=$(docker inspect teleport-control-plane \
   --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
 
-# Used by both the producer's kube-agent values and the consumer's
-# RemoteApp CR. Format: "<ip>:443".
-TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:443"
+# The proxy's NodePort is auto-assigned by Kubernetes; read it back.
+NODEPORT=$(kubectl --context kind-teleport -n teleport get svc \
+  teleport-cluster -o jsonpath='{.spec.ports[0].nodePort}')
+
+TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${NODEPORT}"
 echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
+
+# Re-apply the chart with publicAddr set to the discovered address.
+sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
+  hack/smoke/teleport/helm-values.yaml > /tmp/teleport-values.yaml
+
+helm --kube-context kind-teleport upgrade teleport-cluster \
+  teleport/teleport-cluster --version 18.4.0 \
+  --namespace teleport --values /tmp/teleport-values.yaml \
+  --wait --timeout 3m
 ```
 
-Keep that env var in scope; later steps reference it in `sed` calls.
-If you start a new shell, re-run the `docker inspect` command — the
-IP is stable for the lifetime of the kind cluster but does not survive
-a recreate.
+Keep `TELEPORT_PROXY_ADDR` in scope; later steps reference it in
+`sed` calls. If you start a new shell, re-run the `docker inspect` +
+`kubectl get svc` pair — the IP and NodePort are stable for the
+lifetime of the kind cluster but do not survive a recreate.
 
 ## 3. Provision the producer agent token
 
 ```bash
-# Open a shell on the auth pod and create a Node+App join token. The
-# token value is captured back to the host filesystem.
-kubectl --context kind-teleport -n teleport exec -i \
-  statefulset/teleport-cluster -- \
+# Find the auth pod (the chart splits auth and proxy into separate
+# Deployments; only the auth pod has tctl wired in).
+AUTH_POD=$(kubectl --context kind-teleport -n teleport get pods \
+  -l app.kubernetes.io/component=auth \
+  -o jsonpath='{.items[0].metadata.name}')
+
+# Create a Node+App join token; capture the token string for step 5.
+kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
   tctl tokens add --type=node,app --format=json \
-  | tee /tmp/producer-agent-token.json \
-  | jq -r .token > /tmp/producer-agent-token
+  > /tmp/producer-agent-token.json
+jq -r .token /tmp/producer-agent-token.json > /tmp/producer-agent-token
 
 cat /tmp/producer-agent-token   # sanity: a hex string
 ```
@@ -113,31 +136,27 @@ declarative path, replace `REPLACE_WITH_PRODUCER_AGENT_TOKEN` in
 `tokens.yaml` with a value of your own and `tctl create -f` it
 instead.
 
-## 4. Provision the bot, role, and bot token
+## 4. Provision the role, bot, and bot token
 
 ```bash
 # 4a. Role (allows the bot to tunnel to apps labelled app-name=smoke-app):
-kubectl --context kind-teleport -n teleport exec -i \
-  statefulset/teleport-cluster -- tctl create -f - \
-  < hack/smoke/teleport/role.yaml
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/role.yaml
 
-# 4b. Bot identity:
-kubectl --context kind-teleport -n teleport exec -i \
-  statefulset/teleport-cluster -- tctl create -f - \
-  < hack/smoke/teleport/bot.yaml
-
-# 4c. Static join token bound to the bot. Generated server-side like
-#     the agent token above:
-kubectl --context kind-teleport -n teleport exec -i \
-  statefulset/teleport-cluster -- \
-  tctl bots tokens add smoke-bot --format=json \
-  | tee /tmp/smoke-bot-token.json \
-  | jq -r .token > /tmp/smoke-bot-token
+# 4b. Bot identity AND its static join token in a single call.
+#     `tctl bots add` returns the token in the JSON output as `token_id`.
+#     This is the v18 idiom — there is no `tctl bots tokens add`
+#     subcommand, and `tctl tokens add --type=bot` does not accept a
+#     `--bot-name` flag.
+kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+  tctl bots add smoke-bot --roles=smoke-app-tunnel --format=json \
+  > /tmp/smoke-bot-token.json
+jq -r .token_id /tmp/smoke-bot-token.json > /tmp/smoke-bot-token
 
 cat /tmp/smoke-bot-token   # sanity: a hex string
 ```
 
-`tctl bots tokens add` produces a token whose `roles: [Bot]` and
+`tctl bots add` produces a token whose `roles: [Bot]` and
 `bot_name: smoke-bot` are wired correctly without you authoring the
 YAML.
 
@@ -157,20 +176,20 @@ sed \
   > /tmp/producer-kube-agent-values.yaml
 
 helm --kube-context kind-producer upgrade --install teleport-kube-agent \
-  teleport/teleport-kube-agent --version 18.7.3 \
+  teleport/teleport-kube-agent --version 18.4.0 \
   --create-namespace --namespace smoke \
-  --values /tmp/producer-kube-agent-values.yaml
-
-kubectl --context kind-producer -n smoke rollout status \
-  statefulset/teleport-kube-agent --timeout=5m
+  --values /tmp/producer-kube-agent-values.yaml \
+  --wait --timeout 3m
 ```
 
-Verify the registration on the Teleport side:
+Verify the app registered with Teleport. The kube-agent registers via
+the dynamic `app_servers` registry (heartbeats), not the static `apps`
+registry — so use `tctl get app_servers`, not `tctl get apps`:
 
 ```bash
-kubectl --context kind-teleport -n teleport exec -i \
-  statefulset/teleport-cluster -- tctl get apps
-# Should show: smoke-app   http://http-echo.smoke.svc.cluster.local:5678
+kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+  tctl get app_servers
+# Should show: kind: app_server / name: smoke-app / uri: http://http-echo.smoke...
 ```
 
 ## 6. Bring up the consumer cluster
@@ -179,24 +198,43 @@ kubectl --context kind-teleport -n teleport exec -i \
 kind create cluster --config hack/smoke/consumer/kind.yaml
 ```
 
-### 6a. Install the operator
+### 6a. Build and load the operator image
+
+The chart references `gsoci.azurecr.io/giantswarm/tunnelport:<tag>` by
+default, but for local smoke runs you want the code in this checkout.
+Build a local image and load it into the consumer kind cluster:
 
 ```bash
-# Use the chart from this repo:
+make docker-build IMG=tunnelport:smoke
+kind load docker-image tunnelport:smoke --name consumer
+```
+
+### 6b. Install the operator
+
+`tbot.insecure=true` is critical: the kind-deployed Teleport proxy
+serves a cert with SAN `smoke.tunnelport.local`, but tbot reaches it
+by IP. Without this flag the rendered tbot pod cannot pass TLS
+verification and will crashloop. Never set `tbot.insecure=true` in
+production.
+
+```bash
 helm --kube-context kind-consumer upgrade --install tunnelport \
   ./helm/tunnelport \
   --create-namespace --namespace tunnelport-system \
-  --set image.repository=gsoci.azurecr.io/giantswarm/tunnelport \
-  --set tbot.image=public.ecr.aws/gravitational/tbot-distroless:18.7.3
-
-kubectl --context kind-consumer -n tunnelport-system rollout status \
-  deployment/tunnelport --timeout=2m
+  --set image.registry=docker.io \
+  --set image.name=library/tunnelport \
+  --set image.tag=smoke \
+  --set image.pullPolicy=IfNotPresent \
+  --set imagePullSecret="" \
+  --set tbot.image=public.ecr.aws/gravitational/tbot-distroless:18.4.0 \
+  --set tbot.insecure=true \
+  --wait --timeout 2m
 ```
 
 The `tbot.image` value flows through to the rendered tbot Deployment
-in step 6c.
+in step 6d.
 
-### 6b. Deliver the bot token Secret
+### 6c. Deliver the bot token Secret
 
 For the smoke environment we use plain `kubectl create secret`. In
 production this is replaced by sealed-secrets / external-secrets-
@@ -212,7 +250,7 @@ Alternative: edit `hack/smoke/consumer/token-secret.yaml.template`,
 replacing `REPLACE_WITH_SMOKE_BOT_TOKEN` with the literal token, and
 `kubectl apply -f` it.
 
-### 6c. Apply the RemoteApp CR
+### 6d. Apply the RemoteApp CR
 
 ```bash
 sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
@@ -272,16 +310,28 @@ kubectl --context kind-consumer -n smoke logs -l tunnelport.giantswarm.io/role=t
 
 The most common smoke-test failures:
 
-- *"trust dial: tls: failed to verify certificate"* — the consumer's
-  tbot is hitting a different Teleport proxy than the producer. Check
-  that `TELEPORT_PROXY_ADDR` in step 6c matches step 5. If you
-  recreated the teleport kind cluster, the IP changed; redo step 2.
+- *"trust dial: tls: failed to verify certificate"* — `tbot.insecure`
+  is unset in step 6b's `helm install`. Re-run with `--set
+  tbot.insecure=true`. (The kube-agent has the equivalent
+  `insecureSkipProxyTLSVerify: true` baked into its values file.)
+- *"failed to dial: dial tcp: lookup smoke.tunnelport.local"* — step 2
+  was skipped or its `helm upgrade` did not pick up the discovered
+  proxy address. The proxy is still advertising
+  `smoke.tunnelport.local:443` as `publicAddr`. Re-run step 2,
+  observing that `/tmp/teleport-values.yaml` contains the discovered
+  IP+nodeport, then `kubectl rollout restart` the kube-agent and
+  consumer's tbot Deployment.
 - *"role smoke-app-tunnel not found"* — step 4a was skipped or the
   role file failed to apply. `tctl get roles | grep smoke` on the
-  Teleport pod.
+  auth pod.
 - *"app smoke-app not found"* — step 5's kube-agent didn't register.
-  `tctl get apps` on the Teleport pod; if empty, check the kube-agent
-  pod logs in the producer cluster.
+  Use `tctl get app_servers` (NOT `tctl get apps`); the dynamic
+  app_service registers via heartbeats, not as a static `apps`
+  resource. If empty, check the kube-agent pod logs in the producer
+  cluster.
+- *"pods is forbidden"* in operator logs — the chart RBAC was
+  installed before the chart's `pods` rule was committed. `helm
+  upgrade` from the current chart in this repo and the error clears.
 
 **`status.conditions[TokenSecretBound]: false`.**
 The operator can't find the Secret or the named key. Confirm:
@@ -292,13 +342,13 @@ kubectl --context kind-consumer -n smoke get secret smoke-bot-token \
 ```
 
 You should see the first 8 hex chars of the token. If the field is
-empty, redo step 6b.
+empty, redo step 6c.
 
 **The curl Job fails with `Connection refused`.**
 The tbot pod is up but the tunnel isn't established. The Job's
 `--retry-connrefused` should ride this out; if it doesn't, the bot
 token in the Secret doesn't match the one Teleport issued. The
-`smoke-bot-token` files written in step 4c and the Secret in step 6b
+`smoke-bot-token` files written in step 4 and the Secret in step 6c
 must be the same string.
 
 ## Production differences

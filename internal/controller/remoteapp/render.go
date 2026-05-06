@@ -73,6 +73,14 @@ type Config struct {
 
 	// Resources is the requests/limits applied to the tbot container.
 	Resources corev1.ResourceRequirements
+
+	// Insecure makes every rendered tbot pod skip Teleport proxy TLS
+	// verification. Intended for development environments where the
+	// proxy serves a cert whose SAN does not match the address tbot
+	// connects to (e.g. kind-based smoke tests reaching the proxy by
+	// IP). Adds `insecure: true` to the rendered tbot config. Never
+	// set this in production.
+	Insecure bool
 }
 
 // renderScheme is a private scheme used by setOwnerRef so unit tests can
@@ -107,7 +115,7 @@ func canonicalLabels(cr *accessv1alpha1.RemoteApp) map[string]string {
 // renderConfigMap returns the ConfigMap holding tbot.yaml — tbot's
 // application-tunnel configuration for this RemoteApp. The token Secret is
 // referenced by name only; its contents are never read by the operator.
-func renderConfigMap(cr *accessv1alpha1.RemoteApp, _ Config) *corev1.ConfigMap {
+func renderConfigMap(cr *accessv1alpha1.RemoteApp, cfg Config) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
@@ -115,7 +123,7 @@ func renderConfigMap(cr *accessv1alpha1.RemoteApp, _ Config) *corev1.ConfigMap {
 			Labels:    canonicalLabels(cr),
 		},
 		Data: map[string]string{
-			"tbot.yaml": tbotConfig(cr),
+			"tbot.yaml": tbotConfig(cr, cfg),
 		},
 	}
 }
@@ -206,7 +214,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 						// or spec.proxyAddr change — which only updates the
 						// ConfigMap data, not the pod template directly —
 						// still rolls the Deployment via pod-template-hash.
-						AnnotationConfigHash: configHash(cr),
+						AnnotationConfigHash: configHash(cr, cfg),
 						// resourceVersion of the tokenRef Secret. Stamped
 						// every reconcile; a rotation flips the value, the
 						// pod-template-hash changes, and the Deployment
@@ -343,8 +351,8 @@ func renderService(cr *accessv1alpha1.RemoteApp, _ Config) *corev1.Service {
 // ConfigMap changes. The hash is the digest of the rendered YAML, not of
 // the Spec, so additions to the rendering (e.g. new tbot fields) trigger a
 // roll iff they actually change the on-disk config.
-func configHash(cr *accessv1alpha1.RemoteApp) string {
-	sum := sha256.Sum256([]byte(tbotConfig(cr)))
+func configHash(cr *accessv1alpha1.RemoteApp, cfg Config) string {
+	sum := sha256.Sum256([]byte(tbotConfig(cr, cfg)))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -364,13 +372,18 @@ func configHash(cr *accessv1alpha1.RemoteApp) string {
 //     `/readyz`, which slice 4's pod readiness probe targets. Without
 //     this field tbot does not bind the diag listener and pod-Ready
 //     would never flip true.
-func tbotConfig(cr *accessv1alpha1.RemoteApp) string {
+func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg Config) string {
 	// Path matches the volumeMount used in renderDeployment.
 	tokenPath := fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key)
 
+	insecureLine := ""
+	if cfg.Insecure {
+		insecureLine = "insecure: true\n"
+	}
+
 	return fmt.Sprintf(`version: v2
 proxy_server: %[1]s
-onboarding:
+%[7]sonboarding:
   join_method: token
   token: %[2]s
 storage:
@@ -387,5 +400,7 @@ services:
 		cr.Spec.AppName,
 		cr.Spec.Port,
 		tbotDiagPort,
+		"", // %[6]s reserved
+		insecureLine,
 	)
 }
