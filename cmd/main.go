@@ -25,6 +25,8 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -36,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
+	remoteappctrl "github.com/giantswarm/tunnelport/internal/controller/remoteapp"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -61,6 +64,22 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
+
+	// Operator-level config plumbed to the reconciler. Defaults are sane
+	// for development; slice 6 will surface these as Helm values.
+	var tbotImage string
+	var tbotCPURequest, tbotMemRequest string
+	var tbotCPULimit, tbotMemLimit string
+	flag.StringVar(&tbotImage, "tbot-image", "public.ecr.aws/gravitational/teleport-distroless:16",
+		"Container image for the tbot sidecar. The same image is used for every rendered tbot Deployment.")
+	flag.StringVar(&tbotCPURequest, "tbot-cpu-request", "50m",
+		"CPU request applied to the tbot container.")
+	flag.StringVar(&tbotMemRequest, "tbot-memory-request", "64Mi",
+		"Memory request applied to the tbot container.")
+	flag.StringVar(&tbotCPULimit, "tbot-cpu-limit", "200m",
+		"CPU limit applied to the tbot container.")
+	flag.StringVar(&tbotMemLimit, "tbot-memory-limit", "256Mi",
+		"Memory limit applied to the tbot container.")
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -177,6 +196,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := (&remoteappctrl.Reconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Config: remoteappctrl.Config{
+			TbotImage: tbotImage,
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse(tbotCPURequest),
+					corev1.ResourceMemory: resource.MustParse(tbotMemRequest),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse(tbotCPULimit),
+					corev1.ResourceMemory: resource.MustParse(tbotMemLimit),
+				},
+			},
+		},
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to set up RemoteApp controller")
+		os.Exit(1)
+	}
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

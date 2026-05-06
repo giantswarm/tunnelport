@@ -1,11 +1,53 @@
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  labels:
-    app.kubernetes.io/name: tunnelport
-    app.kubernetes.io/managed-by: kustomize
   name: manager-role
 rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

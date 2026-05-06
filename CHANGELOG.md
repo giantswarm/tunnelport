@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Replaced legacy microkit/operatorkit scaffold with kubebuilder v4 layout
   (`cmd/main.go`, `api/v1alpha1/`, `config/{crd,rbac,samples,...}`, `PROJECT`).
+- ClusterRole `manager-role` is now generated entirely from kubebuilder
+  markers on the `remoteapp` controller package; the previous hand-written
+  `pods` rule is removed (ADR 0003 forbids `pods/log` and the operator
+  doesn't need pod read access at this point).
 
 ### Added
 
@@ -23,5 +27,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - envtest-driven validation suite under `internal/apivalidation/` covering
   acceptance, per-field rejection, status subresource generation semantics,
   and sample-CR drift.
+- `RemoteApp` reconciler under `internal/controller/remoteapp/` that renders
+  three owned objects in the CR's namespace: a `ConfigMap` carrying the tbot
+  `application-tunnel` config, a `Deployment` (replicas defaults to 1,
+  RollingUpdate `maxSurge: 1, maxUnavailable: 0`, pod template mounts the
+  ConfigMap, the token Secret by name only, and an `emptyDir` for tbot's
+  destination dir per ADR 0002), and a `ClusterIP` `Service`. tbot image
+  and resource requests/limits flow from operator config (`--tbot-image`
+  and `--tbot-{cpu,memory}-{request,limit}` flags on the manager) — slice
+  6 will plumb these from Helm values. Owner references on all three
+  objects carry `Controller=true` and `BlockOwnerDeletion=true`. The pod
+  template stamps `tunnelport.giantswarm.io/config-hash` so spec changes
+  that affect the ConfigMap (port, appName, proxyAddr) trigger a rolling
+  update; replicas-only changes scale without rolling.
 
 [Unreleased]: https://github.com/giantswarm/tunnelport/tree/master
