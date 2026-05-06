@@ -1,0 +1,197 @@
+# tunnelport
+
+Helm chart that installs the [tunnelport](https://github.com/giantswarm/tunnelport)
+operator on a **consumer management cluster** (the MC that wants to
+reach Teleport-exposed apps as local Services).
+
+The operator watches `RemoteApp` CRs cluster-wide and renders a tbot
+`Deployment` + `Service` + `ConfigMap` per CR, in the CR's namespace.
+See [`CONTEXT.md`](https://github.com/giantswarm/tunnelport/blob/main/CONTEXT.md)
+for the design rationale.
+
+## Install
+
+```sh
+helm install tunnelport oci://gsoci.azurecr.io/control-plane-catalog/tunnelport \
+  --namespace tunnelport-system --create-namespace
+```
+
+The default values run the operator with leader-election, a default-deny
+NetworkPolicy on the manager pod, and the `gsoci-pull-secret`
+`imagePullSecrets` reference (the cluster-managed pull-secret for
+`gsoci.azurecr.io`).
+
+## Values surface (top-level keys only — see `values.yaml` for the full set)
+
+| Key | Default | Notes |
+|---|---|---|
+| `installNamespace` | `tunnelport-system` | Where the operator pod lives. |
+| `image.registry` / `image.name` / `image.tag` | `gsoci.azurecr.io/giantswarm/tunnelport`, tag falls back to `.Chart.AppVersion` | Operator container image. |
+| `imagePullSecret` | `gsoci-pull-secret` | The cluster-managed pull-secret for `gsoci.azurecr.io`. The chart **references** it by name; the Secret itself must be provisioned out-of-band. |
+| `resources` | 50m/64Mi → 200m/256Mi | Operator container requests/limits. |
+| `tbot.image` | `public.ecr.aws/gravitational/teleport-distroless:16` | Single global tbot image for **every** rendered `RemoteApp` Deployment. RemoteApp.spec deliberately has no per-CR override. |
+| `tbot.resources.requests` / `tbot.resources.limits` | 50m/64Mi → 200m/256Mi | Cluster-wide defaults for every rendered tbot pod. Same no-per-CR-override rule. |
+| `crds.install` | `true` | Set to `false` if the CRD is delivered by a separate bootstrap chart. The chart's CRD bundle carries `helm.sh/resource-policy: keep`, so live `RemoteApp`s survive `helm uninstall`. |
+| `networkPolicy.enabled` | `true` | The operator-pod NetworkPolicy. See "NetworkPolicy responsibilities" below for the **rendered tbot pod** policy story (different concern). |
+
+`tbot.image` and `tbot.resources` flow into the operator manager's CLI
+flags (`--tbot-image`, `--tbot-cpu-request`, `--tbot-memory-request`,
+`--tbot-cpu-limit`, `--tbot-memory-limit`) at start-up. The reconciler
+reads them once and stamps them onto every tbot Deployment it renders.
+
+---
+
+## What this chart deliberately does NOT do
+
+Four operational concerns are explicitly **outside the operator's
+remit**. They each need a separate decision per consumer MC.
+
+### 1. RoleBindings granting `RemoteApp` creation
+
+The chart ships **no `Role` / `RoleBinding` granting create-`RemoteApp`
+to anyone**. Who is allowed to author `RemoteApp` CRs is a per-cluster
+trust decision that has nothing to do with the operator: in some
+clusters only the platform team should write them, in others a tenant
+namespace might be permitted, in others a GitOps controller's service
+account does it.
+
+The platform team layers their own RBAC on top of the chart. The
+operator's own ServiceAccount **only** reads `RemoteApp`s; it never
+creates them.
+
+### 2. NetworkPolicy for the rendered tbot pods
+
+The operator renders a tbot `Deployment` + `Service` per `RemoteApp` in
+the CR's namespace. The chart **does not** render a `NetworkPolicy`
+covering those tbot pods — enforcement varies by CNI, baseline policies
+vary by org, and a chart-generated policy would interact awkwardly with
+whatever the platform team already runs.
+
+The platform team writes the tbot pod policy themselves. The rendered
+tbot pods carry stable selectors so a hand-written `NetworkPolicy` can
+target them:
+
+| Label | Value |
+|---|---|
+| `tunnelport.giantswarm.io/role` | `tbot` |
+| `tunnelport.giantswarm.io/remoteapp` | `<RemoteApp name>` |
+
+A typical policy allows:
+
+* **Egress to `proxyAddr:443`** — the Teleport proxy host on Central.
+  Without this the tbot can't reach Teleport.
+* **Ingress from the approved caller pods** to `Service` port =
+  `RemoteApp.spec.port`. This is the "who is allowed to use this
+  tunnel" decision, made per-app by the platform team.
+
+### 3. Token Secret delivery
+
+`RemoteApp.spec.tokenRef` references a `Secret` carrying the static
+join token bound to that `RemoteApp`'s `TeleportBot`. The chart **does
+not create, copy, or template** that Secret.
+
+The expected flow on the consumer MC:
+
+1. The platform team produces the join-token value out of band (e.g.
+   `tctl tokens add ...` against Central, or a Teleport-Operator-
+   managed `TeleportBot` + `tctl bots tokens` step).
+2. The token value is stored encrypted in Git via a sealing/sync
+   mechanism (sealed-secrets, sops, External Secrets Operator) and
+   delivered into the same namespace as the `RemoteApp` CR.
+3. The `RemoteApp.spec.tokenRef.{name,key}` references the resulting
+   `Secret`; the operator mounts it into the tbot pod by **name only**.
+
+The operator never reads the Secret's contents — it only sees
+`(name, key, resourceVersion)`. RBAC grants `get;list;watch` on
+`secrets` cluster-wide because there is no Kubernetes verb that
+distinguishes metadata-only access from data access on Secrets; the
+"never read data" property is enforced by code review and maintained by
+the operator's reconciler test suite, not by RBAC. ADR 0001 records
+this trade-off.
+
+If the Secret is missing when the CR is created, the rendered tbot
+pod stays `Pending` (volume mount fails) and
+`status.TokenSecretBound = false` — handling the GitOps-race case
+where the CR arrives before the Secret.
+
+### 4. Central-side preconditions per `RemoteApp`
+
+For each `RemoteApp` you deploy on the consumer MC, the platform team
+must produce on **Central** (typically via the upstream Teleport
+Operator, `TeleportBot` + `TeleportRole` + `TeleportToken` CRs):
+
+* a **`TeleportBot`** dedicated to this one app — one bot per
+  `RemoteApp`, so a leaked tbot identity reaches only that one app
+  (per-app blast-radius isolation, ADR 0001);
+* a **role** assigned to that bot whose `app_labels` selector matches
+  exactly the one Teleport `App` `RemoteApp.spec.appName` refers to,
+  and nothing else;
+* a **static join token** bound to that bot, whose value is what ends
+  up in the `tokenRef` Secret on the consumer MC.
+
+If any of those is missing or mis-scoped, the tbot pod will fail to
+join Central; the operator surfaces this via
+`status.lastError` (k8s-visible state only — see ADR 0003), and the
+platform engineer runs `kubectl logs` on the tbot pod themselves to see
+the join error.
+
+---
+
+## NetworkPolicy responsibilities
+
+Two distinct policy domains:
+
+| Concern | Owner | Where |
+|---|---|---|
+| The **operator's own manager pod** | This chart | `templates/networkpolicy.yaml`, gated on `networkPolicy.enabled` (default `true`). Default-deny with explicit allow rules for kube-apiserver egress, DNS egress, and metrics ingress. Operator hygiene per GS convention. |
+| The **rendered tbot pods** (one Deployment per `RemoteApp`) | Platform team, hand-written | Selector targets the stable labels listed in §2 above. Egress to `proxyAddr:443`, ingress from approved caller pods. |
+
+The chart's NetworkPolicy is *operator hygiene*, not tenant policy.
+
+---
+
+## Pod-churn caveat (per ADR 0002)
+
+tbot's destination directory is an `emptyDir`, not a PVC. Every tbot
+pod restart triggers a fresh join with the static token. **Rolling many
+`RemoteApp` Deployments simultaneously** — chart upgrades that bump
+`tbot.image`, MC-wide node rolls, large-fleet redeploys — **may briefly
+hit Central's join-rate limits** while the new pods establish their
+identities. tbot retries join with backoff; the disturbance is bounded
+but visible.
+
+If join-rate pressure becomes a recurring problem, the operator can
+switch to `StatefulSet` + `volumeClaimTemplates` to persist the
+renewable cert across restarts. `RemoteApp.spec` exposes none of this,
+so the migration is an internal operator change.
+
+---
+
+## Operator RBAC summary
+
+Generated from `templates/rbac.yaml`:
+
+| Resource | Verbs | Notes |
+|---|---|---|
+| `access.giantswarm.io/remoteapps` | `get;list;watch` | Spec is read-only. |
+| `access.giantswarm.io/remoteapps/status` | `get;update;patch` | Slice 4 populates this. |
+| `access.giantswarm.io/remoteapps/finalizers` | `update` | Reserved for future cleanup hooks. |
+| `secrets` | `get;list;watch` | **Metadata-only by code** — see "Token Secret delivery". No `create`/`update`/`patch`/`delete`. |
+| `apps/deployments` | `get;list;watch;create;update;patch;delete` | Owned objects. |
+| `services`, `configmaps` | `get;list;watch;create;update;patch;delete` | Owned objects. |
+| `coordination.k8s.io/leases` | full | Leader election. |
+| `events` | `create;patch` | Status companion. |
+
+**Deliberately not granted:**
+
+* `pods/log` — ADR 0003. The operator never reads tbot container logs.
+* `secrets` write verbs — ADR 0001. Token Secrets are delivered
+  out-of-band; the operator neither produces nor mutates them.
+
+---
+
+## Generated CRD bundle
+
+`templates/crds.yml` is regenerated from `config/crd/bases/` by
+`make update-helm-crds`. CI verifies the chart copy matches the
+controller-gen output. Do not hand-edit `templates/crds.yml`.

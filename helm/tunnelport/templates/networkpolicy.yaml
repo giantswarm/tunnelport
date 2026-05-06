@@ -1,0 +1,55 @@
+{{- if .Values.networkPolicy.enabled -}}
+# NetworkPolicy for the operator's *own* manager pod. Per GS convention
+# for kubebuilder operators: default-deny with explicit allow rules for
+# kube-apiserver egress (so the controller can talk to the API) and
+# metrics ingress (so Prometheus can scrape).
+#
+# This NetworkPolicy is operator hygiene only. The chart deliberately
+# does NOT render a NetworkPolicy for the *rendered tbot pods* — those
+# are tenant resources and platform teams own that policy. See
+# README.md "NetworkPolicy responsibilities" for the canonical labels
+# their hand-written policy should target.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "tunnelport.selectorLabels" . | nindent 6 }}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow Prometheus to scrape :{{ .Values.ports.metrics }} and the
+  # health probes on :{{ .Values.ports.health }}. Caller selector is
+  # left wide-open here because Prometheus deployments vary across MCs;
+  # tighten with a values overlay in clusters that ship a stable
+  # monitoring namespace.
+  - ports:
+    - port: {{ .Values.ports.metrics }}
+      protocol: TCP
+    - port: {{ .Values.ports.health }}
+      protocol: TCP
+  egress:
+  # DNS — needed to resolve the kube-apiserver ClusterIP and any
+  # external addresses the manager is configured to reach.
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+  # Kube-apiserver. The CIDR is configurable; default 0.0.0.0/0 is
+  # deliberately permissive — see values.yaml for the rationale.
+  - to:
+    - ipBlock:
+        cidr: {{ .Values.networkPolicy.apiServerCIDR }}
+    ports:
+    - port: 443
+      protocol: TCP
+    - port: 6443
+      protocol: TCP
+{{- end }}

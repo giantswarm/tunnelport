@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markers on the `remoteapp` controller package; the previous hand-written
   `pods` rule is removed (ADR 0003 forbids `pods/log` and the operator
   doesn't need pod read access at this point).
+- Replaced the legacy `helm/template-operator/` boilerplate scaffold (PSPs,
+  unrelated Secret/Service templates) with a purpose-built `helm/tunnelport/`
+  chart.
 
 ### Added
 
@@ -40,5 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template stamps `tunnelport.giantswarm.io/config-hash` so spec changes
   that affect the ConfigMap (port, appName, proxyAddr) trigger a rolling
   update; replicas-only changes scale without rolling.
+- Helm chart at `helm/tunnelport/` packaging the operator for consumer
+  management clusters: ServiceAccount, ClusterRole + ClusterRoleBinding
+  (cluster-wide `get;list;watch` on `RemoteApp` and `secrets`, plus
+  full CRUD on owned `Deployment`/`Service`/`ConfigMap`; **no**
+  `pods/log` and **no** Secret write verbs), single-replica manager
+  Deployment with `--tbot-image` / `--tbot-{cpu,memory}-{request,limit}`
+  flags wired from `tbot.image` and `tbot.resources` values, and a
+  default-deny NetworkPolicy on the operator pod (DNS + apiserver egress,
+  metrics ingress only). The chart bundles the CRD inline at
+  `templates/crds.yml` with `helm.sh/resource-policy: keep` and a
+  `crds.install` toggle (default `true`); `make manifests` regenerates
+  it via `hack/update-helm-crds.sh`. `make verify-helm-crds` and
+  `make helm-lint` are available; `test/helm/chart_test.sh` asserts the
+  RBAC and value-flow contracts. The chart README documents the four
+  operator-non-owned concerns (`RemoteApp`-create RBAC, tenant-pod
+  NetworkPolicy, token Secret delivery, Central-side preconditions) and
+  the ADR-0002 join-rate caveat.
 
 [Unreleased]: https://github.com/giantswarm/tunnelport/tree/master
