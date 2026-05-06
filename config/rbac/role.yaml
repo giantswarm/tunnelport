@@ -37,12 +37,6 @@ rules:
 - apiGroups:
   - access.giantswarm.io
   resources:
-  - remoteapps/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - access.giantswarm.io
-  resources:
   - remoteapps/status
   verbs:
   - get

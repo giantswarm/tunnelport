@@ -17,6 +17,7 @@ limitations under the License.
 package remoteapp
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -89,7 +90,7 @@ func TestSummarizePodError_PendingWithVolumeMountFailureSurfacesReason(t *testin
 	// The user has to see *why* the pod is pending. ContainerCreating on
 	// its own is not enough — we must surface the volume-mount message.
 	for _, want := range []string{"ContainerCreating", "secret \"myapp-token\" not found"} {
-		if !contains(got, want) {
+		if !strings.Contains(got, want) {
 			t.Errorf("pending volume-mount: want substring %q in %q", want, got)
 		}
 	}
@@ -128,7 +129,7 @@ func TestSummarizePodError_CrashLoopBackOffIncludesRestartCountAndTermination(t 
 		"Error",
 		"137",
 	} {
-		if !contains(got, want) {
+		if !strings.Contains(got, want) {
 			t.Errorf("crashloop summary: want substring %q in %q", want, got)
 		}
 	}
@@ -148,10 +149,10 @@ func TestSummarizePodError_FailedPhaseSurfacesPhaseAndReason(t *testing.T) {
 	}
 
 	got := summarizePodError(pod)
-	if !contains(got, "Failed") {
+	if !strings.Contains(got, "Failed") {
 		t.Errorf("failed phase summary: want %q in %q", "Failed", got)
 	}
-	if !contains(got, "Evicted") {
+	if !strings.Contains(got, "Evicted") {
 		t.Errorf("failed phase summary: want %q in %q", "Evicted", got)
 	}
 }
@@ -219,7 +220,7 @@ func TestSummarizeStatus_AllUnreadyReturnsErrorSummary(t *testing.T) {
 	if ready {
 		t.Errorf("pending pod must not be ready")
 	}
-	if !contains(msg, "ContainerCreating") {
+	if !strings.Contains(msg, "ContainerCreating") {
 		t.Errorf("summary: want %q in %q", "ContainerCreating", msg)
 	}
 }
@@ -234,17 +235,127 @@ func TestSummarizeStatus_NoPodsReportsExplicitState(t *testing.T) {
 	}
 }
 
+// TestSummarizeStatus_TerminatingPodIsExcludedFromReadyCount pins
+// Issue #10: during a rolling update with maxSurge=1/maxUnavailable=0
+// the kubelet can leave PodReady=True on a pod that already has
+// DeletionTimestamp set. Counting that pod as Ready would let
+// status.ready briefly lie. The summary must also be drawn from the
+// non-terminating set, otherwise lastError would describe a pod that
+// is on its way out instead of the one we'll actually be running.
+func TestSummarizeStatus_TerminatingPodIsExcludedFromReadyCount(t *testing.T) {
+	now := metav1.Now()
+	terminatingReady := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "terminating",
+			DeletionTimestamp: &now,
+		},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "tbot", Ready: true,
+					State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+			},
+		},
+	}
+	pendingNew := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "new"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "tbot", Ready: false, State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
+				}},
+			},
+		},
+	}
+
+	ready, msg := summarizeStatus([]corev1.Pod{terminatingReady, pendingNew})
+	if ready {
+		t.Errorf("terminating Ready pod must not count toward Ready: msg=%q", msg)
+	}
+	if !strings.Contains(msg, "ContainerCreating") {
+		t.Errorf("summary must come from the non-terminating pod (ContainerCreating), got %q", msg)
+	}
+}
+
+// TestSummarizeStatus_PicksHighestSeverityRegardlessOfOrder pins
+// Issue #11: lastError must depend on pod state, not slice order. With
+// CrashLoopBackOff, ContainerCreating, and ImagePullBackOff in a
+// non-canonical order, ImagePullBackOff (highest severity) must win.
+func TestSummarizeStatus_PicksHighestSeverityRegardlessOfOrder(t *testing.T) {
+	crash := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "b-crash"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "tbot", RestartCount: 3,
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"},
+				},
+			}},
+		},
+	}
+	creating := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "a-creating"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "tbot",
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"},
+				},
+			}},
+		},
+	}
+	imgPull := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "c-imgpull"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "tbot",
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason: "ImagePullBackOff", Message: "Back-off pulling image",
+					},
+				},
+			}},
+		},
+	}
+
+	// Try several non-canonical orders; ImagePullBackOff must win every time.
+	orderings := [][]corev1.Pod{
+		{crash, creating, imgPull},
+		{imgPull, crash, creating},
+		{creating, imgPull, crash},
+	}
+	for i, pods := range orderings {
+		ready, msg := summarizeStatus(pods)
+		if ready {
+			t.Fatalf("ordering %d: no pod is Ready, got ready=true", i)
+		}
+		if !strings.Contains(msg, "ImagePullBackOff") {
+			t.Errorf("ordering %d: want ImagePullBackOff to win, got %q", i, msg)
+		}
+	}
+}
+
 // computeStatus is the pure end-to-end synthesis: pods + token Secret view
 // → full RemoteAppStatus. Driven from a table; pins the exact Reason
 // strings that automation pattern-matches on.
 
 func TestComputeStatus(t *testing.T) {
-	cr := &accessv1alpha1.RemoteApp{
-		ObjectMeta: metav1.ObjectMeta{Name: "ra", Namespace: "demo", Generation: 7},
-		Spec: accessv1alpha1.RemoteAppSpec{
-			TokenRef: accessv1alpha1.TokenRef{Name: "tok", Key: "token"},
-		},
-	}
+	// computeStatus consumes only ObjectMeta + spec.TokenRef from the CR;
+	// the rest of the fixture's defaults are inert here. Bumping Generation
+	// to 7 inline rather than carrying a named option for it — only this
+	// one test needs that knob.
+	cr := newRemoteApp(withName("demo", "ra"), withTokenRef("tok", "token"))
+	cr.Generation = 7
 	bound := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: true}
 	missing := TokenSecretView{Name: "tok", Key: "token"}
 	keyAbsent := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: false}
@@ -300,7 +411,7 @@ func TestComputeStatus(t *testing.T) {
 			if got.Ready != tc.wantReady {
 				t.Errorf("Ready: want %v, got %v", tc.wantReady, got.Ready)
 			}
-			if !contains(got.LastError, tc.wantLastError) {
+			if !strings.Contains(got.LastError, tc.wantLastError) {
 				t.Errorf("LastError: want substring %q, got %q", tc.wantLastError, got.LastError)
 			}
 			if got.ObservedGeneration != cr.Generation {
@@ -331,18 +442,3 @@ func findCond(cs []metav1.Condition, t string) *metav1.Condition {
 type stubErr string
 
 func (e stubErr) Error() string { return string(e) }
-
-// helpers
-
-func contains(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexOf(s, sub) >= 0)
-}
-
-func indexOf(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}

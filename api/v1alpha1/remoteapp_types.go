@@ -36,20 +36,33 @@ type TokenRef struct {
 
 // RemoteAppSpec defines the desired state of a RemoteApp.
 type RemoteAppSpec struct {
-	// AppName is the Teleport application name to expose.
+	// AppName is the Teleport application name to expose. Teleport application
+	// names are RFC 1123 DNS labels, so we constrain to that here.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
 	AppName string `json:"appName"`
 
 	// Port is the local ClusterIP Service port the rendered tunnel listens on.
+	// 3001 is reserved by tbot's hardcoded diagnostic endpoint
+	// (see internal/controller/remoteapp/render.go) — colliding with it would
+	// silently break readiness probing.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=65535
+	// +kubebuilder:validation:XValidation:rule="self != 3001",message="port 3001 is reserved for tbot's diagnostic endpoint"
 	Port int32 `json:"port"`
 
-	// ProxyAddr is the host:port of the Teleport proxy this RemoteApp connects to.
+	// ProxyAddr is the host:port of the Teleport proxy this RemoteApp connects
+	// to. We use a Pattern (not the CEL format.hostname() library) because the
+	// value is host:port — format.hostname() only validates the hostname part
+	// and would still need a separate split+port check, so a single regex is
+	// simpler. The pattern accepts lowercase RFC 1123 hostnames with at least
+	// one label, optional dotted subdomains, and a numeric port.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$"
 	ProxyAddr string `json:"proxyAddr"`
 
 	// TokenRef references a Secret in the same namespace holding the static
@@ -95,7 +108,9 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="App",type=string,JSONPath=`.spec.appName`
 // +kubebuilder:printcolumn:name="Port",type=integer,JSONPath=`.spec.port`
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
+// +kubebuilder:printcolumn:name="Token",type=string,JSONPath=".status.conditions[?(@.type=='TokenSecretBound')].status"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="LastError",type=string,JSONPath=`.status.lastError`,priority=1
 
 // RemoteApp declares that a Teleport-exposed app should be reachable on this
 // management cluster as a local Service. See CONTEXT.md for field semantics.

@@ -19,6 +19,7 @@ package remoteapp
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -283,10 +284,10 @@ func TestStatus_PendingPodSurfacesVolumeMountFailure(t *testing.T) {
 		if got.Status.Ready {
 			return false, fmt.Errorf("status.ready must be false")
 		}
-		if !contains(got.Status.LastError, "ContainerCreating") {
+		if !strings.Contains(got.Status.LastError, "ContainerCreating") {
 			return false, fmt.Errorf("lastError missing ContainerCreating: %q", got.Status.LastError)
 		}
-		if !contains(got.Status.LastError, `secret "demo-token" not found`) {
+		if !strings.Contains(got.Status.LastError, `secret "demo-token" not found`) {
 			return false, fmt.Errorf("lastError missing mount message: %q", got.Status.LastError)
 		}
 		return true, nil
@@ -334,7 +335,7 @@ func TestStatus_CrashLoopingPodSurfacesRestartsAndExitCode(t *testing.T) {
 			return false, fmt.Errorf("status.ready must be false")
 		}
 		for _, want := range []string{"CrashLoopBackOff", "5 restarts", "Error", "137"} {
-			if !contains(got.Status.LastError, want) {
+			if !strings.Contains(got.Status.LastError, want) {
 				return false, fmt.Errorf("lastError missing %q: %q", want, got.Status.LastError)
 			}
 		}
@@ -368,7 +369,7 @@ func TestStatus_PodEventReenqueuesParentRemoteApp(t *testing.T) {
 	// Wait for that to land in status before we flip the pod ready.
 	eventually(t, func() (bool, error) {
 		got := getRemoteApp(ctx, t, client.ObjectKeyFromObject(cr))
-		if !contains(got.Status.LastError, "ContainerCreating") {
+		if !strings.Contains(got.Status.LastError, "ContainerCreating") {
 			return false, fmt.Errorf("lastError not yet ContainerCreating: %q", got.Status.LastError)
 		}
 		return true, nil

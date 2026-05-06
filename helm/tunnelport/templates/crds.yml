@@ -39,9 +39,16 @@ spec:
     - jsonPath: .status.ready
       name: Ready
       type: boolean
+    - jsonPath: .status.conditions[?(@.type=='TokenSecretBound')].status
+      name: Token
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.lastError
+      name: LastError
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -70,20 +77,36 @@ spec:
             description: RemoteAppSpec defines the desired state of a RemoteApp.
             properties:
               appName:
-                description: AppName is the Teleport application name to expose.
+                description: |-
+                  AppName is the Teleport application name to expose. Teleport application
+                  names are RFC 1123 DNS labels, so we constrain to that here.
+                maxLength: 63
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
               port:
-                description: Port is the local ClusterIP Service port the rendered
-                  tunnel listens on.
+                description: |-
+                  Port is the local ClusterIP Service port the rendered tunnel listens on.
+                  3001 is reserved by tbot's hardcoded diagnostic endpoint
+                  (see internal/controller/remoteapp/render.go) — colliding with it would
+                  silently break readiness probing.
                 format: int32
                 maximum: 65535
                 minimum: 1
                 type: integer
+                x-kubernetes-validations:
+                - message: port 3001 is reserved for tbot's diagnostic endpoint
+                  rule: self != 3001
               proxyAddr:
-                description: ProxyAddr is the host:port of the Teleport proxy this
-                  RemoteApp connects to.
+                description: |-
+                  ProxyAddr is the host:port of the Teleport proxy this RemoteApp connects
+                  to. We use a Pattern (not the CEL format.hostname() library) because the
+                  value is host:port — format.hostname() only validates the hostname part
+                  and would still need a separate split+port check, so a single regex is
+                  simpler. The pattern accepts lowercase RFC 1123 hostnames with at least
+                  one label, optional dotted subdomains, and a numeric port.
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$
                 type: string
               replicas:
                 description: |-

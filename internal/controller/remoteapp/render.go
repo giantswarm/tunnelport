@@ -22,10 +22,8 @@ limitations under the License.
 package remoteapp
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -34,8 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-
-	"gopkg.in/yaml.v3"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
@@ -65,12 +61,13 @@ const (
 	AnnotationTokenSecretVersion = "tunnelport.giantswarm.io/token-secret-version"
 )
 
-// Config carries the operator-level knobs that are NOT on the RemoteApp CR
-// but are needed to render owned objects: the tbot container image and its
-// resource requests/limits. In production these are plumbed from Helm values
-// (slice 6); for now the reconciler holds the resolved struct directly so
-// slice 6 can wire it without a controller-shape change.
-type Config struct {
+// PodDefaults carries the operator-level knobs that are NOT on the RemoteApp
+// CR but are needed to render owned objects: the tbot container image and
+// its resource requests/limits, plus the dev-only `insecure` flag. In
+// production these are plumbed from Helm values; the reconciler holds the
+// resolved struct directly so cmd/main.go can wire it without a
+// controller-shape change.
+type PodDefaults struct {
 	// TbotImage is the container image reference for the tbot sidecar pod.
 	TbotImage string
 
@@ -118,8 +115,17 @@ func canonicalLabels(cr *accessv1alpha1.RemoteApp) map[string]string {
 // renderConfigMap returns the ConfigMap holding tbot.yaml — tbot's
 // application-tunnel configuration for this RemoteApp. The token Secret is
 // referenced by name only; its contents are never read by the operator.
-func renderConfigMap(cr *accessv1alpha1.RemoteApp, cfg Config) *corev1.ConfigMap {
+//
+// TypeMeta is set explicitly because the apply path uses Server-Side Apply
+// (`client.Apply`), which JSON-marshals the object directly and rejects
+// payloads without `apiVersion`/`kind`. Pure-render unit tests don't depend
+// on TypeMeta, but the apply path does.
+func renderConfigMap(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "ConfigMap",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
 			Namespace: cr.Namespace,
@@ -137,10 +143,17 @@ const (
 	volumeNameTbotConfig  = "tbot-config"
 	volumeNameTbotToken   = "tbot-token"
 	volumeNameTbotStorage = "tbot-storage"
+	// volumeNameTbotTmp backs /tmp because the container runs with
+	// readOnlyRootFilesystem: true. tbot and its transitive deps may write
+	// scratch files (Go runtime, glibc resolver caches, etc.); keeping /tmp
+	// writable via emptyDir avoids surprise EROFS without relaxing the
+	// root-fs hardening.
+	volumeNameTbotTmp = "tbot-tmp"
 
 	mountPathTbotConfig  = "/etc/tbot"
 	mountPathTbotToken   = "/etc/tbot-token"
 	mountPathTbotStorage = "/var/lib/tbot"
+	mountPathTbotTmp     = "/tmp"
 
 	// tbotDiagPort is tbot's diagnostics HTTP listener. tbot binds it on
 	// 127.0.0.1:3001 by default and exposes /readyz which only returns 200
@@ -170,7 +183,7 @@ const (
 //   - an emptyDir for tbot's renewable-cert destination directory (per
 //     ADR 0002 — no PVC, no StatefulSet).
 //
-// Image and resources come from operator Config (Helm values via slice 6),
+// Image and resources come from operator PodDefaults (Helm values via slice 6),
 // not from the CR.
 //
 // tokenSecretVersion is stamped on the pod-template annotation
@@ -178,13 +191,23 @@ const (
 // it from `tokenRef`-Secret's `metadata.resourceVersion`; passing "" leaves
 // the annotation present-but-empty so absence and a rotation-to-empty stay
 // distinguishable in the pod-template diff. The argument is a separate
-// parameter rather than a Config field because it changes per-reconcile,
+// parameter rather than a PodDefaults field because it changes per-reconcile,
 // not per-operator-process.
 //
 // The container declares a readiness probe wired to tbot's diag /readyz
 // (port "diag", 3001) so pod-Ready means tunnel-up — that's what
-// status.ready mirrors.
-func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersion string) *appsv1.Deployment {
+// status.ready mirrors. It also declares a liveness probe (TCPSocket on
+// the diag port) so the kubelet restarts the pod if tbot's diag listener
+// stops responding entirely; per ADR 0003 we lean on the kubelet for
+// recovery rather than re-implementing it in the operator.
+//
+// The pod and container security contexts are hardened by default
+// (runAsNonRoot, readOnlyRootFilesystem, drop ALL capabilities,
+// RuntimeDefault seccomp). These values are NOT currently CR-tunable —
+// platform teams that need to relax them must fork. Consistent with the
+// project's "no escape hatches yet" stance; revisit when a real use case
+// surfaces.
+func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecretVersion string) *appsv1.Deployment {
 	labels := canonicalLabels(cr)
 	replicas := int32(1)
 	if cr.Spec.Replicas != nil {
@@ -193,7 +216,24 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 	maxSurge := intstr.FromInt(1)
 	maxUnavailable := intstr.FromInt(0)
 
+	// Pod-level securityContext: distroless nonroot UID + RuntimeDefault
+	// seccomp. runAsUser pinned here (not just runAsNonRoot) so the pod
+	// schedules under PSS Restricted even when the image's USER directive
+	// is absent or wrong.
+	runAsNonRoot := true
+	runAsUser := int64(65532) // distroless nonroot UID
+
+	// Container-level securityContext: locked-down defaults. drop ALL
+	// caps + readOnlyRootFilesystem + no privilege escalation. /tmp is
+	// served by an emptyDir volume so transitive writers don't EROFS.
+	allowPrivilegeEscalation := false
+	readOnlyRootFilesystem := true
+
 	return &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
 			Namespace: cr.Namespace,
@@ -228,6 +268,13 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 					},
 				},
 				Spec: corev1.PodSpec{
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot: &runAsNonRoot,
+						RunAsUser:    &runAsUser,
+						SeccompProfile: &corev1.SeccompProfile{
+							Type: corev1.SeccompProfileTypeRuntimeDefault,
+						},
+					},
 					Volumes: []corev1.Volume{
 						{
 							Name: volumeNameTbotConfig,
@@ -255,12 +302,28 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
+						{
+							// /tmp scratch space; required because
+							// readOnlyRootFilesystem: true makes the rest
+							// of the rootfs immutable.
+							Name: volumeNameTbotTmp,
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
 					},
 					Containers: []corev1.Container{
 						{
 							Name:      "tbot",
 							Image:     cfg.TbotImage,
 							Resources: cfg.Resources,
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: &allowPrivilegeEscalation,
+								ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+							},
 							Args: []string{
 								"start",
 								"-c", mountPathTbotConfig + "/tbot.yaml",
@@ -299,6 +362,32 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 								TimeoutSeconds:      2,
 								FailureThreshold:    3,
 							},
+							// Liveness probe: TCPSocket on the diag port,
+							// not HTTPGet. tbot's diag listener serves
+							// /readyz (used by the readiness probe above)
+							// but a /livez handler isn't part of the
+							// documented contract — TCPSocket detects the
+							// "diag listener wedged" failure mode without
+							// coupling to a specific HTTP path. Per ADR
+							// 0003 we want kubelet-driven recovery rather
+							// than noisy in-operator logic, so the
+							// thresholds are deliberately generous:
+							//   initialDelaySeconds: 30 — give the join
+							//     handshake room before the first probe.
+							//   periodSeconds:       30 — slow cadence.
+							//   failureThreshold:    5  — 2.5 minutes of
+							//     unresponsiveness before a restart.
+							LivenessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									TCPSocket: &corev1.TCPSocketAction{
+										Port: intstr.FromString(tbotDiagPortName),
+									},
+								},
+								InitialDelaySeconds: 30,
+								PeriodSeconds:       30,
+								TimeoutSeconds:      2,
+								FailureThreshold:    5,
+							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      volumeNameTbotConfig,
@@ -314,6 +403,10 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 									Name:      volumeNameTbotStorage,
 									MountPath: mountPathTbotStorage,
 								},
+								{
+									Name:      volumeNameTbotTmp,
+									MountPath: mountPathTbotTmp,
+								},
 							},
 						},
 					},
@@ -326,9 +419,20 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 // renderService returns the ClusterIP Service that fronts this RemoteApp's
 // tbot Deployment. Name = CR name, port = spec.port, selector matches the
 // canonical pod-template labels. CONTEXT.md locks the type to ClusterIP.
-func renderService(cr *accessv1alpha1.RemoteApp, _ Config) *corev1.Service {
+//
+// `Spec.ClusterIP` is deliberately NOT set: under Server-Side Apply, fields
+// the controller doesn't write are not claimed by the controller's
+// field-manager, and the API server's allocated ClusterIP is preserved
+// across applies automatically. The previous client-side-merge path had to
+// surgically copy ClusterIP from the existing object to avoid the
+// "field is immutable" error on Update; SSA makes that copy unnecessary.
+func renderService(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.Service {
 	labels := canonicalLabels(cr)
 	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
 			Namespace: cr.Namespace,
@@ -354,89 +458,7 @@ func renderService(cr *accessv1alpha1.RemoteApp, _ Config) *corev1.Service {
 // ConfigMap changes. The hash is the digest of the rendered YAML, not of
 // the Spec, so additions to the rendering (e.g. new tbot fields) trigger a
 // roll iff they actually change the on-disk config.
-func configHash(cr *accessv1alpha1.RemoteApp, cfg Config) string {
+func configHash(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	sum := sha256.Sum256([]byte(tbotConfig(cr, cfg)))
 	return hex.EncodeToString(sum[:])
-}
-
-// tbotFile mirrors the slice of tbot's config schema we use. Field order
-// is the on-the-wire YAML order. sigs.k8s.io/yaml is a JSON↔YAML bridge
-// so it honours `json:` tags, not `yaml:`. Schema source:
-// gravitational/teleport `lib/tbot/...`:
-//
-//   - top-level: `version`, `proxy_server`, `insecure`, `onboarding`,
-//     `storage`, `diag_addr`, `services` (see `lib/tbot/config/config.go`).
-//   - `onboarding.token` accepts either a literal token value OR a file
-//     path; tbot dereferences a path automatically. We point it at the
-//     mounted Secret's key, so the literal token never leaves the Secret
-//     volume — the operator has no need to read `Secret.Data`.
-//   - `services.application-tunnel.listen` (NOT `listener`) — the upstream
-//     YAML tag is `listen` (see `lib/tbot/services/application/tunnel_config.go`).
-//   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
-//     which the pod readiness probe targets.
-type tbotFile struct {
-	Version     string `yaml:"version"`
-	ProxyServer string `yaml:"proxy_server"`
-	// Insecure uses bool+omitempty so `false` drops the key entirely —
-	// the production render must not include `insecure:` at all.
-	Insecure   bool           `yaml:"insecure,omitempty"`
-	Onboarding tbotOnboarding `yaml:"onboarding"`
-	Storage    tbotStorage    `yaml:"storage"`
-	DiagAddr   string         `yaml:"diag_addr"`
-	Services   []tbotService  `yaml:"services"`
-}
-
-type tbotOnboarding struct {
-	JoinMethod string `yaml:"join_method"`
-	Token      string `yaml:"token"`
-}
-
-type tbotStorage struct {
-	Type string `yaml:"type"`
-	Path string `yaml:"path"`
-}
-
-type tbotService struct {
-	Type    string `yaml:"type"`
-	AppName string `yaml:"app_name,omitempty"`
-	Listen  string `yaml:"listen,omitempty"`
-}
-
-func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg Config) string {
-	doc := tbotFile{
-		Version:     "v2",
-		ProxyServer: cr.Spec.ProxyAddr,
-		Insecure:    cfg.Insecure,
-		Onboarding: tbotOnboarding{
-			JoinMethod: "token",
-			Token:      fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key),
-		},
-		Storage: tbotStorage{
-			Type: "directory",
-			Path: mountPathTbotStorage,
-		},
-		DiagAddr: fmt.Sprintf("0.0.0.0:%d", tbotDiagPort),
-		Services: []tbotService{
-			{
-				Type:    "application-tunnel",
-				AppName: cr.Spec.AppName,
-				Listen:  fmt.Sprintf("tcp://0.0.0.0:%d", cr.Spec.Port),
-			},
-		},
-	}
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	// 2-space indent matches the format tbot's existing config docs ship
-	// with; gopkg.in/yaml.v3 defaults to 4-space which is YAML-valid but
-	// drifts from the historical render and indents list items further
-	// than necessary.
-	enc.SetIndent(2)
-	if err := enc.Encode(&doc); err != nil {
-		// Fixed-shape struct of scalars/slices: encode cannot fail here.
-		panic(fmt.Errorf("tbotConfig encode: %w", err))
-	}
-	if err := enc.Close(); err != nil {
-		panic(fmt.Errorf("tbotConfig close: %w", err))
-	}
-	return buf.String()
 }

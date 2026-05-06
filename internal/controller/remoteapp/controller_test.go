@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,23 +54,15 @@ func uniqueNS(t *testing.T, ctx context.Context) string {
 	return ns.Name
 }
 
-// makeRemoteApp builds a minimal valid RemoteApp in ns. Tests that need a
-// non-default spec mutate the returned object's Spec and call testClient
-// themselves; this helper covers the common-case create.
-func makeRemoteApp(ctx context.Context, t *testing.T, ns, name string) *accessv1alpha1.RemoteApp {
+// makeRemoteApp builds a minimal valid RemoteApp in ns and Creates it.
+// Built on top of the shared newRemoteApp fixture (see fixtures_test.go);
+// tests that need a non-default spec compose fixtureOpts at the call site
+// or mutate the returned object before re-Update. Servers strip the
+// fixture's default UID on Create — the API server assigns a fresh one.
+func makeRemoteApp(ctx context.Context, t *testing.T, ns, name string, opts ...fixtureOpt) *accessv1alpha1.RemoteApp {
 	t.Helper()
-	cr := &accessv1alpha1.RemoteApp{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "demo-app",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "demo-token",
-				Key:  "token",
-			},
-		},
-	}
+	cr := newRemoteApp(append([]fixtureOpt{withName(ns, name)}, opts...)...)
+	cr.UID = "" // let the API server assign one on Create.
 	if err := testClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create RemoteApp: %v", err)
 	}
@@ -174,97 +167,22 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 	}
 }
 
-// computePodTemplateHash mirrors the field the Deployment controller uses
-// to decide whether a roll is needed. We don't compute it byte-identically
-// to upstream — we only need a stable signal that tests can compare across
-// updates. equality.Semantic.DeepEqual on PodTemplateSpec is the same
-// signal the Deployment controller uses to detect template drift.
+// samePodTemplate reports whether two Deployments share the same pod
+// template by every field, not just the rolling-fingerprint subset the
+// Deployment controller hashes on. The previous bespoke comparison
+// inspected only image, args, ports, volume name + ConfigMap/Secret name
+// — silently ignoring SecurityContext, Resources, Env, Probes, etc., so
+// regressions on those fields could not be caught here. equality.Semantic
+// is the same comparator the API server uses for resource.Quantity / time
+// equality, so two CPU quantities written as "10m" and "0.01" still
+// compare equal — that's the only place a literal byte-equal check would
+// have been wrong.
 func samePodTemplate(a, b appsv1.Deployment) bool {
 	return equalPodTemplate(a.Spec.Template, b.Spec.Template)
 }
 
 func equalPodTemplate(a, b corev1.PodTemplateSpec) bool {
-	// Hash on the rendered fields the reconciler controls. This avoids
-	// false positives from server-side defaulting on unrelated fields.
-	if !equalContainers(a.Spec.Containers, b.Spec.Containers) {
-		return false
-	}
-	if !equalVolumes(a.Spec.Volumes, b.Spec.Volumes) {
-		return false
-	}
-	if !mapsEqual(a.Labels, b.Labels) {
-		return false
-	}
-	if !mapsEqual(a.Annotations, b.Annotations) {
-		return false
-	}
-	return true
-}
-
-func equalContainers(a, b []corev1.Container) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Image != b[i].Image {
-			return false
-		}
-		if len(a[i].Args) != len(b[i].Args) {
-			return false
-		}
-		for j := range a[i].Args {
-			if a[i].Args[j] != b[i].Args[j] {
-				return false
-			}
-		}
-		if len(a[i].Ports) != len(b[i].Ports) {
-			return false
-		}
-		for j := range a[i].Ports {
-			if a[i].Ports[j].ContainerPort != b[i].Ports[j].ContainerPort {
-				return false
-			}
-		}
-	}
-	return true
-}
-
-func equalVolumes(a, b []corev1.Volume) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i].Name != b[i].Name {
-			return false
-		}
-		if (a[i].ConfigMap == nil) != (b[i].ConfigMap == nil) {
-			return false
-		}
-		if a[i].ConfigMap != nil && b[i].ConfigMap != nil &&
-			a[i].ConfigMap.Name != b[i].ConfigMap.Name {
-			return false
-		}
-		if (a[i].Secret == nil) != (b[i].Secret == nil) {
-			return false
-		}
-		if a[i].Secret != nil && b[i].Secret != nil &&
-			a[i].Secret.SecretName != b[i].Secret.SecretName {
-			return false
-		}
-	}
-	return true
-}
-
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
+	return equality.Semantic.DeepEqual(a, b)
 }
 
 func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {

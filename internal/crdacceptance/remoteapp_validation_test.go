@@ -14,7 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package apivalidation
+package crdacceptance
+
+// This package deliberately constructs CRs with inline literals. Most of
+// the cases mutate exactly one field to an invalid value to assert the
+// CRD's validation rules; reading them as `newRemoteApp(withFooBroken(...))`
+// would obscure the under-test invariant. The shared fixture in
+// internal/controller/remoteapp/fixtures_test.go is also test-only (no
+// cross-package import path), so we'd need to copy it here for the few
+// happy-path cases — not worth the duplication.
 
 import (
 	"context"
