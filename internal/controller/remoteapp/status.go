@@ -21,6 +21,10 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
 
 // status.go: pure helpers that derive RemoteApp.status content from
@@ -156,4 +160,79 @@ func containerTerminatedSummary(cs *corev1.ContainerStatus) string {
 		return ""
 	}
 	return fmt.Sprintf("Terminated: %s (%d)", t.Reason, t.ExitCode)
+}
+
+// computeStatus derives the full RemoteAppStatus from k8s-visible inputs.
+// Pure: no I/O, no logging. meta.SetStatusCondition uses metav1.Now() for
+// LastTransitionTime — that's library-imposed and stripped by statusEqual.
+func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, view TokenSecretView, prevConditions []metav1.Condition) accessv1alpha1.RemoteAppStatus {
+	ready, lastError := summarizeStatus(pods)
+
+	conditions := append([]metav1.Condition(nil), prevConditions...)
+
+	readyCond := metav1.Condition{
+		Type:               accessv1alpha1.ConditionTypeReady,
+		Status:             boolToConditionStatus(ready),
+		ObservedGeneration: cr.Generation,
+		Reason:             readyConditionReason(ready, lastError),
+		Message:            lastError,
+	}
+	if ready {
+		readyCond.Message = "tbot tunnel ready"
+	}
+	meta.SetStatusCondition(&conditions, readyCond)
+
+	tokenBound, tokenReason, tokenMsg := evalTokenSecretBound(cr, view)
+	meta.SetStatusCondition(&conditions, metav1.Condition{
+		Type:               accessv1alpha1.ConditionTypeTokenSecretBound,
+		Status:             boolToConditionStatus(tokenBound),
+		ObservedGeneration: cr.Generation,
+		Reason:             tokenReason,
+		Message:            tokenMsg,
+	})
+
+	return accessv1alpha1.RemoteAppStatus{
+		Ready:              ready,
+		LastError:          lastError,
+		ObservedGeneration: cr.Generation,
+		Conditions:         conditions,
+	}
+}
+
+// evalTokenSecretBound classifies the TokenSecretView into the
+// TokenSecretBound condition fields. Order matters: a non-NotFound fetch
+// error wins over absence; absence wins over key absence.
+func evalTokenSecretBound(cr *accessv1alpha1.RemoteApp, view TokenSecretView) (bool, string, string) {
+	if view.FetchErr != nil {
+		return false, "SecretGetError", view.FetchErr.Error()
+	}
+	if view.ResourceVersion == "" {
+		return false, "SecretNotFound",
+			fmt.Sprintf("Secret %q not found in namespace %q", view.Name, cr.Namespace)
+	}
+	if !view.KeyExists {
+		return false, "KeyNotFound",
+			fmt.Sprintf("Secret %q has no key %q", view.Name, view.Key)
+	}
+	return true, "Bound", fmt.Sprintf("Secret %q key %q present", view.Name, view.Key)
+}
+
+func boolToConditionStatus(b bool) metav1.ConditionStatus {
+	if b {
+		return metav1.ConditionTrue
+	}
+	return metav1.ConditionFalse
+}
+
+// readyConditionReason picks a stable Reason string for the Ready
+// condition. Reasons are not free-form per Kubernetes conventions —
+// stick to a small finite set that automation can pattern-match on.
+func readyConditionReason(ready bool, lastError string) string {
+	if ready {
+		return "TunnelReady"
+	}
+	if lastError == noTbotPodsMsg {
+		return "NoPods"
+	}
+	return "PodNotReady"
 }

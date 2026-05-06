@@ -3,28 +3,52 @@
 
 # tunnelport
 
-This is a template repository containing files for a giantswarm
-operator repository.
+A Kubernetes operator that wraps Teleport's `tbot` + a `Service` behind a single
+`RemoteApp` CR, so workloads on a consumer management cluster can reach a
+Teleport-exposed app as if it were a local `Service` — no Teleport SDK in caller
+code.
 
-To use it just hit `Use this template` button or [this
-link][generate].
+## What it does
 
-1. Run`devctl replace -i "tunnelport" "$(basename $(git rev-parse
-   --show-toplevel))" --ignore '.git/**' '**'`.
-2. Run `devctl replace -i "tunnelport" "$(basename $(git rev-parse
-   --show-toplevel))" --ignore '.git/**' '**'`.
-3. Go to https://github.com/giantswarm/tunnelport/settings and make sure `Allow
-   merge commits` box is unchecked and `Automatically delete head branches` box
-   is checked.
-4. Go to https://github.com/giantswarm/tunnelport/settings/access and add
-   `giantswarm/bots` with `Write` access and `giantswarm/employees` with
-   `Admin` access.
-5. Add this repository to https://github.com/giantswarm/github.
-6. Create quay.io docker repository if needed.
-7. Add the project to the CircleCI:
-   https://circleci.com/setup-project/gh/giantswarm/tunnelport
-8. Change the badge (with style=shield):
-   https://circleci.com/gh/giantswarm/tunnelport.svg?style=shield&circle-token=TOKEN_FOR_PRIVATE_REPO
-   If this is a private repository token with scope `status` will be needed.
+A platform engineer writes one `RemoteApp`. The operator renders a `tbot`
+`Deployment` (which dials Teleport and exposes an `application-tunnel` on a
+local port) plus a `ClusterIP` `Service` pointing at it. Workloads `curl
+http://<remoteapp-name>:<port>` and traffic is tunneled to the app behind
+Teleport.
 
-[generate]: https://github.com/giantswarm/tunnelport/generate
+```
+  Consumer MC                          Central MC          Producer MC
+  ┌──────────────────────────────┐     ┌──────────┐        ┌────────────────┐
+  │                              │     │ Teleport │        │ teleport-kube- │
+  │  caller pod                  │     │  proxy   │        │   agent (app   │
+  │     │                        │     │   +      │        │     mode)      │
+  │     │ http://payments:8080   │     │  auth    │        │       │        │
+  │     ▼                        │     └────▲─────┘        │       ▼        │
+  │  Service (ClusterIP) ──┐     │          │              │  backend app   │
+  │                        │     │          │ mTLS         └────────────────┘
+  │                        ▼     │          │ tunnel               ▲
+  │                   tbot pod ──┼──────────┘──────────────────────┘
+  │                   (rendered  │
+  │                    by this   │
+  │                    operator) │
+  └──────────────────────────────┘
+            ▲
+            │ owns Deployment + Service + ConfigMap
+            │
+       RemoteApp CR  (access.giantswarm.io/v1alpha1)
+         spec:
+           appName: payments
+           port: 8080
+           proxyAddr: teleport.example:443
+           tokenRef: { name: payments-join-token, key: token }
+```
+
+One `tbot` Deployment per `RemoteApp` (per-app blast-radius isolation). Join
+tokens are delivered out-of-band as `Secret`s; the operator references them by
+`(name, key, resourceVersion)` and never reads their contents. See
+[`CONTEXT.md`](./CONTEXT.md) for the full design.
+
+## Scope
+
+`RemoteApp` covers Teleport **Application Service** apps (TCP/HTTP) only.
+Database, Kubernetes, and SSH access are out of scope.
