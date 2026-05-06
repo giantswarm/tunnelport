@@ -108,7 +108,7 @@ func keys(m map[string]string) []string {
 func TestRenderDeployment_DefaultsAndStrategy(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig())
+	dep := renderDeployment(cr, fixtureConfig(), "")
 
 	if dep.Name != cr.Name {
 		t.Fatalf("Deployment name: want %q, got %q", cr.Name, dep.Name)
@@ -141,7 +141,7 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 	r := int32(3)
 	cr.Spec.Replicas = &r
 
-	dep := renderDeployment(cr, fixtureConfig())
+	dep := renderDeployment(cr, fixtureConfig(), "")
 
 	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
 		t.Errorf("Deployment replicas: want 3, got %v", dep.Spec.Replicas)
@@ -151,7 +151,7 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig())
+	dep := renderDeployment(cr, fixtureConfig(), "")
 
 	pod := dep.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -208,7 +208,7 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 	cr := fixtureRemoteApp()
 	cfg := fixtureConfig()
 
-	dep := renderDeployment(cr, cfg)
+	dep := renderDeployment(cr, cfg, "")
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != cfg.TbotImage {
@@ -229,7 +229,7 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig())
+	dep := renderDeployment(cr, fixtureConfig(), "")
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if len(c.Ports) == 0 {

@@ -52,10 +52,13 @@ const (
 	// for unrelated reasons.
 	AnnotationConfigHash = "tunnelport.giantswarm.io/config-hash"
 
-	// AnnotationTokenSecretVersion is reserved for slice 5: it will hold
-	// the token Secret's resourceVersion so a Secret rotation triggers a
-	// pod-template-hash change and rolls the Deployment. Defining the key
-	// here keeps the annotation namespace stable across slices.
+	// AnnotationTokenSecretVersion holds the tokenRef Secret's
+	// resourceVersion observed at the most recent reconcile. A rotation
+	// of the Secret bumps resourceVersion, which the reconciler stamps
+	// here, which causes the pod-template-hash to change and the
+	// Deployment to roll via its RollingUpdate strategy. The operator
+	// reads only `metadata.resourceVersion` of the Secret — never
+	// `Secret.Data`.
 	AnnotationTokenSecretVersion = "tunnelport.giantswarm.io/token-secret-version"
 )
 
@@ -144,13 +147,19 @@ const (
 // Image and resources come from operator Config (Helm values via slice 6),
 // not from the CR.
 //
-// Slices 04/05 extend this renderer:
-//   - slice 4 will add a readiness probe wired to tbot's diag endpoint;
-//   - slice 5 will stamp the token Secret's resourceVersion onto the pod
-//     template annotations so a Secret rotation triggers a roll.
+// tokenSecretVersion is stamped on the pod-template annotation
+// `tunnelport.giantswarm.io/token-secret-version`. The reconciler reads
+// it from `tokenRef`-Secret's `metadata.resourceVersion` (slice 5);
+// passing "" leaves the annotation present-but-empty so absence and a
+// rotation-to-empty stay distinguishable in the pod-template diff. The
+// argument is a separate parameter rather than a Config field because
+// it changes per-reconcile, not per-operator-process.
+//
+// Slice 4 extends this renderer to add a readiness probe wired to
+// tbot's diag endpoint.
 //
 // For now there is intentionally no readiness probe — slice 4 owns it.
-func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config) *appsv1.Deployment {
+func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersion string) *appsv1.Deployment {
 	labels := canonicalLabels(cr)
 	replicas := int32(1)
 	if cr.Spec.Replicas != nil {
@@ -183,10 +192,14 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config) *appsv1.Deployme
 						// or spec.proxyAddr change — which only updates the
 						// ConfigMap data, not the pod template directly —
 						// still rolls the Deployment via pod-template-hash.
-						//
-						// Slice 5 will add AnnotationTokenSecretVersion here
-						// to roll the Deployment on token Secret rotations.
 						AnnotationConfigHash: configHash(cr),
+						// resourceVersion of the tokenRef Secret. Stamped
+						// every reconcile; a rotation flips the value, the
+						// pod-template-hash changes, and the Deployment
+						// rolls via its existing RollingUpdate strategy.
+						// Empty when the Secret hasn't been observed yet
+						// — keeps the key present so the diff is unambiguous.
+						AnnotationTokenSecretVersion: tokenSecretVersion,
 					},
 				},
 				Spec: corev1.PodSpec{
