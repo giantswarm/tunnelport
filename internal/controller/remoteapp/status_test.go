@@ -265,14 +265,14 @@ func TestComputeStatus(t *testing.T) {
 	}}
 
 	cases := []struct {
-		name           string
-		pods           []corev1.Pod
-		view           TokenSecretView
-		wantReady      bool
-		wantLastError  string // substring match
-		wantReadyRsn   string
-		wantTokenRsn   string
-		wantTokenStat  metav1.ConditionStatus
+		name          string
+		pods          []corev1.Pod
+		view          TokenSecretView
+		wantReady     bool
+		wantLastError string // substring match
+		wantReadyRsn  string
+		wantTokenRsn  string
+		wantTokenStat metav1.ConditionStatus
 	}{
 		{name: "no pods, secret bound", pods: nil, view: bound,
 			wantReady: false, wantLastError: "no tbot pods",

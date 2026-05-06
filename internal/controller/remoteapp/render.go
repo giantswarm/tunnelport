@@ -373,8 +373,8 @@ func configHash(cr *accessv1alpha1.RemoteApp, cfg Config) string {
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
 //     which the pod readiness probe targets.
 type tbotFile struct {
-	Version     string         `json:"version"`
-	ProxyServer string         `json:"proxy_server"`
+	Version     string `json:"version"`
+	ProxyServer string `json:"proxy_server"`
 	// Insecure uses bool+omitempty so `false` drops the key entirely —
 	// the production render must not include `insecure:` at all.
 	Insecure   bool           `json:"insecure,omitempty"`
