@@ -43,10 +43,10 @@ func (h *managerHandle) stop() {
 	<-h.done
 }
 
-// testConfig is the operator Config the integration-test manager uses. The
-// values are fixed strings/quantities so tests can assert against them.
-func testConfig() Config {
-	return Config{
+// testConfig is the operator PodDefaults the integration-test manager uses.
+// The values are fixed strings/quantities so tests can assert against them.
+func testConfig() PodDefaults {
+	return PodDefaults{
 		TbotImage: "test.example.com/tbot:test",
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -77,9 +77,8 @@ func startManager(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme)
 	}
 
 	r := &Reconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: testConfig(),
+		Client:      mgr.GetClient(),
+		PodDefaults: testConfig(),
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("Reconciler.SetupWithManager: %w", err)

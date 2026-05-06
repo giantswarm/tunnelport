@@ -22,7 +22,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
@@ -35,30 +34,25 @@ const (
 	intstrTypeString = intstr.String
 )
 
-// fixtureRemoteApp returns a representative RemoteApp the renderers can be
-// driven from. UID is set so generated OwnerReferences match what the API
-// server would persist.
-func fixtureRemoteApp() *accessv1alpha1.RemoteApp {
-	return &accessv1alpha1.RemoteApp{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "tracer",
-			Namespace: "demo",
-			UID:       "uid-tracer",
-		},
-		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "myapp-token",
-				Key:  "token",
-			},
-		},
-	}
+// renderFixtureOpts is the renderer-test-specific override of
+// newRemoteApp's defaults: namespace="demo", name="tracer", appName="myapp",
+// tokenRef.Name="myapp-token". These match the strings the assertions in
+// this file pin verbatim. The shared newRemoteApp() defaults match the
+// envtest fixtures (name="demo"), so the renderer tests pass these opts
+// to keep their assertions stable.
+var renderFixtureOpts = []fixtureOpt{
+	withName("demo", "tracer"),
+	withUID("uid-tracer"),
+	withAppName("myapp"),
+	withTokenRefName("myapp-token"),
 }
 
-func fixtureConfig() Config {
-	return Config{
+func fixtureRemoteApp() *accessv1alpha1.RemoteApp {
+	return newRemoteApp(renderFixtureOpts...)
+}
+
+func fixtureConfig() PodDefaults {
+	return PodDefaults{
 		TbotImage: "registry.example.com/tbot:1.2.3",
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -315,7 +309,7 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	// diag port must be present and named so the probe can reference it.
 	var diagPort *corev1.ContainerPort
 	for i := range c.Ports {
-		if c.Ports[i].Name == "diag" {
+		if c.Ports[i].Name == tbotDiagPortName {
 			diagPort = &c.Ports[i]
 			break
 		}
@@ -341,11 +335,139 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	// Either named-port reference or numeric 3001 is acceptable; tests
 	// pin one to keep the rendered template stable.
 	tp := c.ReadinessProbe.HTTPGet.Port
-	if tp.Type == intstrTypeString && tp.StrVal != "diag" {
-		t.Errorf("readinessProbe port (string): want %q, got %q", "diag", tp.StrVal)
+	if tp.Type == intstrTypeString && tp.StrVal != tbotDiagPortName {
+		t.Errorf("readinessProbe port (string): want %q, got %q", tbotDiagPortName, tp.StrVal)
 	}
 	if tp.Type == intstrTypeInt && tp.IntVal != 3001 {
 		t.Errorf("readinessProbe port (int): want 3001, got %d", tp.IntVal)
+	}
+}
+
+// TestRenderDeployment_PodAndContainerSecurityContext pins the hardened
+// defaults the rendered tbot pod runs with. The values mirror the
+// operator's own pod template (helm/tunnelport/values.yaml): nonroot
+// distroless UID, RuntimeDefault seccomp at pod level; drop ALL caps,
+// readOnlyRootFilesystem, no privilege escalation at container level.
+// They are not currently CR-tunable — this test guards against silent
+// drift if anyone removes them.
+func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig(), "")
+
+	// Pod-level securityContext.
+	pc := dep.Spec.Template.Spec.SecurityContext
+	if pc == nil {
+		t.Fatalf("PodSpec.SecurityContext must be set")
+	}
+	if pc.RunAsNonRoot == nil || !*pc.RunAsNonRoot {
+		t.Errorf("PodSpec.SecurityContext.RunAsNonRoot: want true, got %v", pc.RunAsNonRoot)
+	}
+	if pc.RunAsUser == nil || *pc.RunAsUser != 65532 {
+		t.Errorf("PodSpec.SecurityContext.RunAsUser: want 65532 (distroless nonroot), got %v", pc.RunAsUser)
+	}
+	if pc.SeccompProfile == nil || pc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("PodSpec.SecurityContext.SeccompProfile: want type=RuntimeDefault, got %+v", pc.SeccompProfile)
+	}
+
+	// Container-level securityContext.
+	c := dep.Spec.Template.Spec.Containers[0]
+	cc := c.SecurityContext
+	if cc == nil {
+		t.Fatalf("Container.SecurityContext must be set")
+	}
+	if cc.AllowPrivilegeEscalation == nil || *cc.AllowPrivilegeEscalation {
+		t.Errorf("Container.SecurityContext.AllowPrivilegeEscalation: want false, got %v", cc.AllowPrivilegeEscalation)
+	}
+	if cc.ReadOnlyRootFilesystem == nil || !*cc.ReadOnlyRootFilesystem {
+		t.Errorf("Container.SecurityContext.ReadOnlyRootFilesystem: want true, got %v", cc.ReadOnlyRootFilesystem)
+	}
+	if cc.Capabilities == nil {
+		t.Fatalf("Container.SecurityContext.Capabilities must be set")
+	}
+	gotDrop := cc.Capabilities.Drop
+	if len(gotDrop) != 1 || gotDrop[0] != "ALL" {
+		t.Errorf("Container.SecurityContext.Capabilities.Drop: want [ALL], got %v", gotDrop)
+	}
+}
+
+// TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem pins
+// the /tmp emptyDir we add to keep tbot writable scratch space available
+// despite readOnlyRootFilesystem: true. Without this, Go runtime / glibc
+// resolver writes inside the container would EROFS unpredictably.
+func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig(), "")
+	pod := dep.Spec.Template.Spec
+
+	tmp := volumeByName(pod.Volumes, "tbot-tmp")
+	if tmp == nil {
+		t.Fatalf("missing tbot-tmp volume; got: %v", volumeNames(pod.Volumes))
+	}
+	if tmp.EmptyDir == nil {
+		t.Errorf("tbot-tmp must be an EmptyDir; got %+v", tmp)
+	}
+
+	c := pod.Containers[0]
+	var tmpMount *corev1.VolumeMount
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == "tbot-tmp" {
+			tmpMount = &c.VolumeMounts[i]
+			break
+		}
+	}
+	if tmpMount == nil {
+		t.Fatalf("container missing tbot-tmp mount; got: %v", mountNames(c.VolumeMounts))
+	}
+	if tmpMount.MountPath != "/tmp" {
+		t.Errorf("tbot-tmp mountPath: want /tmp, got %q", tmpMount.MountPath)
+	}
+}
+
+// TestRenderDeployment_LivenessProbe pins the kubelet-driven recovery
+// contract from ADR 0003: the rendered pod has a liveness probe on
+// tbot's diag port so a wedged listener triggers a restart, but the
+// thresholds are deliberately generous so transient slowness doesn't
+// induce restart storms.
+func TestRenderDeployment_LivenessProbe(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig(), "")
+
+	c := dep.Spec.Template.Spec.Containers[0]
+	if c.LivenessProbe == nil {
+		t.Fatalf("container missing livenessProbe")
+	}
+	lp := c.LivenessProbe
+
+	// TCPSocket on diag port — no commitment to a /livez HTTP path
+	// that may not exist on every tbot version.
+	if lp.TCPSocket == nil {
+		t.Fatalf("livenessProbe must use TCPSocket on the diag port; got %+v", lp)
+	}
+	tp := lp.TCPSocket.Port
+	if tp.Type == intstrTypeString && tp.StrVal != tbotDiagPortName {
+		t.Errorf("livenessProbe TCPSocket port (string): want %q, got %q", tbotDiagPortName, tp.StrVal)
+	}
+	if tp.Type == intstrTypeInt && tp.IntVal != 3001 {
+		t.Errorf("livenessProbe TCPSocket port (int): want 3001, got %d", tp.IntVal)
+	}
+
+	// HTTPGet must NOT be set — keeps the probe agnostic to tbot's
+	// HTTP surface beyond /readyz (which the readiness probe owns).
+	if lp.HTTPGet != nil {
+		t.Errorf("livenessProbe must not declare HTTPGet (TCPSocket only); got %+v", lp.HTTPGet)
+	}
+
+	if lp.InitialDelaySeconds != 30 {
+		t.Errorf("livenessProbe.InitialDelaySeconds: want 30 (allow join handshake), got %d", lp.InitialDelaySeconds)
+	}
+	if lp.PeriodSeconds != 30 {
+		t.Errorf("livenessProbe.PeriodSeconds: want 30, got %d", lp.PeriodSeconds)
+	}
+	if lp.FailureThreshold != 5 {
+		t.Errorf("livenessProbe.FailureThreshold: want 5 (generous; ADR 0003), got %d", lp.FailureThreshold)
 	}
 }
 

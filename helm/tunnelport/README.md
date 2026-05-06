@@ -21,6 +21,96 @@ NetworkPolicy on the manager pod, and the `gsoci-pull-secret`
 `imagePullSecrets` reference (the cluster-managed pull-secret for
 `gsoci.azurecr.io`).
 
+---
+
+## Security model — RBAC blast radius
+
+Read this **before** you install the chart. The operator runs with a
+single ClusterRole and holds two cluster-scoped read grants that are
+broader than what most operators need; both are deliberate trade-offs
+documented below. The full grant table is under
+[Operator RBAC summary](#operator-rbac-summary).
+
+### Cluster-scoped permissions the operator holds
+
+| Resource | Verbs | Why cluster-scoped |
+|---|---|---|
+| `secrets` | `get;list;watch` | The operator must watch the user-named `tokenRef` Secret in **whatever namespace** the platform team places the `RemoteApp` CR. Per-namespace `RoleBinding`s would force chart consumers to re-grant on every new `RemoteApp` namespace. |
+| `pods` | `get;list;watch` | Status synthesis reads pod-level state (readiness, last termination, restart count) of the rendered tbot Deployments to populate `RemoteApp.status.lastError` and the `Ready` condition — also in the CR's namespace, which can be anywhere in the cluster. |
+| `access.giantswarm.io/remoteapps` | `get;list;watch` | The CR is cluster-scoped-watched by design (one operator, many consumer namespaces). |
+
+The operator **never** writes to `secrets` (no `create`/`update`/
+`patch`/`delete`), and **never** reads `pods/log` (ADR 0003). Owned-
+object writes (`deployments`, `services`, `configmaps`) are the only
+mutations it performs, all scoped to the CR's own namespace.
+
+### The operator never reads `Secret.Data`
+
+`get;list;watch` on Secrets is a Kubernetes-API blunt instrument — there
+is no verb that distinguishes metadata-only access from data access on
+Secrets. The "never read data" property is therefore enforced **in
+code**, not in RBAC:
+
+* The operator references each token Secret by `(name, key,
+  resourceVersion)` only. The Secret's contents are mounted into the
+  tbot pod by the kubelet; the operator process never sees them.
+* This is verified by an AST-level test:
+  [`internal/controller/remoteapp/secret_watch_test.go`](../../internal/controller/remoteapp/secret_watch_test.go)
+  parses every Go file in the controller package and fails the build
+  if it spots a `Secret.Data` selector expression. Anyone who tries to
+  add `secret.Data[...]` to the reconciler gets a red CI signal.
+
+If you are concerned about the breadth of the Secret read grant, your
+defence-in-depth options are: (a) audit-logging on `secrets`
+`get`/`list` from the operator's ServiceAccount, (b) a Kyverno /
+ValidatingAdmissionPolicy guard, or (c) running the operator in a
+dedicated MC where the only Secrets in scope are the token Secrets you
+already trust the operator with.
+
+### Pod-read scope is filtered at runtime by label selector
+
+The pod read grant is also cluster-scoped, but the controller-runtime
+informer cache the operator builds **will be** scoped to a label
+selector — the cache subscribes only to pods carrying
+`tunnelport.giantswarm.io/role=tbot` (the label the reconciler stamps
+onto every tbot pod it renders). In effect the operator process holds
+metadata for *its own* tbot pods only, even though the API grant is
+broader. (At time of writing this label-selector cache scoping is being
+added in a separate bundle; until that lands the cache holds the full
+cluster pod set in memory but the *behaviour* is unchanged — status
+synthesis still only consults pods owned by `RemoteApp` CRs.)
+
+### Static-token rotation: a GitOps responsibility you inherit
+
+Each `RemoteApp` references a static join token via `tokenRef`. Static
+tokens **do not auto-rotate** — they are values you produced on Central
+(via `tctl tokens add` or a `TeleportBot` + token CR) and synced into
+the consumer MC out-of-band.
+
+Operational consequences for the platform team's GitOps pipeline:
+
+* You own the rotation cadence. There is no operator-driven rotation
+  loop. If a token is leaked, you revoke it on Central and re-deliver
+  a new value via the same sealed-secret / sops / ESO path.
+* You own the *renewal* schedule for the underlying `TeleportBot`'s
+  `token_ttl` on Central; the consumer-MC Secret value must be
+  re-synced before that TTL elapses or new tbot pod starts will fail
+  to join (ADR 0001 explains why the alternative — the `kubernetes`
+  join method — was rejected; the trade-off is exactly this rotation
+  burden).
+* When the `tokenRef` Secret content changes, the operator auto-rolls
+  the tbot Deployment by stamping the Secret's `resourceVersion` onto
+  the pod-template annotation — but it cannot help you if the new
+  token is invalid. tbot pods will `CrashLoopBackOff` and
+  `status.lastError` will surface the kubelet-visible failure; a human
+  has to pick that up.
+
+If your GitOps pipeline cannot guarantee a rotation cadence shorter
+than your token-leak detection window, the operator is not the layer
+that fixes that — it is the layer that magnifies the consequence.
+
+---
+
 ## Values surface (top-level keys only — see `values.yaml` for the full set)
 
 | Key | Default | Notes |
@@ -29,7 +119,7 @@ NetworkPolicy on the manager pod, and the `gsoci-pull-secret`
 | `image.registry` / `image.name` / `image.tag` | `gsoci.azurecr.io/giantswarm/tunnelport`, tag falls back to `.Chart.AppVersion` | Operator container image. |
 | `imagePullSecret` | `gsoci-pull-secret` | The cluster-managed pull-secret for `gsoci.azurecr.io`. The chart **references** it by name; the Secret itself must be provisioned out-of-band. |
 | `resources` | 50m/64Mi → 200m/256Mi | Operator container requests/limits. |
-| `tbot.image` | `public.ecr.aws/gravitational/teleport-distroless:16` | Single global tbot image for **every** rendered `RemoteApp` Deployment. RemoteApp.spec deliberately has no per-CR override. |
+| `tbot.image` | `public.ecr.aws/gravitational/teleport-distroless:16@sha256:...` | Single global tbot image for **every** rendered `RemoteApp` Deployment. **Pinned by digest** so a re-push behind the floating `:16` tag can't silently change tbot's config schema underneath the operator. RemoteApp.spec deliberately has no per-CR override. |
 | `tbot.resources.requests` / `tbot.resources.limits` | 50m/64Mi → 200m/256Mi | Cluster-wide defaults for every rendered tbot pod. Same no-per-CR-override rule. |
 | `crds.install` | `true` | Set to `false` if the CRD is delivered by a separate bootstrap chart. The chart's CRD bundle carries `helm.sh/resource-policy: keep`, so live `RemoteApp`s survive `helm uninstall`. |
 | `networkPolicy.enabled` | `true` | The operator-pod NetworkPolicy. See "NetworkPolicy responsibilities" below for the **rendered tbot pod** policy story (different concern). |
@@ -90,6 +180,18 @@ A typical policy allows:
 join token bound to that `RemoteApp`'s `TeleportBot`. The chart **does
 not create, copy, or template** that Secret.
 
+> **Required label:** every token Secret you deliver MUST carry the
+> label `tunnelport.giantswarm.io/role=token-secret`. The operator's
+> informer cache subscribes to that label selector only — Secrets
+> without it are invisible to the operator (no watch events, no `Get`
+> via the cache, `status.TokenSecretBound` will stay `False`). This is
+> a deliberate cache-scoping measure: it keeps the operator's
+> in-memory Secret set narrow, and it keeps unrelated Secrets in the
+> namespace out of its blast radius. The operator never writes this
+> label itself (it never mutates user-managed Secrets), so your GitOps
+> templating, sealing tool, or ExternalSecret manifest must include
+> it.
+
 The expected flow on the consumer MC:
 
 1. The platform team produces the join-token value out of band (e.g.
@@ -97,7 +199,9 @@ The expected flow on the consumer MC:
    managed `TeleportBot` + `tctl bots tokens` step).
 2. The token value is stored encrypted in Git via a sealing/sync
    mechanism (sealed-secrets, sops, External Secrets Operator) and
-   delivered into the same namespace as the `RemoteApp` CR.
+   delivered into the same namespace as the `RemoteApp` CR, **with
+   `metadata.labels.tunnelport.giantswarm.io/role` set to
+   `token-secret`** so the operator's cache subscribes to it.
 3. The `RemoteApp.spec.tokenRef.{name,key}` references the resulting
    `Secret`; the operator mounts it into the tbot pod by **name only**.
 
@@ -175,7 +279,6 @@ Generated from `templates/rbac.yaml`:
 |---|---|---|
 | `access.giantswarm.io/remoteapps` | `get;list;watch` | Spec is read-only. |
 | `access.giantswarm.io/remoteapps/status` | `get;update;patch` | Slice 4 populates this. |
-| `access.giantswarm.io/remoteapps/finalizers` | `update` | Reserved for future cleanup hooks. |
 | `secrets` | `get;list;watch` | **Metadata-only by code** — see "Token Secret delivery". No `create`/`update`/`patch`/`delete`. |
 | `apps/deployments` | `get;list;watch;create;update;patch;delete` | Owned objects. |
 | `services`, `configmaps` | `get;list;watch;create;update;patch;delete` | Owned objects. |

@@ -35,7 +35,7 @@ import (
 )
 
 // envtest bootstrap shared by every controller test in this package.
-// Pattern mirrors internal/apivalidation/suite_test.go: load CRDs from
+// Pattern mirrors internal/crdacceptance/suite_test.go: load CRDs from
 // config/crd/bases, start the API server, build a typed client.
 
 var (
