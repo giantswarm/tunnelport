@@ -40,5 +40,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template stamps `tunnelport.giantswarm.io/config-hash` so spec changes
   that affect the ConfigMap (port, appName, proxyAddr) trigger a rolling
   update; replicas-only changes scale without rolling.
+- Watch on `Secret` resources, scoped via a Secret-to-RemoteApp mapper
+  (`mapSecretToRemoteApps`) that returns `reconcile.Request`s only for
+  `RemoteApp`s whose `spec.tokenRef.name` matches the event's Secret in
+  the same namespace. Unrelated Secret churn produces an empty fan-out
+  and never reaches the workqueue. The reconciler reads only the
+  Secret's `metadata.resourceVersion` (never `Secret.Data`) and stamps
+  it onto the pod-template annotation
+  `tunnelport.giantswarm.io/token-secret-version`, so a token rotation
+  changes the pod-template-hash and the Deployment rolls via its
+  existing `RollingUpdate` strategy. RBAC adds `get;list;watch` on
+  `secrets`; no `update`/`patch`/`delete`. An AST-based static check in
+  the controller package's tests rejects any `secret.Data` access.
+
+### Changed
+
+- `renderDeployment` now takes a `tokenSecretVersion string` argument
+  threaded from the reconciler's pre-render Secret read.
 
 [Unreleased]: https://github.com/giantswarm/tunnelport/tree/master
