@@ -7,4 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-[Unreleased]: https://github.com/giantswarm/REPOSITORY_NAME/tree/master
+### Changed
+
+- Replaced legacy microkit/operatorkit scaffold with kubebuilder v4 layout
+  (`cmd/main.go`, `api/v1alpha1/`, `config/{crd,rbac,samples,...}`, `PROJECT`).
+
+### Added
+
+- `RemoteApp` API type in group `access.giantswarm.io/v1alpha1` with required
+  `appName`, `port` (1–65535), `proxyAddr`, and `tokenRef.{name,key}` fields
+  plus optional `replicas`. Status subresource carries `ready`, `lastError`,
+  `observedGeneration`, and `conditions` (with constants `Ready` and
+  `TokenSecretBound`). CRD generated to `config/crd/bases/`, sample CR at
+  `config/samples/access_v1alpha1_remoteapp.yaml`.
+- envtest-driven validation suite under `internal/apivalidation/` covering
+  acceptance, per-field rejection, status subresource generation semantics,
+  and sample-CR drift.
+
+[Unreleased]: https://github.com/giantswarm/tunnelport/tree/master

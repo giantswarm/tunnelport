@@ -1,4 +1,10 @@
 *.swp
 TODO
-/template-operator
+/tunnelport
 !vendor/**
+
+# kubebuilder
+/bin/
+/dist/
+cover.out
+*.test
