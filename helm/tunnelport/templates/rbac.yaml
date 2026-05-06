@@ -1,0 +1,144 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-manager
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+rules:
+# RemoteApp itself — read-only at the spec level. The reconciler updates
+# only the status subresource. `finalizers` is open for future slices
+# that want a finalizer-driven cleanup hook (slice 02 doesn't use one;
+# OwnerReferences GC the children).
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps/status
+  verbs:
+  - get
+  - update
+  - patch
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps/finalizers
+  verbs:
+  - update
+
+# Token Secrets — `get`/`list`/`watch` only, no `create`/`update`/`patch`/
+# `delete`. The operator code reads ObjectMeta (`name`, `resourceVersion`)
+# only and never the Secret's data; see README "Token delivery and Secret
+# read access" and ADR 0001. Kubernetes RBAC has no verb that distinguishes
+# metadata-only access from data access on Secrets, so this is
+# enforced *by code review*, not by RBAC. Slice 5 adds the watch wiring;
+# the chart RBAC is set up here so slice 5 has nothing to alter on the
+# packaging side.
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
+# Owned objects rendered in the CR's namespace. The operator reconciles
+# RemoteApps cluster-wide, so these have to be cluster-scoped via the
+# ClusterRole — but the operator only ever writes them in the namespace
+# of the CR being reconciled.
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - configmaps
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+
+# Leader-election: leases in the operator's own namespace. controller-
+# runtime defaults to a `coordination.k8s.io/leases` lock; the
+# Deployment template below sets --leader-elect=true.
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
+  - delete
+
+# Events: the operator emits Kubernetes Events alongside status
+# conditions (slice 4 wires this up; the verb is harmless before then).
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+
+# DELIBERATELY NOT GRANTED, per ADR 0003 / ADR 0001:
+#   * `pods/log`               — the operator never reads container logs;
+#                                status surfaces k8s-visible state only.
+#   * `secrets` create/update  — token Secrets are delivered out-of-band
+#     /patch/delete              (GitOps + sealed/sync). The operator
+#                                neither produces nor mutates them.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-manager
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "tunnelport.fullname" . }}-manager
+subjects:
+- kind: ServiceAccount
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+---
+# Metrics-reader ClusterRole — bound to the Prometheus ServiceAccount on
+# each consumer MC out-of-band (one decision per cluster). Defining the
+# ClusterRole inline keeps the metrics endpoint usable without forcing
+# every chart consumer to copy-paste the verb list.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-metrics-reader
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get

@@ -46,6 +46,25 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	@$(MAKE) --no-print-directory update-helm-crds
+
+.PHONY: update-helm-crds
+update-helm-crds: ## Sync helm/tunnelport/templates/crds.yml from config/crd/bases/.
+	@bash hack/update-helm-crds.sh
+
+.PHONY: verify-helm-crds
+verify-helm-crds: ## Fail if helm/tunnelport/templates/crds.yml is out of sync with config/crd/bases/.
+	@bash hack/update-helm-crds.sh >/dev/null
+	@if ! git diff --quiet --exit-code -- helm/tunnelport/templates/crds.yml; then \
+		echo "helm/tunnelport/templates/crds.yml is out of sync with config/crd/bases/."; \
+		echo "Run 'make update-helm-crds' and commit the result."; \
+		git --no-pager diff -- helm/tunnelport/templates/crds.yml; \
+		exit 1; \
+	fi
+
+.PHONY: helm-lint
+helm-lint: ## Run `helm lint` against helm/tunnelport.
+	helm lint helm/tunnelport
 
 .PHONY: generate
 generate: controller-gen goimports ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

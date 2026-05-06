@@ -1,6 +1,0 @@
-apiVersion: "v1"
-appVersion: "[[ .AppVersion ]]"
-description: "Chart holding tunnelport."
-home: "https://github.com/giantswarm/tunnelport"
-name: "tunnelport"
-version: "[[ .Version ]]"

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: tunnelport
+description: |
+  tunnelport — Giant Swarm operator that wraps a Teleport tbot
+  application-tunnel + a Kubernetes Service behind a single `RemoteApp` CR,
+  so workloads on a consumer management cluster can reach a
+  Teleport-exposed app as if it were a local Service.
+type: application
+home: https://github.com/giantswarm/tunnelport
+sources:
+  - https://github.com/giantswarm/tunnelport
+# Both `version` and `appVersion` are rewritten by app-build-suite at
+# release time from the git tag. Keep them as `0.0.0` placeholders so the
+# unreleased chart still installs cleanly with `helm install`.
+version: 0.0.0
+appVersion: 0.0.0
+annotations:
+  application.giantswarm.io/team: bumblebee

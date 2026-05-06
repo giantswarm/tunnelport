@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+spec:
+  # Single replica. controller-runtime leader-election guards against
+  # accidental multi-active configurations, but the chart ships one
+  # replica and lets HA be a re-deploy decision (the operator's
+  # blast radius is small enough that single-replica + Recreate is fine).
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "tunnelport.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "tunnelport.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tunnelport.fullname" . }}
+      {{- with .Values.imagePullSecret }}
+      imagePullSecrets:
+      - name: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: manager
+        image: {{ include "tunnelport.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        # The four `--tbot-*` flags are how Helm values flow into every
+        # tbot Deployment the operator renders. The reconciler reads them
+        # once at startup (cmd/main.go) and stamps them onto every tbot
+        # Deployment. There is deliberately no per-RemoteApp override.
+        args:
+        - --leader-elect=true
+        - --health-probe-bind-address=:{{ .Values.ports.health }}
+        - --metrics-bind-address=:{{ .Values.ports.metrics }}
+        - --metrics-secure=true
+        - --tbot-image={{ .Values.tbot.image }}
+        - --tbot-cpu-request={{ .Values.tbot.resources.requests.cpu }}
+        - --tbot-memory-request={{ .Values.tbot.resources.requests.memory }}
+        - --tbot-cpu-limit={{ .Values.tbot.resources.limits.cpu }}
+        - --tbot-memory-limit={{ .Values.tbot.resources.limits.memory }}
+        ports:
+        - name: metrics
+          containerPort: {{ .Values.ports.metrics }}
+          protocol: TCP
+        - name: health
+          containerPort: {{ .Values.ports.health }}
+          protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: health
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: health
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          {{- toYaml .Values.resources | nindent 10 }}
+        securityContext:
+          {{- toYaml .Values.securityContext | nindent 10 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,96 @@
+# Namespace the operator is installed into. The chart does not create
+# this namespace — `helm install --create-namespace` does, or your
+# GitOps tooling does. Leaving this configurable is harmless; the
+# operator-rendered resources live in the *RemoteApp's* namespace, not
+# this one.
+installNamespace: tunnelport-system
+
+# Operator container image. `tag` falls back to .Chart.AppVersion (which
+# app-build-suite rewrites from the git tag at release time).
+image:
+  registry: gsoci.azurecr.io
+  name: giantswarm/tunnelport
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# The cluster-managed pull secret for `gsoci.azurecr.io`. The chart
+# references this Secret by name on the manager pod template; the
+# Secret itself is provisioned out-of-band (cluster-scoped concern,
+# not the operator's). Set to "" to skip the imagePullSecrets entry.
+imagePullSecret: gsoci-pull-secret
+
+# Operator resource requests/limits. Modest defaults — the operator does
+# nothing per-Reconcile except CRUD three small objects.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+
+# Per-tbot-Deployment defaults. These flow into the operator manager's
+# CLI flags (`--tbot-image`, `--tbot-cpu-request`, etc.) which the
+# operator stamps onto every tbot Deployment it renders. They are
+# cluster-wide defaults — RemoteApp.spec deliberately does not let CR
+# authors override them.
+tbot:
+  image: public.ecr.aws/gravitational/teleport-distroless:16
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+
+# CRD packaging. With `crds.install: true` (the default) the chart
+# bundles the CRD inline in `templates/crds.yml` with
+# `helm.sh/resource-policy: keep`, so `helm uninstall` does NOT delete
+# the CRD (and the RemoteApp instances it admits). Set to `false` if
+# the CRD is managed out-of-band — e.g. by a cluster-bootstrap chart.
+crds:
+  install: true
+
+# NetworkPolicy for the operator's own manager pod (not for the rendered
+# tbot pods — those are tenant resources, see README). Per GS convention
+# for kubebuilder operators: default-deny with explicit allow rules for
+# kube-apiserver egress and metrics ingress.
+networkPolicy:
+  enabled: true
+  # CIDR blocks the manager is allowed to reach for kube-apiserver
+  # egress. The default 0.0.0.0/0 is deliberately permissive — kube-API
+  # endpoints vary by infrastructure and a chart-time IP narrowing is
+  # both fragile and false-confidence. Tighten in a values overlay
+  # per-MC if your platform team owns a stable kube-API CIDR.
+  apiServerCIDR: 0.0.0.0/0
+
+# Ports the manager listens on. Exposed here only so `networkPolicy`
+# stays in sync with the actual flag values.
+ports:
+  metrics: 8443
+  health: 8081
+
+# Pod-level securityContext. Defaults match the GS operator convention.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container-level securityContext. Distroless + readOnlyRootFilesystem.
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
