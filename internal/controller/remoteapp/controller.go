@@ -106,17 +106,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.reconcileConfigMap(ctx, cr); err != nil {
+	if err := r.applyOwned(ctx, cr, renderConfigMap(cr, r.Config), &corev1.ConfigMap{}, mergeConfigMap); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile ConfigMap: %w", err)
 	}
 	view := r.observeTokenSecret(ctx, cr)
 	if view.FetchErr != nil {
 		return ctrl.Result{}, fmt.Errorf("observe token Secret: %w", view.FetchErr)
 	}
-	if err := r.reconcileDeployment(ctx, cr, view.ResourceVersion); err != nil {
+	if err := r.applyOwned(ctx, cr, renderDeployment(cr, r.Config, view.ResourceVersion), &appsv1.Deployment{}, mergeDeployment); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile Deployment: %w", err)
 	}
-	if err := r.reconcileService(ctx, cr); err != nil {
+	if err := r.applyOwned(ctx, cr, renderService(cr, r.Config), &corev1.Service{}, mergeService); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile Service: %w", err)
 	}
 
@@ -131,13 +131,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, nil
 }
 
-func (r *Reconciler) reconcileConfigMap(ctx context.Context, cr *accessv1alpha1.RemoteApp) error {
-	desired := renderConfigMap(cr, r.Config)
+// applyOwned is the create-or-update scaffold shared by every owned-object
+// reconcile. The merge closure is the seam: each owned type expresses
+// which fields it controls (and, by omission, which the API server or
+// child controllers own). Server-Side Apply is the deeper alternative,
+// but this client-side merge keeps existing test contracts intact.
+func (r *Reconciler) applyOwned(
+	ctx context.Context,
+	cr *accessv1alpha1.RemoteApp,
+	desired client.Object,
+	existing client.Object,
+	merge func(existing, desired client.Object),
+) error {
 	if err := setOwnerRef(cr, desired); err != nil {
 		return fmt.Errorf("set owner ref: %w", err)
 	}
-
-	existing := &corev1.ConfigMap{}
 	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
 	if apierrors.IsNotFound(err) {
 		return r.Create(ctx, desired)
@@ -145,64 +153,43 @@ func (r *Reconciler) reconcileConfigMap(ctx context.Context, cr *accessv1alpha1.
 	if err != nil {
 		return err
 	}
-
-	// Only update mutable fields. Labels and Data are the load-bearing
-	// state for this slice; OwnerReferences stay stable across reconciles.
-	existing.Labels = desired.Labels
-	existing.Data = desired.Data
-	existing.OwnerReferences = desired.OwnerReferences
+	merge(existing, desired)
 	return r.Update(ctx, existing)
 }
 
-func (r *Reconciler) reconcileDeployment(ctx context.Context, cr *accessv1alpha1.RemoteApp, tokenSecretVersion string) error {
-	desired := renderDeployment(cr, r.Config, tokenSecretVersion)
-	if err := setOwnerRef(cr, desired); err != nil {
-		return fmt.Errorf("set owner ref: %w", err)
-	}
-
-	existing := &appsv1.Deployment{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
-	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	}
-	if err != nil {
-		return err
-	}
-
-	// Mutate only the fields we render. The Deployment controller fills
-	// in things like Status and pod-template defaults — leave those.
-	existing.Labels = desired.Labels
-	existing.OwnerReferences = desired.OwnerReferences
-	existing.Spec.Replicas = desired.Spec.Replicas
-	existing.Spec.Selector = desired.Spec.Selector
-	existing.Spec.Strategy = desired.Spec.Strategy
-	existing.Spec.Template = desired.Spec.Template
-	return r.Update(ctx, existing)
+// mergeConfigMap copies the rendered fields onto the existing ConfigMap.
+// OwnerReferences is rewritten so the controller-style ref is stable.
+func mergeConfigMap(existing, desired client.Object) {
+	e := existing.(*corev1.ConfigMap)
+	d := desired.(*corev1.ConfigMap)
+	e.Labels = d.Labels
+	e.Data = d.Data
+	e.OwnerReferences = d.OwnerReferences
 }
 
-func (r *Reconciler) reconcileService(ctx context.Context, cr *accessv1alpha1.RemoteApp) error {
-	desired := renderService(cr, r.Config)
-	if err := setOwnerRef(cr, desired); err != nil {
-		return fmt.Errorf("set owner ref: %w", err)
-	}
+// mergeDeployment copies the rendered fields onto the existing Deployment.
+// Status and pod-template defaults are left to the Deployment controller.
+func mergeDeployment(existing, desired client.Object) {
+	e := existing.(*appsv1.Deployment)
+	d := desired.(*appsv1.Deployment)
+	e.Labels = d.Labels
+	e.OwnerReferences = d.OwnerReferences
+	e.Spec.Replicas = d.Spec.Replicas
+	e.Spec.Selector = d.Spec.Selector
+	e.Spec.Strategy = d.Spec.Strategy
+	e.Spec.Template = d.Spec.Template
+}
 
-	existing := &corev1.Service{}
-	err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing)
-	if apierrors.IsNotFound(err) {
-		return r.Create(ctx, desired)
-	}
-	if err != nil {
-		return err
-	}
-
-	// ClusterIP is allocated by the API server on first create; preserve
-	// it across updates to avoid spurious "field is immutable" errors.
-	existing.Labels = desired.Labels
-	existing.OwnerReferences = desired.OwnerReferences
-	existing.Spec.Type = desired.Spec.Type
-	existing.Spec.Selector = desired.Spec.Selector
-	existing.Spec.Ports = desired.Spec.Ports
-	return r.Update(ctx, existing)
+// mergeService preserves ClusterIP (allocated by the API server on first
+// create — touching it raises "field is immutable" on update).
+func mergeService(existing, desired client.Object) {
+	e := existing.(*corev1.Service)
+	d := desired.(*corev1.Service)
+	e.Labels = d.Labels
+	e.OwnerReferences = d.OwnerReferences
+	e.Spec.Type = d.Spec.Type
+	e.Spec.Selector = d.Spec.Selector
+	e.Spec.Ports = d.Spec.Ports
 }
 
 // SetupWithManager wires this Reconciler to its CR type and the three
