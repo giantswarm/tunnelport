@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/yaml"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
@@ -356,51 +357,76 @@ func configHash(cr *accessv1alpha1.RemoteApp, cfg Config) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// tbotConfig renders the tbot YAML config for an application-tunnel mode
-// pod. Schema source: gravitational/teleport `lib/tbot/...`:
+// tbotFile mirrors the slice of tbot's config schema we use. Field order
+// is the on-the-wire YAML order. sigs.k8s.io/yaml is a JSON↔YAML bridge
+// so it honours `json:` tags, not `yaml:`. Schema source:
+// gravitational/teleport `lib/tbot/...`:
 //
-//   - top-level: `version`, `proxy_server`, `onboarding`, `storage`,
-//     `diag_addr`, `services` (see `lib/tbot/config/config.go`).
+//   - top-level: `version`, `proxy_server`, `insecure`, `onboarding`,
+//     `storage`, `diag_addr`, `services` (see `lib/tbot/config/config.go`).
 //   - `onboarding.token` accepts either a literal token value OR a file
 //     path; tbot dereferences a path automatically. We point it at the
-//     mounted Secret's key, so the literal token never leaves the
-//     Secret volume — the operator has no need to read `Secret.Data`.
-//   - `services.application-tunnel.listen` (NOT `listener`) — the
-//     upstream YAML tag is `listen` (see
-//     `lib/tbot/services/application/tunnel_config.go`).
-//   - `diag_addr` enables tbot's diag HTTP listener that serves
-//     `/readyz`, which slice 4's pod readiness probe targets. Without
-//     this field tbot does not bind the diag listener and pod-Ready
-//     would never flip true.
+//     mounted Secret's key, so the literal token never leaves the Secret
+//     volume — the operator has no need to read `Secret.Data`.
+//   - `services.application-tunnel.listen` (NOT `listener`) — the upstream
+//     YAML tag is `listen` (see `lib/tbot/services/application/tunnel_config.go`).
+//   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
+//     which the pod readiness probe targets.
+type tbotFile struct {
+	Version     string         `json:"version"`
+	ProxyServer string         `json:"proxy_server"`
+	// Insecure uses bool+omitempty so `false` drops the key entirely —
+	// the production render must not include `insecure:` at all.
+	Insecure   bool           `json:"insecure,omitempty"`
+	Onboarding tbotOnboarding `json:"onboarding"`
+	Storage    tbotStorage    `json:"storage"`
+	DiagAddr   string         `json:"diag_addr"`
+	Services   []tbotService  `json:"services"`
+}
+
+type tbotOnboarding struct {
+	JoinMethod string `json:"join_method"`
+	Token      string `json:"token"`
+}
+
+type tbotStorage struct {
+	Type string `json:"type"`
+	Path string `json:"path"`
+}
+
+type tbotService struct {
+	Type    string `json:"type"`
+	AppName string `json:"app_name,omitempty"`
+	Listen  string `json:"listen,omitempty"`
+}
+
 func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg Config) string {
-	// Path matches the volumeMount used in renderDeployment.
-	tokenPath := fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key)
-
-	insecureLine := ""
-	if cfg.Insecure {
-		insecureLine = "insecure: true\n"
+	doc := tbotFile{
+		Version:     "v2",
+		ProxyServer: cr.Spec.ProxyAddr,
+		Insecure:    cfg.Insecure,
+		Onboarding: tbotOnboarding{
+			JoinMethod: "token",
+			Token:      fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key),
+		},
+		Storage: tbotStorage{
+			Type: "directory",
+			Path: mountPathTbotStorage,
+		},
+		DiagAddr: fmt.Sprintf("0.0.0.0:%d", tbotDiagPort),
+		Services: []tbotService{
+			{
+				Type:    "application-tunnel",
+				AppName: cr.Spec.AppName,
+				Listen:  fmt.Sprintf("tcp://0.0.0.0:%d", cr.Spec.Port),
+			},
+		},
 	}
-
-	return fmt.Sprintf(`version: v2
-proxy_server: %[1]s
-%[7]sonboarding:
-  join_method: token
-  token: %[2]s
-storage:
-  type: directory
-  path: /var/lib/tbot
-diag_addr: 0.0.0.0:%[5]d
-services:
-  - type: application-tunnel
-    app_name: %[3]s
-    listen: tcp://0.0.0.0:%[4]d
-`,
-		cr.Spec.ProxyAddr,
-		tokenPath,
-		cr.Spec.AppName,
-		cr.Spec.Port,
-		tbotDiagPort,
-		"", // %[6]s reserved
-		insecureLine,
-	)
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		// Fixed-shape struct of scalars/slices: yaml.Marshal cannot fail
+		// here. Panic preserves the previous "no error path" interface.
+		panic(fmt.Errorf("tbotConfig marshal: %w", err))
+	}
+	return string(out)
 }
