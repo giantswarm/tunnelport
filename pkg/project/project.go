@@ -1,10 +1,10 @@
 package project
 
 var (
-	description = "The template-operator does something."
+	description = "The tunnelport does something."
 	gitSHA      = "n/a"
-	name        = "template-operator"
-	source      = "https://github.com/giantswarm/template-operator"
+	name        = "tunnelport"
+	source      = "https://github.com/giantswarm/tunnelport"
 	version     = "0.1.0-dev"
 )
 
