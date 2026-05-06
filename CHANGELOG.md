@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   markers on the `remoteapp` controller package; the previous hand-written
   `pods` rule is removed (ADR 0003 forbids `pods/log` and the operator
   doesn't need pod read access at this point).
+- `manager-role` now also grants read-only access on `pods` and `secrets`
+  (`get;list;watch`) so the reconciler can derive `status.lastError`
+  from pod metadata and verify the token Secret's named key for the
+  `TokenSecretBound` condition. `pods/log` is still excluded per ADR
+  0003 (verified by a manifest test).
+- The rendered tbot Deployment carries a readiness probe pointing at
+  tbot's diag `/readyz` endpoint on a new named container port `diag`
+  (3001), so pod-`Ready` reflects tunnel-up rather than process-up.
 
 ### Added
 
@@ -40,5 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   template stamps `tunnelport.giantswarm.io/config-hash` so spec changes
   that affect the ConfigMap (port, appName, proxyAddr) trigger a rolling
   update; replicas-only changes scale without rolling.
+- Status reconciliation: `RemoteApp.status` is now populated from
+  k8s-visible state only (ADR 0003). `status.ready` mirrors at-least-one
+  pod-`Ready`; `status.lastError` is derived from pod `Phase` /
+  `ContainerStatuses` / `RestartCount` / last termination reason
+  (e.g. `"CrashLoopBackOff (5 restarts), last termination: Error (137)"`);
+  `status.observedGeneration` follows the standard kubebuilder pattern;
+  `status.conditions` carries `Ready` and `TokenSecretBound` as
+  `metav1.Condition`s. The reconciler watches owned pods via a
+  label-driven `Watches(&corev1.Pod{}, ...)` keyed on
+  `tunnelport.giantswarm.io/remoteapp` so pod-state changes refresh
+  status promptly.
 
 [Unreleased]: https://github.com/giantswarm/tunnelport/tree/master
