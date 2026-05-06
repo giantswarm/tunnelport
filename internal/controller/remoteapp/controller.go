@@ -50,6 +50,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -429,32 +430,25 @@ func (r *Reconciler) listTbotPods(ctx context.Context, cr *accessv1alpha1.Remote
 	return pods.Items, nil
 }
 
-// statusEqual is a structural equality check that ignores LastTransitionTime
-// on conditions (which would otherwise force a write on every reconcile).
-// meta.SetStatusCondition already preserves LastTransitionTime when only
-// non-time fields change; this guard avoids the corner case where every
-// reconcile bumps it.
+// statusEqual returns true when two RemoteAppStatus values are equivalent
+// for hot-loop-suppression purposes. LastTransitionTime is stripped from
+// each condition before comparison: meta.SetStatusCondition already
+// preserves it across non-time changes, and ignoring it here prevents
+// reconcile loops on time-only diffs. Anything else added to
+// RemoteAppStatus is compared automatically by Semantic.DeepEqual — no
+// per-field maintenance needed.
 func statusEqual(a, b *accessv1alpha1.RemoteAppStatus) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.Ready != b.Ready ||
-		a.LastError != b.LastError ||
-		a.ObservedGeneration != b.ObservedGeneration ||
-		len(a.Conditions) != len(b.Conditions) {
-		return false
+	ac, bc := a.DeepCopy(), b.DeepCopy()
+	for i := range ac.Conditions {
+		ac.Conditions[i].LastTransitionTime = metav1.Time{}
 	}
-	for i := range a.Conditions {
-		ac, bc := a.Conditions[i], b.Conditions[i]
-		if ac.Type != bc.Type ||
-			ac.Status != bc.Status ||
-			ac.Reason != bc.Reason ||
-			ac.Message != bc.Message ||
-			ac.ObservedGeneration != bc.ObservedGeneration {
-			return false
-		}
+	for i := range bc.Conditions {
+		bc.Conditions[i].LastTransitionTime = metav1.Time{}
 	}
-	return true
+	return equality.Semantic.DeepEqual(ac, bc)
 }
 
 func boolToConditionStatus(b bool) metav1.ConditionStatus {
