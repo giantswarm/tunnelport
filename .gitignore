@@ -8,5 +8,4 @@ TODO
 /dist/
 cover.out
 *.test
-.claude
-.scratch
+.claude/scheduled_tasks.lock
