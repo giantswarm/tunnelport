@@ -2,3 +2,9 @@
 TODO
 /tunnelport
 !vendor/**
+
+# kubebuilder
+/bin/
+/dist/
+cover.out
+*.test

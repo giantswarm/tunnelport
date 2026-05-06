@@ -1,0 +1,14 @@
+apiVersion: access.giantswarm.io/v1alpha1
+kind: RemoteApp
+metadata:
+  name: remoteapp-sample
+  labels:
+    app.kubernetes.io/name: tunnelport
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  appName: my-teleport-app
+  port: 8080
+  proxyAddr: teleport.example.com:443
+  tokenRef:
+    name: my-teleport-app-token
+    key: token
