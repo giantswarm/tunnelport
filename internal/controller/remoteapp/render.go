@@ -130,6 +130,21 @@ const (
 	mountPathTbotConfig  = "/etc/tbot"
 	mountPathTbotToken   = "/etc/tbot-token"
 	mountPathTbotStorage = "/var/lib/tbot"
+
+	// tbotDiagPort is tbot's diagnostics HTTP listener. tbot binds it on
+	// 127.0.0.1:3001 by default and exposes /readyz which only returns 200
+	// once the application-tunnel is established. Wiring k8s readiness to
+	// this endpoint makes pod-Ready mean "tunnel-up" rather than just
+	// "process-up", which is the contract status.ready relies on.
+	//
+	// HTTPGet vs exec: the diag endpoint binds to localhost only, but the
+	// kubelet executes HTTP probes from the pod network namespace, so a
+	// straight HTTPGet on the named container port works without needing
+	// tbot to bind on 0.0.0.0. We pick HTTPGet over exec because no shell
+	// is required in the tbot image.
+	tbotDiagPort     int32 = 3001
+	tbotDiagPortName       = "diag"
+	tbotDiagReadyz         = "/readyz"
 )
 
 // renderDeployment returns the Deployment that runs tbot for this RemoteApp.
@@ -149,16 +164,15 @@ const (
 //
 // tokenSecretVersion is stamped on the pod-template annotation
 // `tunnelport.giantswarm.io/token-secret-version`. The reconciler reads
-// it from `tokenRef`-Secret's `metadata.resourceVersion` (slice 5);
-// passing "" leaves the annotation present-but-empty so absence and a
-// rotation-to-empty stay distinguishable in the pod-template diff. The
-// argument is a separate parameter rather than a Config field because
-// it changes per-reconcile, not per-operator-process.
+// it from `tokenRef`-Secret's `metadata.resourceVersion`; passing "" leaves
+// the annotation present-but-empty so absence and a rotation-to-empty stay
+// distinguishable in the pod-template diff. The argument is a separate
+// parameter rather than a Config field because it changes per-reconcile,
+// not per-operator-process.
 //
-// Slice 4 extends this renderer to add a readiness probe wired to
-// tbot's diag endpoint.
-//
-// For now there is intentionally no readiness probe — slice 4 owns it.
+// The container declares a readiness probe wired to tbot's diag /readyz
+// (port "diag", 3001) so pod-Ready means tunnel-up — that's what
+// status.ready mirrors.
 func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersion string) *appsv1.Deployment {
 	labels := canonicalLabels(cr)
 	replicas := int32(1)
@@ -246,6 +260,33 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg Config, tokenSecretVersi
 									ContainerPort: cr.Spec.Port,
 									Protocol:      corev1.ProtocolTCP,
 								},
+								{
+									Name:          tbotDiagPortName,
+									ContainerPort: tbotDiagPort,
+									Protocol:      corev1.ProtocolTCP,
+								},
+							},
+							// Readiness wired to tbot's diag /readyz. Pod
+							// transitions to Ready only when the tunnel
+							// is established — that's what status.ready
+							// (slice 4) mirrors. Slice 5 is responsible
+							// for any liveness probe; this slice owns
+							// readiness only.
+							ReadinessProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: tbotDiagReadyz,
+										Port: intstr.FromString(tbotDiagPortName),
+									},
+								},
+								// Conservative defaults: tbot needs a few
+								// seconds for the join + tunnel handshake
+								// at startup. These can move to chart
+								// values later if needed.
+								InitialDelaySeconds: 2,
+								PeriodSeconds:       5,
+								TimeoutSeconds:      2,
+								FailureThreshold:    3,
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

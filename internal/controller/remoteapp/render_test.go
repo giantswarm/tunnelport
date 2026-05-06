@@ -23,8 +23,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
+)
+
+// Aliases keep the readiness-probe assertion legible without importing
+// intstr at every call site.
+const (
+	intstrTypeInt    = intstr.Int
+	intstrTypeString = intstr.String
 )
 
 // fixtureRemoteApp returns a representative RemoteApp the renderers can be
@@ -237,6 +245,57 @@ func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 	}
 	if c.Ports[0].ContainerPort != cr.Spec.Port {
 		t.Errorf("containerPort: want %d, got %d", cr.Spec.Port, c.Ports[0].ContainerPort)
+	}
+}
+
+// TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint pins the
+// acceptance criterion that pod-Ready means tunnel-up. tbot's diag
+// endpoint listens on 127.0.0.1:3001 and exposes /readyz, which only
+// returns 200 once the application-tunnel is established. The rendered
+// container must (a) declare a containerPort named "diag" on 3001 so the
+// kubelet has a target to probe, and (b) define a readinessProbe with an
+// HTTPGet action on that port and path.
+func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig(), "")
+
+	c := dep.Spec.Template.Spec.Containers[0]
+
+	// diag port must be present and named so the probe can reference it.
+	var diagPort *corev1.ContainerPort
+	for i := range c.Ports {
+		if c.Ports[i].Name == "diag" {
+			diagPort = &c.Ports[i]
+			break
+		}
+	}
+	if diagPort == nil {
+		t.Fatalf("container missing 'diag' containerPort; got: %+v", c.Ports)
+	}
+	if diagPort.ContainerPort != 3001 {
+		t.Errorf("diag containerPort: want 3001, got %d", diagPort.ContainerPort)
+	}
+
+	// Readiness probe must be set, and must hit the diag /readyz endpoint
+	// so pod-Ready reflects tunnel-up, not just process-up.
+	if c.ReadinessProbe == nil {
+		t.Fatalf("container missing readinessProbe")
+	}
+	if c.ReadinessProbe.HTTPGet == nil {
+		t.Fatalf("readinessProbe must use HTTPGet (diag endpoint); got %+v", c.ReadinessProbe)
+	}
+	if c.ReadinessProbe.HTTPGet.Path != "/readyz" {
+		t.Errorf("readinessProbe path: want /readyz, got %q", c.ReadinessProbe.HTTPGet.Path)
+	}
+	// Either named-port reference or numeric 3001 is acceptable; tests
+	// pin one to keep the rendered template stable.
+	tp := c.ReadinessProbe.HTTPGet.Port
+	if tp.Type == intstrTypeString && tp.StrVal != "diag" {
+		t.Errorf("readinessProbe port (string): want %q, got %q", "diag", tp.StrVal)
+	}
+	if tp.Type == intstrTypeInt && tp.IntVal != 3001 {
+		t.Errorf("readinessProbe port (int): want 3001, got %d", tp.IntVal)
 	}
 }
 
