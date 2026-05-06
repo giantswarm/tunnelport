@@ -80,9 +80,12 @@ func withAppName(name string) fixtureOpt {
 	}
 }
 
-// withTokenRef overrides spec.tokenRef.{Name,Key}.
-func withTokenRef(name, key string) fixtureOpt {
+// withTokenRefName overrides spec.tokenRef.Name. Spec.TokenRef.Key stays
+// at the default ("token") because every test in this package uses that
+// key — adding a `key` parameter would be unused noise. If a future test
+// needs a different key, widen this option then.
+func withTokenRefName(name string) fixtureOpt {
 	return func(cr *accessv1alpha1.RemoteApp) {
-		cr.Spec.TokenRef = accessv1alpha1.TokenRef{Name: name, Key: key}
+		cr.Spec.TokenRef.Name = name
 	}
 }

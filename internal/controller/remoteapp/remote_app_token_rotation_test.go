@@ -67,7 +67,7 @@ func TestReconciler_TokenRefNameMutationRetargetsDeploymentVolumeAndAnnotation(t
 		t.Fatalf("create tok-a: %v", err)
 	}
 	cr := makeRemoteApp(ctx, t, ns, "rename-target",
-		withTokenRef(tokA.Name, "token"),
+		withTokenRefName(tokA.Name),
 	)
 
 	// (2) Initial Deployment must reference tok-a in the tbot-token

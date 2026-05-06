@@ -44,7 +44,7 @@ var renderFixtureOpts = []fixtureOpt{
 	withName("demo", "tracer"),
 	withUID("uid-tracer"),
 	withAppName("myapp"),
-	withTokenRef("myapp-token", "token"),
+	withTokenRefName("myapp-token"),
 }
 
 func fixtureRemoteApp() *accessv1alpha1.RemoteApp {
@@ -309,7 +309,7 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	// diag port must be present and named so the probe can reference it.
 	var diagPort *corev1.ContainerPort
 	for i := range c.Ports {
-		if c.Ports[i].Name == "diag" {
+		if c.Ports[i].Name == tbotDiagPortName {
 			diagPort = &c.Ports[i]
 			break
 		}
@@ -335,8 +335,8 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	// Either named-port reference or numeric 3001 is acceptable; tests
 	// pin one to keep the rendered template stable.
 	tp := c.ReadinessProbe.HTTPGet.Port
-	if tp.Type == intstrTypeString && tp.StrVal != "diag" {
-		t.Errorf("readinessProbe port (string): want %q, got %q", "diag", tp.StrVal)
+	if tp.Type == intstrTypeString && tp.StrVal != tbotDiagPortName {
+		t.Errorf("readinessProbe port (string): want %q, got %q", tbotDiagPortName, tp.StrVal)
 	}
 	if tp.Type == intstrTypeInt && tp.IntVal != 3001 {
 		t.Errorf("readinessProbe port (int): want 3001, got %d", tp.IntVal)
@@ -447,8 +447,8 @@ func TestRenderDeployment_LivenessProbe(t *testing.T) {
 		t.Fatalf("livenessProbe must use TCPSocket on the diag port; got %+v", lp)
 	}
 	tp := lp.TCPSocket.Port
-	if tp.Type == intstrTypeString && tp.StrVal != "diag" {
-		t.Errorf("livenessProbe TCPSocket port (string): want %q, got %q", "diag", tp.StrVal)
+	if tp.Type == intstrTypeString && tp.StrVal != tbotDiagPortName {
+		t.Errorf("livenessProbe TCPSocket port (string): want %q, got %q", tbotDiagPortName, tp.StrVal)
 	}
 	if tp.Type == intstrTypeInt && tp.IntVal != 3001 {
 		t.Errorf("livenessProbe TCPSocket port (int): want 3001, got %d", tp.IntVal)

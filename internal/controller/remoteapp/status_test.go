@@ -354,7 +354,7 @@ func TestComputeStatus(t *testing.T) {
 	// the rest of the fixture's defaults are inert here. Bumping Generation
 	// to 7 inline rather than carrying a named option for it — only this
 	// one test needs that knob.
-	cr := newRemoteApp(withName("demo", "ra"), withTokenRef("tok", "token"))
+	cr := newRemoteApp(withName("demo", "ra"), withTokenRefName("tok"))
 	cr.Generation = 7
 	bound := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: true}
 	missing := TokenSecretView{Name: "tok", Key: "token"}

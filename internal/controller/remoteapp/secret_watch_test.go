@@ -104,7 +104,7 @@ func TestRenderDeployment_StampsTokenSecretVersionAnnotation(t *testing.T) {
 // and the namespace-local list filter look at. Empty UID is fine here:
 // the fake client doesn't enforce OwnerReference UID round-tripping.
 func remoteAppRefs(namespace, name, tokenSecretName string) *accessv1alpha1.RemoteApp {
-	cr := newRemoteApp(withName(namespace, name), withTokenRef(tokenSecretName, "token"))
+	cr := newRemoteApp(withName(namespace, name), withTokenRefName(tokenSecretName))
 	cr.UID = ""
 	return cr
 }
@@ -325,7 +325,7 @@ func TestReconciler_TokenSecretRotationStampsAnnotationAndRollsDeployment(t *tes
 
 	cr := makeRemoteApp(ctx, t, ns, "rotation-target",
 		withAppName("rotating-app"),
-		withTokenRef(tokenSecret.Name, "token"),
+		withTokenRefName(tokenSecret.Name),
 	)
 
 	// Initial Deployment annotation must equal the Secret's
@@ -405,7 +405,7 @@ func TestReconciler_UnrelatedSecretEditDoesNotAffectDeployment(t *testing.T) {
 
 	cr := makeRemoteApp(ctx, t, ns, "unrelated-target",
 		withAppName("demo"),
-		withTokenRef(tokenSecret.Name, "token"),
+		withTokenRefName(tokenSecret.Name),
 	)
 
 	dep := &appsv1.Deployment{}

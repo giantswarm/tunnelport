@@ -31,7 +31,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -303,11 +302,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Typed locally so the events.EventRecorder import documents the
-	// reconciler-facing contract and survives goimports cleanup until
-	// the reconciler actually calls Recorder.Eventf(...) in a later
-	// bundle.
-	var recorder events.EventRecorder = mgr.GetEventRecorder("remoteapp-controller")
+	// The reconciler doesn't yet call Recorder.Eventf(...); wiring stays
+	// here so a later bundle can emit Events without re-touching main.go.
+	recorder := mgr.GetEventRecorder("remoteapp-controller")
 
 	if err := (&remoteappctrl.Reconciler{
 		Client:      mgr.GetClient(),
