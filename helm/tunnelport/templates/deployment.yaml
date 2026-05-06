@@ -91,7 +91,21 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      # Pod anti-affinity: prefer different nodes for the operator
+      # replicas so a single node failure can't take both down. Soft
+      # (preferred) rather than required so single-node clusters
+      # (kind/dev) can still schedule both replicas. Override the
+      # whole block with .Values.affinity to opt out or tighten.
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  {{- include "tunnelport.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+        {{- end }}
