@@ -19,6 +19,10 @@ replicaCount: 2
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+  # AlwaysAllow ensures a node drain can evict an unhealthy (NotReady)
+  # operator pod even if the PDB is at the disruption budget — required
+  # to prevent a crashlooping replica from blocking drains.
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 # Operator container image. `tag` falls back to .Chart.AppVersion (which
 # app-build-suite rewrites from the git tag at release time).

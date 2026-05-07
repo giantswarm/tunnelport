@@ -13,6 +13,10 @@ spec:
   # the PDB would block voluntary disruptions entirely; the chart
   # ships replicaCount = 2 by default so the PDB is non-blocking.
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  # AlwaysAllow lets a NotReady pod be evicted during a node drain even
+  # when the PDB budget is at zero — without this, a crashlooping pod
+  # plus a PDB can wedge `kubectl drain` indefinitely.
+  unhealthyPodEvictionPolicy: {{ .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
   selector:
     matchLabels:
       {{- include "tunnelport.selectorLabels" . | nindent 6 }}

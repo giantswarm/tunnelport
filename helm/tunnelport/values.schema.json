@@ -16,7 +16,11 @@
       "additionalProperties": false,
       "properties": {
         "enabled": { "type": "boolean" },
-        "minAvailable": { "type": ["integer", "string"] }
+        "minAvailable": { "type": ["integer", "string"] },
+        "unhealthyPodEvictionPolicy": {
+          "type": "string",
+          "enum": ["IfHealthyBudget", "AlwaysAllow"]
+        }
       }
     },
     "image": {
