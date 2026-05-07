@@ -42,12 +42,14 @@ spec:
       protocol: UDP
     - port: 53
       protocol: TCP
-  # Kube-apiserver. The CIDR is configurable; default 0.0.0.0/0 is
-  # deliberately permissive — see values.yaml for the rationale.
-  - to:
-    - ipBlock:
-        cidr: {{ .Values.networkPolicy.apiServerCIDR }}
-    ports:
+  # Kube-apiserver. No `to:` peer is set deliberately: with `to:
+  # ipBlock`, Cilium (GS's primary CNI) does not match traffic
+  # destined for the in-cluster `kubernetes` Service VIP or the
+  # apiserver pod IPs — only off-cluster destinations — so the
+  # operator can't reach kube-API at all. An empty peer set means
+  # "any destination on these ports", which is the right default for
+  # an operator that only ever talks to the apiserver on 443/6443.
+  - ports:
     - port: 443
       protocol: TCP
     - port: 6443

@@ -84,15 +84,11 @@ crds:
 # NetworkPolicy for the operator's own manager pod (not for the rendered
 # tbot pods — those are tenant resources, see README). Per GS convention
 # for kubebuilder operators: default-deny with explicit allow rules for
-# kube-apiserver egress and metrics ingress.
+# kube-apiserver egress and metrics ingress. The kube-API egress rule
+# uses no `to:` peer because Cilium does not match traffic to the
+# in-cluster `kubernetes` Service VIP under `to: ipBlock`.
 networkPolicy:
   enabled: true
-  # CIDR blocks the manager is allowed to reach for kube-apiserver
-  # egress. The default 0.0.0.0/0 is deliberately permissive — kube-API
-  # endpoints vary by infrastructure and a chart-time IP narrowing is
-  # both fragile and false-confidence. Tighten in a values overlay
-  # per-MC if your platform team owns a stable kube-API CIDR.
-  apiServerCIDR: 0.0.0.0/0
 
 # Ports the manager listens on. Exposed here only so `networkPolicy`
 # stays in sync with the actual flag values.
