@@ -1,0 +1,23 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+spec:
+  # minAvailable: 1 — together with replicaCount >= 2 this lets a node
+  # drain take down one replica at a time while leader election keeps
+  # an active reconciler available throughout. With replicaCount = 1
+  # the PDB would block voluntary disruptions entirely; the chart
+  # ships replicaCount = 2 by default so the PDB is non-blocking.
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  # AlwaysAllow lets a NotReady pod be evicted during a node drain even
+  # when the PDB budget is at zero — without this, a crashlooping pod
+  # plus a PDB can wedge `kubectl drain` indefinitely.
+  unhealthyPodEvictionPolicy: {{ .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  selector:
+    matchLabels:
+      {{- include "tunnelport.selectorLabels" . | nindent 6 }}
+{{- end }}

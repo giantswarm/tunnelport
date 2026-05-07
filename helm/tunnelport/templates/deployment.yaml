@@ -6,13 +6,15 @@ metadata:
   labels:
     {{- include "tunnelport.labels" . | nindent 4 }}
 spec:
-  # Single replica. controller-runtime leader-election guards against
-  # accidental multi-active configurations, but the chart ships one
-  # replica and lets HA be a re-deploy decision (the operator's
-  # blast radius is small enough that single-replica + Recreate is fine).
-  replicas: 1
-  strategy:
-    type: Recreate
+  # HA via leader election. controller-runtime's leader-election keeps
+  # exactly one replica reconciling at a time, while a hot standby
+  # absorbs node drains, chart upgrades, and pod evictions without a
+  # window where reconciles stop. RollingUpdate (default) brings up the
+  # new replica before tearing down the old, so leader-handoff is
+  # bounded by the lease's renewal cadence rather than by pod startup.
+  # Tunable via .Values.replicaCount; the chart-default is 2 because
+  # token-rotation reconciles must not pause for chart-upgrade windows.
+  replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
       {{- include "tunnelport.selectorLabels" . | nindent 6 }}
@@ -32,6 +34,15 @@ spec:
       - name: manager
         image: {{ include "tunnelport.image" . }}
         imagePullPolicy: {{ .Values.image.pullPolicy }}
+        # POD_NAMESPACE is consumed by cmd/main.go to scope the
+        # leader-election Lease to this Deployment's own namespace.
+        # Injected via the downward API so the binary doesn't need a
+        # filesystem-mounted ServiceAccount token to discover it.
+        env:
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         # The four `--tbot-*` flags are how Helm values flow into every
         # tbot Deployment the operator renders. The reconciler reads them
         # once at startup (cmd/main.go) and stamps them onto every tbot
@@ -80,7 +91,21 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      # Pod anti-affinity: prefer different nodes for the operator
+      # replicas so a single node failure can't take both down. Soft
+      # (preferred) rather than required so single-node clusters
+      # (kind/dev) can still schedule both replicas. Override the
+      # whole block with .Values.affinity to opt out or tighten.
       affinity:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- if .Values.affinity }}
+        {{- toYaml .Values.affinity | nindent 8 }}
+        {{- else }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  {{- include "tunnelport.selectorLabels" . | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+        {{- end }}
