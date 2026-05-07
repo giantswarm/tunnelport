@@ -346,6 +346,12 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 									Drop: []corev1.Capability{"ALL"},
 								},
 							},
+							// `tbot` is set explicitly so the renderer is not
+							// coupled to the chosen image's ENTRYPOINT. Notably
+							// `public.ecr.aws/gravitational/teleport-distroless`
+							// has `teleport` as its entrypoint, which would
+							// reject `start -c …` with "unexpected start".
+							Command: []string{"tbot"},
 							Args: []string{
 								"start",
 								"-c", mountPathTbotConfig + "/tbot.yaml",
