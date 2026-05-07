@@ -6,10 +6,12 @@ metadata:
     {{- include "tunnelport.labels" . | nindent 4 }}
 rules:
 # RemoteApp itself — read-only at the spec level. The reconciler updates
-# only the status subresource. The operator runs no finalizer logic
-# (OwnerReferences GC the children), so `remoteapps/finalizers` is NOT
-# granted: see the kubebuilder RBAC markers in
-# internal/controller/remoteapp/controller.go.
+# only the status subresource. We do not run finalizer logic of our
+# own, but the rendered children carry OwnerReferences with
+# `BlockOwnerDeletion: true` (controller-runtime's
+# SetControllerReference default — see render.go:setOwnerRef), and the
+# API server requires `update` on the owner's `finalizers` subresource
+# for that field to be settable.
 - apiGroups:
   - access.giantswarm.io
   resources:
@@ -26,6 +28,12 @@ rules:
   - get
   - update
   - patch
+- apiGroups:
+  - access.giantswarm.io
+  resources:
+  - remoteapps/finalizers
+  verbs:
+  - update
 
 # Token Secrets — `get`/`list`/`watch` only, no `create`/`update`/`patch`/
 # `delete`. The operator code reads ObjectMeta (`name`, `resourceVersion`)

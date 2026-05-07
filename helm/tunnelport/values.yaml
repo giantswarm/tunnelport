@@ -54,12 +54,18 @@ resources:
 # cluster-wide defaults — RemoteApp.spec deliberately does not let CR
 # authors override them.
 tbot:
+  # `tbot-distroless` (NOT `teleport-distroless`): the latter has
+  # `teleport` as ENTRYPOINT and rejects `start -c …` with "unexpected
+  # start" — see the renderer comment at
+  # internal/controller/remoteapp/render.go where Command: ["tbot"] is
+  # set explicitly.
+  #
   # Pinned by digest so a re-push behind the floating `:16` tag cannot
   # silently change tbot's config schema underneath us (see the
   # listen/listener field rename noted at internal/controller/remoteapp/render.go).
   # Resolve a fresh digest before each chart release with:
-  #   crane digest public.ecr.aws/gravitational/teleport-distroless:16
-  image: public.ecr.aws/gravitational/teleport-distroless:16@sha256:fabe4a96fa8c5a19f259c96a1e77bb826026f952db6e562fb6ee39d470babfe1
+  #   crane digest public.ecr.aws/gravitational/tbot-distroless:16
+  image: public.ecr.aws/gravitational/tbot-distroless:16@sha256:9b59795d913a4d2a7e48bc78f2dfb70c8524d1262cd9b8bcf4f998d2ece4ec7e
   # Development-only: render tbot configs with `insecure: true` so the
   # pods skip Teleport proxy TLS verification. Useful for kind-based
   # smoke tests where the proxy is reached by IP and the cert SAN does
@@ -84,15 +90,11 @@ crds:
 # NetworkPolicy for the operator's own manager pod (not for the rendered
 # tbot pods — those are tenant resources, see README). Per GS convention
 # for kubebuilder operators: default-deny with explicit allow rules for
-# kube-apiserver egress and metrics ingress.
+# kube-apiserver egress and metrics ingress. The kube-API egress rule
+# uses no `to:` peer because Cilium does not match traffic to the
+# in-cluster `kubernetes` Service VIP under `to: ipBlock`.
 networkPolicy:
   enabled: true
-  # CIDR blocks the manager is allowed to reach for kube-apiserver
-  # egress. The default 0.0.0.0/0 is deliberately permissive — kube-API
-  # endpoints vary by infrastructure and a chart-time IP narrowing is
-  # both fragile and false-confidence. Tighten in a values overlay
-  # per-MC if your platform team owns a stable kube-API CIDR.
-  apiServerCIDR: 0.0.0.0/0
 
 # Ports the manager listens on. Exposed here only so `networkPolicy`
 # stays in sync with the actual flag values.
