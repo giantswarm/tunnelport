@@ -41,23 +41,31 @@ import (
 //
 //   - top-level: `version`, `proxy_server`, `insecure`, `onboarding`,
 //     `storage`, `diag_addr`, `services` (see `lib/tbot/config/config.go`).
-//   - `onboarding.join_method` is hardcoded to `bound_keypair` per ADR 0005.
-//     Token-method joining was rejected because bot tokens are single-use
-//     and emptyDir cannot persist the renewable cert across restarts (ADR
-//     0004). `bound_keypair` with `recovery.mode: relaxed` (set on the
-//     Central-side token resource) lets tbot self-recover by re-registering
-//     a fresh keypair against the registration secret on every restart.
-//   - `onboarding.token` is the *name of the Teleport token resource on
-//     Central* (NOT a file path or literal secret). Convention: the token
-//     resource is named identically to the consumer-side `tokenRef` Secret
-//     (`cr.Spec.TokenRef.Name`). Platform teams provisioning RemoteApps
-//     must keep these names in lockstep.
-//   - `onboarding.bound_keypair.registration_secret_path` points at the
-//     mounted Secret key — tbot reads the registration secret from disk on
-//     first join. The operator never reads `Secret.Data`. (See
-//     `lib/tbot/bot/onboarding/config.go` `BoundKeypairOnboardingConfig`
-//     for the schema; `_path` and the literal `registration_secret` are
-//     mutually exclusive.)
+//   - `onboarding.join_method` is `kubernetes` per ADR 0006. tbot presents
+//     the projected ServiceAccount JWT mounted at `mountPathTbotSAToken`
+//     to Central; Central's `TeleportProvisionToken` validates it via
+//     `kubernetes.type: static_jwks`. The ADR 0005 `bound_keypair` block
+//     (and its `registration_secret_path`) is gone — no operator-side
+//     keypair state, no Secret-backed bootstrap material. tbot reads the
+//     SA token directly off disk on every reconnection.
+//   - `onboarding.token` is the name of the per-`RemoteApp`
+//     `TeleportProvisionToken` resource on Central. Convention locked
+//     by ADR 0006: `tunnelport-${cr.Name}`. Slice 06's cutover and the
+//     runbook in slice 05 reference this exact name shape; changing it
+//     here re-opens both. Note this is NOT `cr.Spec.TokenRef.Name` —
+//     that field is being retired in slice 03.
+//   - `onboarding.kubernetes.token_path` points tbot at the projected
+//     SA-token file slice 01 mounts. Upstream's
+//     `KubernetesOnboardingConfig.TokenPath` (yaml `token_path`,
+//     `lib/tbot/bot/onboarding/config.go`) defaults to
+//     `/var/run/secrets/kubernetes.io/serviceaccount/token` when unset
+//     — but slice 01 deliberately mounts at a project-specific path so
+//     the audience can be pinned to `saTokenAudience` and a stray
+//     default-audience SA token elsewhere on the MC cannot satisfy the
+//     join. We set `token_path` explicitly rather than overriding the
+//     default mount, because (a) the projected path is part of slice
+//     01's locked-in interface and (b) the per-RemoteApp SA's
+//     audience-pinned token is the *only* token tbot should ever see.
 //   - `services.application-tunnel.listen` (NOT `listener`) — the upstream
 //     YAML tag is `listen` (see `lib/tbot/services/application/tunnel_config.go`).
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
@@ -75,13 +83,18 @@ type tbotFile struct {
 }
 
 type tbotOnboarding struct {
-	JoinMethod   string                     `json:"join_method"`
-	Token        string                     `json:"token"`
-	BoundKeypair tbotBoundKeypairOnboarding `json:"bound_keypair"`
+	JoinMethod string                   `json:"join_method"`
+	Token      string                   `json:"token"`
+	Kubernetes tbotKubernetesOnboarding `json:"kubernetes"`
 }
 
-type tbotBoundKeypairOnboarding struct {
-	RegistrationSecretPath string `json:"registration_secret_path"`
+// tbotKubernetesOnboarding mirrors upstream's
+// `KubernetesOnboardingConfig` (lib/tbot/bot/onboarding/config.go). Only
+// `token_path` is populated; the audience claim is enforced on the
+// kubelet side via the projected volume's audience field (see
+// `saTokenAudience` in render.go).
+type tbotKubernetesOnboarding struct {
+	TokenPath string `json:"token_path"`
 }
 
 type tbotStorage struct {
@@ -95,19 +108,32 @@ type tbotService struct {
 	Listen  string `json:"listen,omitempty"`
 }
 
+// teleportProvisionTokenName returns the name of the per-RemoteApp
+// `TeleportProvisionToken` on Central this CR's tbot pod will join
+// against. Convention locked by ADR 0006: `tunnelport-${cr.Name}`.
+// Slice 05's runbook and slice 06's cutover reference this shape; they
+// must be updated in lockstep if the convention ever changes.
+func teleportProvisionTokenName(cr *accessv1alpha1.RemoteApp) string {
+	return "tunnelport-" + cr.Name
+}
+
 func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	doc := tbotFile{
 		Version:     "v2",
 		ProxyServer: cr.Spec.ProxyAddr,
 		Insecure:    cfg.Insecure,
 		Onboarding: tbotOnboarding{
-			JoinMethod: "bound_keypair",
-			// Token resource name on Central. Convention: matches the
-			// consumer-side Secret name (cr.Spec.TokenRef.Name). See the
-			// type comment above for why this isn't a file path.
-			Token: cr.Spec.TokenRef.Name,
-			BoundKeypair: tbotBoundKeypairOnboarding{
-				RegistrationSecretPath: fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key),
+			JoinMethod: "kubernetes",
+			// Token resource name on Central. ADR 0006 convention:
+			// `tunnelport-${cr.Name}`. Single source of truth in
+			// `teleportProvisionTokenName`.
+			Token: teleportProvisionTokenName(cr),
+			Kubernetes: tbotKubernetesOnboarding{
+				// Path to the projected SA JWT slice 01 mounts. The
+				// audience claim on that token is pinned by the
+				// projected volume's `Audience` field; tbot just reads
+				// the file.
+				TokenPath: mountPathTbotSAToken + "/" + saTokenFileName,
 			},
 		},
 		Storage: tbotStorage{

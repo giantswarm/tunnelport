@@ -439,6 +439,79 @@ func TestReconciler_RendersOwnedServiceAccountAndPodUsesIt(t *testing.T) {
 	})
 }
 
+// TestReconciler_KubernetesJoinConfigMapShape is the envtest acceptance
+// test for ADR 0006 slice 2: a real reconcile pass against an envtest
+// API server must produce a ConfigMap whose tbot.yaml carries the
+// kubernetes-join onboarding block referencing the per-RemoteApp
+// `TeleportProvisionToken` (`tunnelport-${cr.Name}`) and the projected
+// SA-token path slice 01 mounts. The render-level test pins the static
+// shape; this one pins that the live reconcile loop emits the same.
+//
+// The token-name convention (`tunnelport-${cr.Name}`) is the
+// load-bearing piece other slices depend on (slice 05's runbook, slice
+// 06's cutover) — drift here means platform engineers committing
+// mismatched `TeleportProvisionToken` resources to teleport-fleet.
+func TestReconciler_KubernetesJoinConfigMapShape(t *testing.T) {
+	ctx := context.Background()
+	ns := uniqueNS(t, ctx)
+
+	cr := makeRemoteApp(ctx, t, ns, "k8s-join")
+
+	cm := &corev1.ConfigMap{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cm)
+
+	body, ok := cm.Data["tbot.yaml"]
+	if !ok {
+		t.Fatalf("ConfigMap %s/%s missing tbot.yaml key", ns, cr.Name)
+	}
+
+	wants := []string{
+		"join_method: kubernetes",
+		// `tunnelport-${cr.Name}` — the locked-in convention from ADR
+		// 0006 referenced by the slice-05 runbook and slice-06 cutover.
+		"token: tunnelport-k8s-join",
+		// tbot reads the SA JWT from this projected file. Path is the
+		// public surface slice 01 committed to.
+		"token_path: /var/run/secrets/tunnelport.giantswarm.io/serviceaccount/token",
+	}
+	for _, want := range wants {
+		if !strings.Contains(body, want) {
+			t.Errorf("ConfigMap %s/%s missing %q in tbot.yaml\n---\n%s\n---", ns, cr.Name, want, body)
+		}
+	}
+
+	// ADR 0005 leftovers must not appear — they would point Central
+	// at a join method that no longer exists in this controller's
+	// emitted config.
+	for _, banned := range []string{"bound_keypair", "registration_secret"} {
+		if strings.Contains(body, banned) {
+			t.Errorf("ConfigMap %s/%s tbot.yaml must not contain %q (ADR 0005 superseded by ADR 0006)\n---\n%s\n---", ns, cr.Name, banned, body)
+		}
+	}
+
+	// The Deployment must NOT carry a Secret-backed `tbot-token` volume
+	// (ADR 0006 slice 2 removes it); the projected SA token volume
+	// from slice 01 is the only credential surface tbot sees.
+	dep := &appsv1.Deployment{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep)
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == "tbot-token" {
+			t.Errorf("Deployment %s/%s still carries the legacy tbot-token Secret volume (ADR 0006 removes it)", ns, cr.Name)
+		}
+	}
+	// The projected SA-token volume must still be present (slice 01).
+	var sawProjectedSA bool
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == "tbot-sa-token" && v.Projected != nil {
+			sawProjectedSA = true
+			break
+		}
+	}
+	if !sawProjectedSA {
+		t.Errorf("Deployment %s/%s missing projected SA-token volume (slice 01 contract)", ns, cr.Name)
+	}
+}
+
 func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)

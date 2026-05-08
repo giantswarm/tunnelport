@@ -95,17 +95,22 @@ func TestRenderConfigMap_ContainsTbotApplicationTunnelConfig(t *testing.T) {
 		"app_name: myapp",
 		"listen: tcp://0.0.0.0:8080",
 		"type: application-tunnel",
-		// ADR 0005: bound_keypair join with relaxed recovery (recovery
-		// mode lives on the Central-side token resource, not in tbot.yaml).
-		"join_method: bound_keypair",
-		// onboarding.token under bound_keypair is the *name* of the
-		// Teleport token resource on Central, not a literal secret or a
-		// file path. Convention: matches cr.Spec.TokenRef.Name.
-		"token: myapp-token",
-		// onboarding.bound_keypair.registration_secret_path points at the
-		// mounted Secret key. tbot reads the registration secret from
-		// disk on first join — the operator never reads Secret.Data.
-		"registration_secret_path: /etc/tbot-token/token",
+		// ADR 0006: kubernetes join. tbot presents the projected SA token
+		// mounted at mountPathTbotSAToken; Central verifies it under
+		// `kubernetes.type: static_jwks`.
+		"join_method: kubernetes",
+		// onboarding.token references the per-RemoteApp
+		// `TeleportProvisionToken` on Central. Convention locked here:
+		// `tunnelport-${cr.Name}` (ADR 0006). Slice 06 cutover and the
+		// runbook in slice 05 reference this exact name shape.
+		"token: tunnelport-tracer",
+		// onboarding.kubernetes.token_path points tbot at the projected
+		// SA-token file slice 01 mounts. The default upstream path is
+		// `/var/run/secrets/kubernetes.io/serviceaccount/token`, but we
+		// mount at a project-specific path so the audience can be
+		// pinned to `tunnelport.giantswarm.io` and a stray default-
+		// audience token cannot satisfy the join.
+		"token_path: /var/run/secrets/tunnelport.giantswarm.io/serviceaccount/token",
 		// diag_addr binds the /readyz HTTP endpoint that the pod's
 		// readiness probe (slice 4) targets.
 		"diag_addr: 0.0.0.0:3001",
@@ -117,12 +122,16 @@ func TestRenderConfigMap_ContainsTbotApplicationTunnelConfig(t *testing.T) {
 	}
 
 	// Regression guards: these are upstream-tbot field names that
-	// earlier drafts of the renderer invented. If they reappear, tbot
-	// will reject the config at startup.
+	// earlier drafts of the renderer invented (or that ADR 0006
+	// supersedes). If they reappear, tbot will reject the config at
+	// startup or rejoin via the wrong method.
 	bannedSubstrings := []string{
-		"token_secret_ref", // not a real tbot field; only `token:` exists
-		"listener:",        // wrong spelling — upstream tag is `listen`
-		"auth_server:",     // we use proxy_server only; auth_server here was a copy-paste
+		"token_secret_ref",    // not a real tbot field; only `token:` exists
+		"listener:",           // wrong spelling — upstream tag is `listen`
+		"auth_server:",        // we use proxy_server only; auth_server here was a copy-paste
+		"bound_keypair",       // ADR 0005 join method, superseded by ADR 0006
+		"registration_secret", // belonged to bound_keypair onboarding
+		"join_method: bound_keypair",
 	}
 	for _, banned := range bannedSubstrings {
 		if strings.Contains(cfg, banned) {
@@ -213,7 +222,7 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 	}
 }
 
-func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.T) {
+func TestRenderDeployment_PodTemplateMountsConfigMapAndEmptyDir(t *testing.T) {
 	cr := fixtureRemoteApp()
 
 	dep := renderDeployment(cr, fixtureConfig(), "")
@@ -232,26 +241,19 @@ func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.
 		t.Errorf("container missing volumeMount tbot-config; got: %v", mountNames(c.VolumeMounts))
 	}
 
-	// Token Secret volume mounted by name only — no envFrom or readers.
-	if !hasVolume(pod.Volumes, "tbot-token") {
-		t.Errorf("missing volume tbot-token; got: %v", volumeNames(pod.Volumes))
+	// ADR 0006: the legacy `tbot-token` Secret volume from ADR 0005's
+	// bound_keypair onboarding is gone. tbot now joins via the
+	// `kubernetes` method using the projected SA token mounted by
+	// slice 01 (asserted separately in
+	// TestRenderDeployment_ProjectedSATokenVolumeMounted).
+	if hasVolume(pod.Volumes, "tbot-token") {
+		t.Errorf("legacy tbot-token Secret volume must be absent (ADR 0006); got volumes: %v", volumeNames(pod.Volumes))
 	}
-	tokenVol := volumeByName(pod.Volumes, "tbot-token")
-	if tokenVol == nil || tokenVol.Secret == nil {
-		t.Fatalf("tbot-token volume must be a Secret volume; got %+v", tokenVol)
+	if hasMount(c.VolumeMounts, "tbot-token") {
+		t.Errorf("legacy tbot-token mount must be absent (ADR 0006); got mounts: %v", mountNames(c.VolumeMounts))
 	}
-	if tokenVol.Secret.SecretName != cr.Spec.TokenRef.Name {
-		t.Errorf("tbot-token volume secretName: want %q, got %q",
-			cr.Spec.TokenRef.Name, tokenVol.Secret.SecretName)
-	}
-	// Reconciler must NOT inject the token via env / envFrom — that would
-	// require reading the Secret's contents (forbidden).
-	for _, e := range c.Env {
-		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
-			e.ValueFrom.SecretKeyRef.Name == cr.Spec.TokenRef.Name {
-			t.Errorf("container env %q references token Secret directly; pod must mount the Secret as a volume only", e.Name)
-		}
-	}
+	// Reconciler must NOT inject any token via env / envFrom — kubernetes
+	// join reads the SA JWT from a projected file, not from a Secret.
 	if len(c.EnvFrom) > 0 {
 		t.Errorf("container envFrom must be empty (no Secret/ConfigMap envFrom); got %d entries", len(c.EnvFrom))
 	}
