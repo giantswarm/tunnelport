@@ -1,5 +1,12 @@
 # Tunnelport smoke test: zero to green
 
+> **⚠️ Out of date for ADR 0006.** This runbook drives the legacy
+> `bound_keypair` join + `tokenRef`-Secret flow (ADRs 0001 / 0004 / 0005),
+> all superseded by ADR 0006 (kubernetes join + `static_jwks` trust). Steps
+> 4 ("Provision the role, bot, and bot token (bound_keypair)") and the
+> per-CR Secret delivery in step 5 will not work against the current
+> operator. A rewrite for the kubernetes-join model is filed as follow-up.
+
 This runbook stands up an end-to-end environment proving the operator
 works against real Teleport. By the end you will have a `curl` from a
 pod in one kind cluster reach a sample HTTP responder in another, via

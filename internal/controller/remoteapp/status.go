@@ -265,7 +265,12 @@ func containerTerminatedSummary(cs *corev1.ContainerStatus) string {
 // computeStatus derives the full RemoteAppStatus from k8s-visible inputs.
 // Pure: no I/O, no logging. meta.SetStatusCondition uses metav1.Now() for
 // LastTransitionTime — that's library-imposed and stripped by statusEqual.
-func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, view TokenSecretView, prevConditions []metav1.Condition) accessv1alpha1.RemoteAppStatus {
+//
+// ADR 0006: there is no longer a token Secret to bind to, so the only
+// condition reported is `Ready`. The `TokenSecretBound` condition that
+// previously surfaced GitOps-race state on `spec.tokenRef` is gone with
+// the field.
+func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition) accessv1alpha1.RemoteAppStatus {
 	ready, lastError := summarizeStatus(pods)
 
 	conditions := append([]metav1.Condition(nil), prevConditions...)
@@ -282,39 +287,12 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, view TokenSe
 	}
 	meta.SetStatusCondition(&conditions, readyCond)
 
-	tokenBound, tokenReason, tokenMsg := evalTokenSecretBound(cr, view)
-	meta.SetStatusCondition(&conditions, metav1.Condition{
-		Type:               accessv1alpha1.ConditionTypeTokenSecretBound,
-		Status:             boolToConditionStatus(tokenBound),
-		ObservedGeneration: cr.Generation,
-		Reason:             tokenReason,
-		Message:            tokenMsg,
-	})
-
 	return accessv1alpha1.RemoteAppStatus{
 		Ready:              ready,
 		LastError:          lastError,
 		ObservedGeneration: cr.Generation,
 		Conditions:         conditions,
 	}
-}
-
-// evalTokenSecretBound classifies the TokenSecretView into the
-// TokenSecretBound condition fields. Order matters: a non-NotFound fetch
-// error wins over absence; absence wins over key absence.
-func evalTokenSecretBound(cr *accessv1alpha1.RemoteApp, view TokenSecretView) (bool, string, string) {
-	if view.FetchErr != nil {
-		return false, "SecretGetError", view.FetchErr.Error()
-	}
-	if view.ResourceVersion == "" {
-		return false, "SecretNotFound",
-			fmt.Sprintf("Secret %q not found in namespace %q", view.Name, cr.Namespace)
-	}
-	if !view.KeyExists {
-		return false, "KeyNotFound",
-			fmt.Sprintf("Secret %q has no key %q", view.Name, view.Key)
-	}
-	return true, "Bound", fmt.Sprintf("Secret %q key %q present", view.Name, view.Key)
 }
 
 func boolToConditionStatus(b bool) metav1.ConditionStatus {

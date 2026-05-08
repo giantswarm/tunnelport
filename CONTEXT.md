@@ -28,19 +28,26 @@ tbot tunnel exposed on a port); `RemoteApp` describes what the user *declares*.
 
 ### Auth model
 
-Each `RemoteApp` has its own static **join token** on Central, bound to a
-dedicated `TeleportBot` whose role is scoped to exactly that one app. The
-token is delivered to the consumer MC out-of-band (GitOps + secret sync)
-as a `Secret`, and the `RemoteApp` references it via `tokenRef`.
+Each `RemoteApp` gets a per-CR `ServiceAccount` on the consumer MC, rendered
+by the operator. tbot joins Central via the **`kubernetes`** join method,
+presenting that SA's projected JWT (audience `tunnelport.giantswarm.io`).
+Central verifies the JWT against the consumer MC's kube-apiserver JWKS,
+which is committed to `giantswarm/teleport-fleet` as a
+`TeleportProvisionToken` with `kubernetes.type: static_jwks` (per ADR 0006).
 
-This gives **per-app blast-radius isolation**: if one tbot pod is compromised,
-the leaked identity reaches only that one app. The cost is one paired action
-on Central per `RemoteApp` (create `TeleportBot` + role + token).
+On Central, each `RemoteApp` has a paired bot named `tunnelport-${cr.Name}`
+whose role is scoped to exactly that one Teleport Application Service app.
+The corresponding `TeleportProvisionToken` allowlists exactly one
+ServiceAccount on the consumer MC — the per-`RemoteApp` SA tunnelport
+renders.
 
-The `kubernetes` join method is rejected for v1: it would require per-CR
-`ServiceAccount` orchestration on the consumer side and pinning each token's
-allowed-subject on Central, for the same isolation property the static-token
-approach already gives.
+This preserves **per-app blast-radius isolation**: a compromised tbot pod, or
+a leaked SA token, yields access to only one app. The cost is one paired
+action on Central per `RemoteApp` (`tctl bots add` + a `teleport-fleet` PR
+adding the `TeleportProvisionToken`).
+
+The previous static-token-Secret model (ADR 0001 / 0005) is superseded — see
+ADR 0006 for the rationale and the rotation strategy.
 
 ### tbot topology
 
@@ -60,21 +67,18 @@ add it then; don't ship the knob without a use case.
 
 ### Reconciliation on token rotation
 
-The operator **does** auto-roll the tbot Deployment when the referenced
-`tokenRef` Secret content changes. Mechanism: a watch on `Secret`s triggers
-reconcile, and the operator stamps the Secret's `resourceVersion` onto the
-pod-template annotation; the Deployment's RollingUpdate strategy handles the
-rest.
+There is no token Secret to watch. The SA's projected token rotates
+automatically via the kubelet, and the SA's signing key in the consumer MC's
+kube-apiserver is the trust root — neither requires operator intervention.
 
-Reason: in this operational model, token changes typically reflect bot
-identity changes on Central — at which point the running tbot's renewable
-certs are invalid anyway, and waiting for them to fail naturally is worse
-than rolling immediately. Even in the rarer "same bot, new token value"
-case, auto-rolling is a bounded, predictable disturbance.
-
-The operator never reads the Secret's contents — it only references
-`(name, key, resourceVersion)`, keeping itself out of the secret-handling
-blast radius.
+JWKS rotation in Central is rare: GS CAPI MCs do not auto-rotate
+kube-apiserver SA signing keys, and the consumer MCs that run muster have
+been on bootstrap JWKS snapshots for months without refresh (per ADR 0006
+§ "Rotation / refresh"). When a rotation does occur, recovery is
+operational, not in-cluster: re-run `mc-bootstrap/scripts/setup-teleport.sh`
+to re-snapshot the JWKS, PR `giantswarm/teleport-fleet`, Flux applies. New
+tbot pods join cleanly under the refreshed `TeleportProvisionToken`;
+existing pods continue tunneling on cached certs until TTL expires.
 
 ### Cert cache
 
@@ -101,8 +105,7 @@ performs no retries or auto-recovery beyond what the kubelet's restart policy
 already provides.
 
 Conditions on `status`: `Ready` (mirrors pod readiness, which is wired to
-tbot's tunnel diag endpoint), and `TokenSecretBound` (the named Secret + key
-exist). That's it.
+tbot's tunnel diag endpoint). That's it.
 
 ### Readiness
 
@@ -115,7 +118,7 @@ captures failures visible on the consumer side.
 ### Operator config posture
 
 The operator chart has no required cluster-wide config. Every per-CR
-parameter — `proxyAddr`, `appName`, `tokenRef` — lives on the `RemoteApp`
+parameter — `proxyAddr`, `appName`, `port` — lives on the `RemoteApp`
 itself. Trade-off accepted: the same `proxyAddr` will be repeated across most
 CRs in a cluster, and a typo affects only that one CR. Goal is "install the
 chart once, then everything is per-CR GitOps."
@@ -153,14 +156,23 @@ half-applicable defaults.
   can tune; per-CR sizing is busywork because the tbot sidecar's profile
   doesn't vary per app.
 
-### Token Secret delivery
+### Onboarding cost per `RemoteApp`
 
-The platform team provides the `tokenRef` Secret out-of-band — typically via
-GitOps with a sealed/sync mechanism. The operator never creates, copies, or
-reads the Secret's contents. If the Secret is missing when the CR is created,
-the rendered `Deployment` stays `Pending` (volume mount fails) and
-`status.TokenSecretBound = false` — handling the GitOps-race case where the
-CR arrives before the Secret.
+For each `RemoteApp` the platform team registers on Central:
+
+1. PR to `giantswarm/teleport-fleet/kubernetes/shared/templates/` adding
+   `bot-${MC}-tunnelport-${app}-token.yaml` — a `TeleportProvisionToken`
+   reusing the consumer MC's existing JWKS payload from
+   `bot-${MC}-token.yaml`, allowlisting the per-`RemoteApp` SA.
+2. `tctl bots add tunnelport-${app}` against prod and against test (one each
+   per environment).
+3. Apply the `RemoteApp` CR on the consumer MC.
+
+The operator never creates, reads, or syncs a token Secret. If the Central
+side isn't ready when the CR is applied, the rendered Deployment's tbot pod
+crashloops with a join error visible in `status.lastError` — the GitOps-race
+case is observable without the operator owning any of the credential
+plumbing.
 
 ### Operator topology
 

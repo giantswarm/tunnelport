@@ -79,19 +79,6 @@ func setPodStatus(ctx context.Context, t *testing.T, pod *corev1.Pod, mut func(s
 	*pod = *got
 }
 
-// makeTokenSecret creates a Secret with the named key so the
-// TokenSecretBound condition can flip to True.
-func makeTokenSecret(ctx context.Context, t *testing.T, ns, name, key string) {
-	t.Helper()
-	s := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Data:       map[string][]byte{key: []byte("test-token-value")},
-	}
-	if err := testClient.Create(ctx, s); err != nil {
-		t.Fatalf("create token Secret: %v", err)
-	}
-}
-
 func getRemoteApp(ctx context.Context, t *testing.T, key types.NamespacedName) *accessv1alpha1.RemoteApp {
 	t.Helper()
 	got := &accessv1alpha1.RemoteApp{}
@@ -138,75 +125,6 @@ func TestStatus_ObservedGenerationTracksSpecChanges(t *testing.T) {
 		if got.Status.ObservedGeneration != got.Generation {
 			return false, fmt.Errorf("observedGeneration=%d, generation=%d",
 				got.Status.ObservedGeneration, got.Generation)
-		}
-		return true, nil
-	})
-}
-
-// TestStatus_TokenSecretBoundFalseWhenSecretMissing exercises the
-// pre-Secret state: CR exists, Secret doesn't, condition reflects it.
-func TestStatus_TokenSecretBoundFalseWhenSecretMissing(t *testing.T) {
-	ctx := context.Background()
-	ns := uniqueNS(t, ctx)
-
-	cr := makeRemoteApp(ctx, t, ns, "no-secret")
-	key := client.ObjectKeyFromObject(cr)
-
-	eventually(t, func() (bool, error) {
-		got := getRemoteApp(ctx, t, key)
-		c := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-		if c == nil {
-			return false, fmt.Errorf("TokenSecretBound condition not yet set")
-		}
-		if c.Status != metav1.ConditionFalse {
-			return false, fmt.Errorf("TokenSecretBound: want False, got %q (reason=%q)", c.Status, c.Reason)
-		}
-		return true, nil
-	})
-}
-
-// TestStatus_TokenSecretBoundTrueWhenSecretAndKeyExist exercises the
-// happy-path bind: Secret exists *and* the named key is present.
-func TestStatus_TokenSecretBoundTrueWhenSecretAndKeyExist(t *testing.T) {
-	ctx := context.Background()
-	ns := uniqueNS(t, ctx)
-
-	cr := makeRemoteApp(ctx, t, ns, "with-secret")
-	makeTokenSecret(ctx, t, ns, cr.Spec.TokenRef.Name, cr.Spec.TokenRef.Key)
-	key := client.ObjectKeyFromObject(cr)
-
-	eventually(t, func() (bool, error) {
-		got := getRemoteApp(ctx, t, key)
-		c := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-		if c == nil {
-			return false, fmt.Errorf("TokenSecretBound condition not yet set")
-		}
-		if c.Status != metav1.ConditionTrue {
-			return false, fmt.Errorf("TokenSecretBound: want True, got %q (reason=%q)", c.Status, c.Reason)
-		}
-		return true, nil
-	})
-}
-
-// TestStatus_TokenSecretBoundFalseWhenKeyMissing covers the case where
-// the Secret exists but the operator-named key isn't present.
-func TestStatus_TokenSecretBoundFalseWhenKeyMissing(t *testing.T) {
-	ctx := context.Background()
-	ns := uniqueNS(t, ctx)
-
-	cr := makeRemoteApp(ctx, t, ns, "wrong-key")
-	// Secret exists with a different key name.
-	makeTokenSecret(ctx, t, ns, cr.Spec.TokenRef.Name, "not-the-right-key")
-	key := client.ObjectKeyFromObject(cr)
-
-	eventually(t, func() (bool, error) {
-		got := getRemoteApp(ctx, t, key)
-		c := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-		if c == nil {
-			return false, fmt.Errorf("TokenSecretBound condition not yet set")
-		}
-		if c.Status != metav1.ConditionFalse {
-			return false, fmt.Errorf("TokenSecretBound: want False, got %q (reason=%q)", c.Status, c.Reason)
 		}
 		return true, nil
 	})

@@ -41,16 +41,14 @@ const (
 )
 
 // renderFixtureOpts is the renderer-test-specific override of
-// newRemoteApp's defaults: namespace="demo", name="tracer", appName="myapp",
-// tokenRef.Name="myapp-token". These match the strings the assertions in
-// this file pin verbatim. The shared newRemoteApp() defaults match the
-// envtest fixtures (name="demo"), so the renderer tests pass these opts
-// to keep their assertions stable.
+// newRemoteApp's defaults: namespace="demo", name="tracer", appName="myapp".
+// These match the strings the assertions in this file pin verbatim. The
+// shared newRemoteApp() defaults match the envtest fixtures (name="demo"),
+// so the renderer tests pass these opts to keep their assertions stable.
 var renderFixtureOpts = []fixtureOpt{
 	withName("demo", "tracer"),
 	withUID("uid-tracer"),
 	withAppName("myapp"),
-	withTokenRefName("myapp-token"),
 }
 
 func fixtureRemoteApp() *accessv1alpha1.RemoteApp {
@@ -182,7 +180,7 @@ func TestRenderConfigMap_NotInsecureByDefault(t *testing.T) {
 func TestRenderDeployment_DefaultsAndStrategy(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	if dep.Name != cr.Name {
 		t.Fatalf("Deployment name: want %q, got %q", cr.Name, dep.Name)
@@ -215,7 +213,7 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 	r := int32(3)
 	cr.Spec.Replicas = &r
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
 		t.Errorf("Deployment replicas: want 3, got %v", dep.Spec.Replicas)
@@ -225,7 +223,7 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 func TestRenderDeployment_PodTemplateMountsConfigMapAndEmptyDir(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	pod := dep.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -275,7 +273,7 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 	cr := fixtureRemoteApp()
 	cfg := fixtureConfig()
 
-	dep := renderDeployment(cr, cfg, "")
+	dep := renderDeployment(cr, cfg)
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != cfg.TbotImage {
@@ -296,7 +294,7 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if len(c.Ports) == 0 {
@@ -317,7 +315,7 @@ func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	c := dep.Spec.Template.Spec.Containers[0]
 
@@ -368,7 +366,7 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	// Pod-level securityContext.
 	pc := dep.Spec.Template.Spec.SecurityContext
@@ -413,7 +411,7 @@ func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 	pod := dep.Spec.Template.Spec
 
 	tmp := volumeByName(pod.Volumes, "tbot-tmp")
@@ -448,7 +446,7 @@ func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.
 func TestRenderDeployment_LivenessProbe(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.LivenessProbe == nil {
@@ -593,7 +591,7 @@ func TestRenderServiceAccount_OwnerRefViaSetOwnerRef(t *testing.T) {
 func TestRenderDeployment_PodRunsAsRenderedServiceAccount(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	pod := dep.Spec.Template.Spec
 	if pod.ServiceAccountName != cr.Name {
@@ -616,7 +614,7 @@ func TestRenderDeployment_PodRunsAsRenderedServiceAccount(t *testing.T) {
 func TestRenderDeployment_ProjectedSATokenVolumeMounted(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 	pod := dep.Spec.Template.Spec
 
 	vol := volumeByName(pod.Volumes, volumeNameTbotSAToken)

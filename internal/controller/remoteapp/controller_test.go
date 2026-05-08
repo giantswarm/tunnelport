@@ -56,12 +56,12 @@ func uniqueNS(t *testing.T, ctx context.Context) string {
 
 // makeRemoteApp builds a minimal valid RemoteApp in ns and Creates it.
 // Built on top of the shared newRemoteApp fixture (see fixtures_test.go);
-// tests that need a non-default spec compose fixtureOpts at the call site
-// or mutate the returned object before re-Update. Servers strip the
-// fixture's default UID on Create — the API server assigns a fresh one.
-func makeRemoteApp(ctx context.Context, t *testing.T, ns, name string, opts ...fixtureOpt) *accessv1alpha1.RemoteApp {
+// tests that need a non-default spec mutate the returned object before
+// re-Update. Servers strip the fixture's default UID on Create — the API
+// server assigns a fresh one.
+func makeRemoteApp(ctx context.Context, t *testing.T, ns, name string) *accessv1alpha1.RemoteApp {
 	t.Helper()
-	cr := newRemoteApp(append([]fixtureOpt{withName(ns, name)}, opts...)...)
+	cr := newRemoteApp(withName(ns, name))
 	cr.UID = "" // let the API server assign one on Create.
 	if err := testClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create RemoteApp: %v", err)

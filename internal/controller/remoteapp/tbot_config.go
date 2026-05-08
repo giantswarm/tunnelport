@@ -50,10 +50,11 @@ import (
 //     SA token directly off disk on every reconnection.
 //   - `onboarding.token` is the name of the per-`RemoteApp`
 //     `TeleportProvisionToken` resource on Central. Convention locked
-//     by ADR 0006: `tunnelport-${cr.Name}`. Slice 06's cutover and the
-//     runbook in slice 05 reference this exact name shape; changing it
-//     here re-opens both. Note this is NOT `cr.Spec.TokenRef.Name` —
-//     that field is being retired in slice 03.
+//     by ADR 0006: `tunnelport-${cr.Name}`. The corresponding bot on
+//     Central and the `teleport-fleet` PR registering the
+//     `TeleportProvisionToken` reference this same name shape; changing
+//     the format here would force a coordinated rename on Central and
+//     in `teleport-fleet`.
 //   - `onboarding.kubernetes.token_path` points tbot at the projected
 //     SA-token file slice 01 mounts. Upstream's
 //     `KubernetesOnboardingConfig.TokenPath` (yaml `token_path`,

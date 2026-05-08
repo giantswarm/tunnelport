@@ -63,20 +63,40 @@ func TestRBAC_RoleManifestGrantsPodsReadOnly(t *testing.T) {
 	}
 }
 
-// TestRBAC_RoleManifestGrantsSecretsRead pins the slice-4 trade-off: the
-// TokenSecretBound condition requires Get on Secrets to verify the
-// named key exists. The partial-metadata API would be ideal but it
-// omits `data` keys, forcing a full Get. Document the trade-off in
-// controller.go's RBAC marker comment.
-func TestRBAC_RoleManifestGrantsSecretsRead(t *testing.T) {
+// TestRBAC_RoleManifestExcludesSecrets pins ADR 0006: the operator no
+// longer reads, lists, or watches `Secret` resources. Slice 03 removed
+// the `tokenRef` Secret-watch plumbing along with the field itself; with
+// the kubernetes-join model there is no consumer-side Secret to inspect.
+// The kubebuilder marker block in controller.go must keep that rule,
+// and `make manifests` regenerates config/rbac/role.yaml from those
+// markers — so checking the rendered manifest catches a regression
+// where someone re-adds a `secrets` marker.
+func TestRBAC_RoleManifestExcludesSecrets(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "config", "rbac", "role.yaml")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	if !strings.Contains(string(body), "secrets") {
-		t.Fatalf("%s missing read access on secrets; TokenSecretBound "+
-			"condition needs get/list/watch on secrets to verify the "+
-			"referenced key exists.", path)
+	if strings.Contains(string(body), "- secrets\n") {
+		t.Fatalf("%s grants access on secrets; ADR 0006 removes all "+
+			"Secret-handling — the operator no longer needs that grant. "+
+			"Remove the kubebuilder marker that introduced it.", path)
+	}
+}
+
+// TestRBAC_RoleManifestGrantsServiceAccountsWrite pins slice 01: the
+// operator renders a per-`RemoteApp` `ServiceAccount` so tbot can present
+// its projected JWT to Central via the kubernetes join method. Without
+// write access the rendered SA never lands and tbot cannot join.
+func TestRBAC_RoleManifestGrantsServiceAccountsWrite(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "config", "rbac", "role.yaml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(body), "serviceaccounts") {
+		t.Fatalf("%s missing access on serviceaccounts; slice 01 needs "+
+			"create/update/delete on serviceaccounts to render the "+
+			"per-RemoteApp SA used by the kubernetes join (ADR 0006).", path)
 	}
 }

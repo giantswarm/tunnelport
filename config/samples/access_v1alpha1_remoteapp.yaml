@@ -9,6 +9,3 @@ spec:
   appName: my-teleport-app
   port: 8080
   proxyAddr: teleport.example.com:443
-  tokenRef:
-    name: my-teleport-app-token
-    key: token

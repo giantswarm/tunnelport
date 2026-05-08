@@ -44,10 +44,6 @@ func newRemoteApp(opts ...fixtureOpt) *accessv1alpha1.RemoteApp {
 			AppName:   "demo-app",
 			Port:      8080,
 			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "demo-token",
-				Key:  "token",
-			},
 		},
 	}
 	for _, o := range opts {
@@ -77,15 +73,5 @@ func withUID(uid string) fixtureOpt {
 func withAppName(name string) fixtureOpt {
 	return func(cr *accessv1alpha1.RemoteApp) {
 		cr.Spec.AppName = name
-	}
-}
-
-// withTokenRefName overrides spec.tokenRef.Name. Spec.TokenRef.Key stays
-// at the default ("token") because every test in this package uses that
-// key — adding a `key` parameter would be unused noise. If a future test
-// needs a different key, widen this option then.
-func withTokenRefName(name string) fixtureOpt {
-	return func(cr *accessv1alpha1.RemoteApp) {
-		cr.Spec.TokenRef.Name = name
 	}
 }

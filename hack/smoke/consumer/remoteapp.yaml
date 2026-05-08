@@ -28,10 +28,3 @@ spec:
   # producer's kube-agent — see runbook "Network setup". Format:
   # "<ip>:443".
   proxyAddr: REPLACE_WITH_TELEPORT_PROXY_ADDR
-
-  # Reference (NOT contents) of the Secret holding the bot token.
-  # The operator only reads the Secret's metadata.resourceVersion to
-  # detect rotations; the token value lives in the mounted volume.
-  tokenRef:
-    name: smoke-bot-token
-    key: token

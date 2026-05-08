@@ -50,15 +50,6 @@ const (
 	// this, ConfigMap-only updates would not propagate until pods restart
 	// for unrelated reasons.
 	AnnotationConfigHash = "tunnelport.giantswarm.io/config-hash"
-
-	// AnnotationTokenSecretVersion holds the tokenRef Secret's
-	// resourceVersion observed at the most recent reconcile. A rotation
-	// of the Secret bumps resourceVersion, which the reconciler stamps
-	// here, which causes the pod-template-hash to change and the
-	// Deployment to roll via its RollingUpdate strategy. The operator
-	// reads only `metadata.resourceVersion` of the Secret — never
-	// `Secret.Data`.
-	AnnotationTokenSecretVersion = "tunnelport.giantswarm.io/token-secret-version"
 )
 
 // PodDefaults carries the operator-level knobs that are NOT on the RemoteApp
@@ -269,13 +260,11 @@ const (
 // Image and resources come from operator PodDefaults (Helm values via slice 6),
 // not from the CR.
 //
-// tokenSecretVersion is stamped on the pod-template annotation
-// `tunnelport.giantswarm.io/token-secret-version`. The reconciler reads
-// it from `tokenRef`-Secret's `metadata.resourceVersion`; passing "" leaves
-// the annotation present-but-empty so absence and a rotation-to-empty stay
-// distinguishable in the pod-template diff. The argument is a separate
-// parameter rather than a PodDefaults field because it changes per-reconcile,
-// not per-operator-process.
+// ADR 0006: there is no longer a tokenRef Secret to track. The kubelet
+// auto-rotates the projected SA token in-place; the rendered pod template
+// is independent of any consumer-side Secret. ConfigMap content changes
+// are still picked up via `AnnotationConfigHash` so spec edits roll the
+// Deployment.
 //
 // The container declares a readiness probe wired to tbot's diag /readyz
 // (port "diag", 3001) so pod-Ready means tunnel-up — that's what
@@ -290,7 +279,7 @@ const (
 // platform teams that need to relax them must fork. Consistent with the
 // project's "no escape hatches yet" stance; revisit when a real use case
 // surfaces.
-func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecretVersion string) *appsv1.Deployment {
+func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Deployment {
 	labels := canonicalLabels(cr)
 	replicas := int32(1)
 	if cr.Spec.Replicas != nil {
@@ -352,13 +341,6 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 						// ConfigMap data, not the pod template directly —
 						// still rolls the Deployment via pod-template-hash.
 						AnnotationConfigHash: configHash(cr, cfg),
-						// resourceVersion of the tokenRef Secret. Stamped
-						// every reconcile; a rotation flips the value, the
-						// pod-template-hash changes, and the Deployment
-						// rolls via its existing RollingUpdate strategy.
-						// Empty when the Secret hasn't been observed yet
-						// — keeps the key present so the diff is unambiguous.
-						AnnotationTokenSecretVersion: tokenSecretVersion,
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -382,14 +364,9 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 								},
 							},
 						},
-						// ADR 0006: the legacy `tbot-token` Secret volume
-						// (which mounted the bound_keypair registration
-						// secret at `/etc/tbot-token`) is gone. tbot
-						// authenticates with Central via the projected
-						// SA token below — there is no consumer-side
-						// Secret to deliver bootstrap material from.
-						// `cr.Spec.TokenRef` itself stays in the API for
-						// one more slice (slice 03 retires it).
+						// ADR 0006: tbot authenticates with Central via the
+						// projected SA token volume below; there is no
+						// consumer-side Secret volume of any kind.
 						{
 							Name: volumeNameTbotStorage,
 							VolumeSource: corev1.VolumeSource{
@@ -520,8 +497,6 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 									MountPath: mountPathTbotConfig,
 									ReadOnly:  true,
 								},
-								// ADR 0006: the legacy `tbot-token` mount
-								// is gone alongside its volume above.
 								{
 									Name:      volumeNameTbotStorage,
 									MountPath: mountPathTbotStorage,

@@ -28,7 +28,6 @@ func TestConditionTypes(t *testing.T) {
 		got, want string
 	}{
 		{got: ConditionTypeReady, want: "Ready"},
-		{got: ConditionTypeTokenSecretBound, want: "TokenSecretBound"},
 	}
 
 	for _, c := range cases {

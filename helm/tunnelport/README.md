@@ -5,9 +5,18 @@ operator on a **consumer management cluster** (the MC that wants to
 reach Teleport-exposed apps as local Services).
 
 The operator watches `RemoteApp` CRs cluster-wide and renders a tbot
-`Deployment` + `Service` + `ConfigMap` per CR, in the CR's namespace.
+`Deployment` + `Service` + `ConfigMap` + `ServiceAccount` per CR, in the
+CR's namespace.
 See [`CONTEXT.md`](https://github.com/giantswarm/tunnelport/blob/main/CONTEXT.md)
 for the design rationale.
+
+> **⚠️ This README is partially out of date.** ADR 0006 (kubernetes join +
+> `static_jwks` trust) supersedes ADRs 0001 / 0004 / 0005. The sections below
+> describing the static-token / `tokenRef`-Secret model, registration-secret
+> rotation, and the operator's `secrets` RBAC grant **no longer apply** —
+> tbot now joins via the `kubernetes` method using a per-`RemoteApp`
+> `ServiceAccount` projected token. A full rewrite of this README is filed as
+> follow-up. Authoritative: `CONTEXT.md` and `docs/adr/0006-static-jwks-trust-mode.md`.
 
 ## Install
 

@@ -20,20 +20,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TokenRef points to a Secret holding the static join token for this RemoteApp's
-// dedicated TeleportBot. The operator never reads the Secret's contents — it
-// only references (name, key, resourceVersion).
-type TokenRef struct {
-	// Name of the Secret in the same namespace as the RemoteApp.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-	// Key inside the Secret holding the join token value.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Key string `json:"key"`
-}
-
 // RemoteAppSpec defines the desired state of a RemoteApp.
 type RemoteAppSpec struct {
 	// AppName is the Teleport application name to expose. Teleport application
@@ -65,11 +51,6 @@ type RemoteAppSpec struct {
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$"
 	ProxyAddr string `json:"proxyAddr"`
 
-	// TokenRef references a Secret in the same namespace holding the static
-	// join token for this RemoteApp's TeleportBot.
-	// +kubebuilder:validation:Required
-	TokenRef TokenRef `json:"tokenRef"`
-
 	// Replicas is the desired number of tbot pods for this RemoteApp. The
 	// reconciler defaults absence to 1 — the CRD intentionally has no default
 	// so absence remains observable in the API.
@@ -95,8 +76,9 @@ type RemoteAppStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Conditions report the current state of the RemoteApp. Standard types
-	// are Ready and TokenSecretBound.
+	// Conditions report the current state of the RemoteApp. The only
+	// standard type is Ready (mirrors pod readiness, which is wired to
+	// tbot's diag endpoint).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -108,7 +90,6 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="App",type=string,JSONPath=`.spec.appName`
 // +kubebuilder:printcolumn:name="Port",type=integer,JSONPath=`.spec.port`
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
-// +kubebuilder:printcolumn:name="Token",type=string,JSONPath=".status.conditions[?(@.type=='TokenSecretBound')].status"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="LastError",type=string,JSONPath=`.status.lastError`,priority=1
 
