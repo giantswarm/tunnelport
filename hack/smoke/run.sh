@@ -28,13 +28,19 @@ cd "${REPO_ROOT}"
 # Knobs. Pinned versions match the runbook (hack/smoke/README.md).
 # ---------------------------------------------------------------------
 
-TELEPORT_CHART_VERSION="${TELEPORT_CHART_VERSION:-18.4.0}"
-# tbot.image is intentionally NOT overridden here — the smoke install
-# uses the chart's default `tbot.image` so a default-shaped consumer
+# TELEPORT_CHART_VERSION: the upstream `teleport-cluster` /
+# `teleport-kube-agent` chart version installed by the smoke. Empty
+# by default — resolved from the chart's `tbot.image` major after the
+# upstream helm repo is added (see `resolve_teleport_chart_version`
+# below) so the smoke and the chart can never drift apart on a major.
+# Override with TELEPORT_CHART_VERSION=18.4.0 etc. for local debugging.
+TELEPORT_CHART_VERSION="${TELEPORT_CHART_VERSION:-}"
+# tbot.image is intentionally NOT overridden at install time — the
+# smoke renders with the chart's default so a default-shaped consumer
 # install is exercised end-to-end. This is what catches major-version
 # skew between the chart-default tbot and the Teleport server tested
-# above (TELEPORT_CHART_VERSION). Override with `--set tbot.image=...`
-# manually if you need to test a non-default image locally.
+# above. Override with `--set tbot.image=...` at the helm install
+# call if you need to test a non-default image locally.
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-tunnelport:smoke}"
 EXPECTED_BODY="${EXPECTED_BODY:-hello-from-producer}"
 
@@ -121,6 +127,29 @@ kind load docker-image "${OPERATOR_IMAGE}" --name consumer >/dev/null
 step "Installing Teleport (first pass — placeholder publicAddr)"
 helm repo add teleport https://charts.releases.teleport.dev >/dev/null 2>&1 || true
 helm repo update >/dev/null
+
+# Resolve TELEPORT_CHART_VERSION from the tunnelport chart's tbot.image
+# major. This makes the chart's `tbot.image` the single source of truth
+# for "which Teleport major are we on" — the smoke can never drift to
+# a different major from the chart default it tests. We pick the latest
+# patch within that major from the upstream `teleport-cluster` chart.
+if [ -z "${TELEPORT_CHART_VERSION}" ]; then
+  TBOT_MAJOR="$(helm template ./helm/tunnelport |
+    grep -oE -- '--tbot-image=[^[:space:]]+' | head -1 |
+    sed -E 's|.*tbot-distroless:([0-9]+).*|\1|')"
+  if ! printf '%s' "${TBOT_MAJOR}" | grep -qE '^[0-9]+$'; then
+    warn "Could not derive tbot major from chart (got: '${TBOT_MAJOR}'). Set TELEPORT_CHART_VERSION explicitly."
+    exit 1
+  fi
+  TELEPORT_CHART_VERSION="$(helm search repo teleport/teleport-cluster --versions -o json |
+    jq -r --arg M "${TBOT_MAJOR}" '[.[] | select(.version | startswith($M+"."))] | first | .version')"
+  if [ -z "${TELEPORT_CHART_VERSION}" ] || [ "${TELEPORT_CHART_VERSION}" = "null" ]; then
+    warn "No teleport-cluster chart version matching major ${TBOT_MAJOR} found upstream."
+    exit 1
+  fi
+  echo "Resolved TELEPORT_CHART_VERSION=${TELEPORT_CHART_VERSION} from chart's tbot.image major ${TBOT_MAJOR}."
+fi
+
 helm --kube-context kind-teleport upgrade --install teleport-cluster \
   teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
   --create-namespace --namespace teleport \
