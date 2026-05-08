@@ -26,11 +26,14 @@ Three kind clusters, all on the default `kind` Docker network:
 ```
 
 - **teleport**: control plane via the official `teleport-cluster` Helm
-  chart, pinned to **18.7.3**. Bot/role/token are provisioned by
-  `tctl` after the chart is up.
+  chart. Version is derived at runtime from
+  `helm/tunnelport/values.yaml`'s `tbot.image` major (latest patch in
+  that major from the upstream chart) — so the smoke tracks whatever
+  Teleport major the chart's default tbot is built for. Bot/role/
+  token are provisioned by `tctl` after the chart is up.
 - **producer**: hosts the HTTP responder (`hashicorp/http-echo`) and a
-  `teleport-kube-agent` (chart **18.7.3**) registering it as the
-  Teleport application named `smoke-app`.
+  `teleport-kube-agent` (same version as the control plane above)
+  registering it as the Teleport application named `smoke-app`.
 - **consumer**: runs the operator and the test workload. The operator
   renders a tbot Deployment from a `RemoteApp` CR. The `curl` Job hits
   the rendered Service.
@@ -41,7 +44,9 @@ Three kind clusters, all on the default `kind` Docker network:
 - `kind` ≥ 0.24
 - `kubectl`
 - `helm` ≥ 3.14
-- `teleport`, `tctl`, `tbot` ≥ **18.7.3**
+- `teleport`, `tctl`, `tbot` — major version must match the smoke's
+  resolved server version (auto-derived from
+  `helm/tunnelport/values.yaml`'s `tbot.image` major; see step 1)
   (download: <https://goteleport.com/download/> — pick the matching
   client tarball for your OS)
 - `jq` (for parsing `tctl` output)
@@ -55,10 +60,20 @@ kind create cluster --config hack/smoke/teleport/kind.yaml
 helm repo add teleport https://charts.releases.teleport.dev
 helm repo update
 
+# Single source of truth: the chart's tbot.image major. Pick the
+# latest patch in that major from upstream so the server we test
+# against can never drift to a different major from the operator's
+# chart-default tbot.
+TBOT_MAJOR="$(helm template ./helm/tunnelport |
+  grep -oE -- '--tbot-image=[^[:space:]]+' | head -1 |
+  sed -E 's|.*tbot-distroless:([0-9]+).*|\1|')"
+TELEPORT_CHART_VERSION="$(helm search repo teleport/teleport-cluster --versions -o json |
+  jq -r --arg M "${TBOT_MAJOR}" '[.[] | select(.version | startswith($M+"."))] | first | .version')"
+
 # First install — uses the placeholder publicAddr in helm-values.yaml.
 # We come back in step 2 with the real proxy address.
 helm --kube-context kind-teleport upgrade --install teleport-cluster \
-  teleport/teleport-cluster --version 18.4.0 \
+  teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
   --create-namespace --namespace teleport \
   --values hack/smoke/teleport/helm-values.yaml \
   --wait --timeout 5m
@@ -101,7 +116,7 @@ sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
   hack/smoke/teleport/helm-values.yaml > /tmp/teleport-values.yaml
 
 helm --kube-context kind-teleport upgrade teleport-cluster \
-  teleport/teleport-cluster --version 18.4.0 \
+  teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
   --namespace teleport --values /tmp/teleport-values.yaml \
   --wait --timeout 3m
 ```
@@ -176,7 +191,7 @@ sed \
   > /tmp/producer-kube-agent-values.yaml
 
 helm --kube-context kind-producer upgrade --install teleport-kube-agent \
-  teleport/teleport-kube-agent --version 18.4.0 \
+  teleport/teleport-kube-agent --version "${TELEPORT_CHART_VERSION}" \
   --create-namespace --namespace smoke \
   --values /tmp/producer-kube-agent-values.yaml \
   --wait --timeout 3m
@@ -226,13 +241,15 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set image.tag=smoke \
   --set image.pullPolicy=IfNotPresent \
   --set imagePullSecret="" \
-  --set tbot.image=public.ecr.aws/gravitational/tbot-distroless:18.4.0 \
   --set tbot.insecure=true \
   --wait --timeout 2m
 ```
 
-The `tbot.image` value flows through to the rendered tbot Deployment
-in step 6d.
+`tbot.image` is intentionally not overridden — the smoke uses the
+chart's default so a default-shaped install is exercised end-to-end.
+This is what catches major-version skew between the chart-default
+tbot and the Teleport server tested above. The default flows through
+to the rendered tbot Deployment in step 6d.
 
 ### 6c. Deliver the bot token Secret
 
