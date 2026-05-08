@@ -41,11 +41,11 @@ const noTbotPodsMsg = "no tbot pods"
 // liveTbotPods returns the subset of pods that are not being torn down,
 // i.e. pods whose DeletionTimestamp is nil. Pods with DeletionTimestamp
 // set are mid-termination: their PodReady condition still reads
-// whatever the kubelet last wrote, which during a rolling update with
-// maxSurge=1/maxUnavailable=0 can briefly be True even though the pod
-// is on its way out. Counting those would let Ready=true lie. Both the
-// Ready check and the lastError summary use the filtered set so the
-// two signals can never disagree on which pods exist.
+// whatever the kubelet last wrote, which during a StatefulSet rolling
+// update can briefly be True even though the pod is on its way out.
+// Counting those would let Ready=true lie. Both the Ready check and
+// the lastError summary use the filtered set so the two signals can
+// never disagree on which pods exist.
 func liveTbotPods(pods []corev1.Pod) []corev1.Pod {
 	out := pods[:0:0] // distinct backing array; never aliases caller's slice
 	for i := range pods {

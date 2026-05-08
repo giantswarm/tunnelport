@@ -118,8 +118,8 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 	cm := &corev1.ConfigMap{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cm)
 
-	dep := &appsv1.Deployment{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep)
+	sts := &appsv1.StatefulSet{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts)
 
 	svc := &corev1.Service{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, svc)
@@ -127,7 +127,7 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 	// Each owned object carries an OwnerReference back to the CR with
 	// Controller=true and BlockOwnerDeletion=true so kubectl-driven
 	// cascade deletes wait for the children to GC.
-	for _, obj := range []client.Object{cm, dep, svc} {
+	for _, obj := range []client.Object{cm, sts, svc} {
 		ors := obj.GetOwnerReferences()
 		if len(ors) != 1 {
 			t.Errorf("%T %s: ownerReferences want 1, got %d", obj, obj.GetName(), len(ors))
@@ -161,15 +161,15 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 		t.Errorf("Service port: want %d, got %d", cr.Spec.Port, got)
 	}
 
-	// Deployment uses operator config image, not anything from the CR.
-	if got := dep.Spec.Template.Spec.Containers[0].Image; got != testConfig().TbotImage {
-		t.Errorf("Deployment image: want %q (from operator config), got %q", testConfig().TbotImage, got)
+	// StatefulSet uses operator config image, not anything from the CR.
+	if got := sts.Spec.Template.Spec.Containers[0].Image; got != testConfig().TbotImage {
+		t.Errorf("StatefulSet image: want %q (from operator config), got %q", testConfig().TbotImage, got)
 	}
 }
 
-// samePodTemplate reports whether two Deployments share the same pod
+// samePodTemplate reports whether two StatefulSets share the same pod
 // template by every field, not just the rolling-fingerprint subset the
-// Deployment controller hashes on. The previous bespoke comparison
+// StatefulSet controller hashes on. The previous bespoke comparison
 // inspected only image, args, ports, volume name + ConfigMap/Secret name
 // — silently ignoring SecurityContext, Resources, Env, Probes, etc., so
 // regressions on those fields could not be caught here. equality.Semantic
@@ -177,7 +177,7 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 // equality, so two CPU quantities written as "10m" and "0.01" still
 // compare equal — that's the only place a literal byte-equal check would
 // have been wrong.
-func samePodTemplate(a, b appsv1.Deployment) bool {
+func samePodTemplate(a, b appsv1.StatefulSet) bool {
 	return equalPodTemplate(a.Spec.Template, b.Spec.Template)
 }
 
@@ -185,15 +185,15 @@ func equalPodTemplate(a, b corev1.PodTemplateSpec) bool {
 	return equality.Semantic.DeepEqual(a, b)
 }
 
-func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
+func TestReconciler_PortChangeUpdatesAllThreeAndRollsStatefulSet(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
 	cr := makeRemoteApp(ctx, t, ns, "port-change")
 
 	// Wait for initial render.
-	depBefore := &appsv1.Deployment{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, depBefore)
+	stsBefore := &appsv1.StatefulSet{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, stsBefore)
 	svcBefore := &corev1.Service{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, svcBefore)
 	cmBefore := &corev1.ConfigMap{}
@@ -241,20 +241,20 @@ func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
 		return true, nil
 	})
 
-	// Deployment containerPort and arguments reflect the new port —
+	// StatefulSet containerPort and arguments reflect the new port —
 	// pod template differs from the pre-update template, so the
-	// Deployment will roll.
+	// StatefulSet will roll.
 	eventually(t, func() (bool, error) {
-		dep := &appsv1.Deployment{}
-		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
+		sts := &appsv1.StatefulSet{}
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts); err != nil {
 			return false, err
 		}
-		c := dep.Spec.Template.Spec.Containers[0]
+		c := sts.Spec.Template.Spec.Containers[0]
 		if len(c.Ports) == 0 || c.Ports[0].ContainerPort != newPort {
-			return false, fmt.Errorf("Deployment container port not yet %d", newPort)
+			return false, fmt.Errorf("StatefulSet container port not yet %d", newPort)
 		}
-		if samePodTemplate(*depBefore, *dep) {
-			return false, fmt.Errorf("pod template did not change after spec.port update — Deployment would not roll")
+		if samePodTemplate(*stsBefore, *sts) {
+			return false, fmt.Errorf("pod template did not change after spec.port update — StatefulSet would not roll")
 		}
 		return true, nil
 	})
@@ -266,10 +266,10 @@ func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
 
 	cr := makeRemoteApp(ctx, t, ns, "replicas-change")
 
-	depBefore := &appsv1.Deployment{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, depBefore)
-	if depBefore.Spec.Replicas == nil || *depBefore.Spec.Replicas != 1 {
-		t.Fatalf("initial replicas: want 1, got %v", depBefore.Spec.Replicas)
+	stsBefore := &appsv1.StatefulSet{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, stsBefore)
+	if stsBefore.Spec.Replicas == nil || *stsBefore.Spec.Replicas != 1 {
+		t.Fatalf("initial replicas: want 1, got %v", stsBefore.Spec.Replicas)
 	}
 
 	// Bump replicas to 3.
@@ -284,30 +284,30 @@ func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
 	}
 
 	eventually(t, func() (bool, error) {
-		dep := &appsv1.Deployment{}
-		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
+		sts := &appsv1.StatefulSet{}
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts); err != nil {
 			return false, err
 		}
-		if dep.Spec.Replicas == nil || *dep.Spec.Replicas != want {
+		if sts.Spec.Replicas == nil || *sts.Spec.Replicas != want {
 			return false, fmt.Errorf("replicas not yet %d", want)
 		}
 		// Pod template should be unchanged — replicas changes don't roll.
-		if !samePodTemplate(*depBefore, *dep) {
-			return false, fmt.Errorf("pod template changed on replicas update; deployment would roll unnecessarily")
+		if !samePodTemplate(*stsBefore, *sts) {
+			return false, fmt.Errorf("pod template changed on replicas update; StatefulSet would roll unnecessarily")
 		}
 		return true, nil
 	})
 }
 
-func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t *testing.T) {
+func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollStatefulSet(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
 	cr := makeRemoteApp(ctx, t, ns, "appname-proxy-change")
 
 	// Initial render.
-	depBefore := &appsv1.Deployment{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, depBefore)
+	stsBefore := &appsv1.StatefulSet{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, stsBefore)
 	cmBefore := &corev1.ConfigMap{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cmBefore)
 	bodyBefore := cmBefore.Data["tbot.yaml"]
@@ -342,22 +342,22 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 		return true, nil
 	})
 
-	// Deployment must roll. The pod template references the ConfigMap by
+	// StatefulSet must roll. The pod template references the ConfigMap by
 	// name only, so the args themselves don't change — but the pod
 	// template's config-hash annotation does, which triggers a new
 	// pod-template-hash and a rolling update.
 	eventually(t, func() (bool, error) {
-		dep := &appsv1.Deployment{}
-		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
+		sts := &appsv1.StatefulSet{}
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts); err != nil {
 			return false, err
 		}
-		hashBefore := depBefore.Spec.Template.Annotations[AnnotationConfigHash]
-		hashAfter := dep.Spec.Template.Annotations[AnnotationConfigHash]
+		hashBefore := stsBefore.Spec.Template.Annotations[AnnotationConfigHash]
+		hashAfter := sts.Spec.Template.Annotations[AnnotationConfigHash]
 		if hashBefore == "" {
-			return false, fmt.Errorf("config-hash annotation missing on initial Deployment")
+			return false, fmt.Errorf("config-hash annotation missing on initial StatefulSet")
 		}
 		if hashAfter == hashBefore {
-			return false, fmt.Errorf("config-hash unchanged after appName/proxyAddr update; Deployment would not roll")
+			return false, fmt.Errorf("config-hash unchanged after appName/proxyAddr update; StatefulSet would not roll")
 		}
 		return true, nil
 	})
@@ -372,8 +372,8 @@ func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {
 	// Wait for all three to exist.
 	cm := &corev1.ConfigMap{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cm)
-	dep := &appsv1.Deployment{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep)
+	sts := &appsv1.StatefulSet{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts)
 	svc := &corev1.Service{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, svc)
 
@@ -383,7 +383,12 @@ func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {
 	// each child carry Controller=true and BlockOwnerDeletion=true and
 	// point at the live RemoteApp's UID. Real-cluster cascade behavior is
 	// covered by e2e (slice 6 / future).
-	for _, obj := range []client.Object{cm, dep, svc} {
+	//
+	// PVC retention policy on the StatefulSet (whenDeleted: Delete /
+	// whenScaled: Retain) is what guarantees PVCs created from
+	// volumeClaimTemplates cascade-delete with the StatefulSet — see
+	// TestRenderStatefulSet_PVCRetentionPolicyDeletesOnOwnerRemoval.
+	for _, obj := range []client.Object{cm, sts, svc} {
 		ors := obj.GetOwnerReferences()
 		if len(ors) != 1 {
 			t.Fatalf("%T: ownerRefs len = %d, want 1", obj, len(ors))

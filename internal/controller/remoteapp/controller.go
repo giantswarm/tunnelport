@@ -26,7 +26,7 @@ limitations under the License.
 //   - `secrets` (get;list;watch): the operator references the token
 //     Secret by name and reads its `metadata.resourceVersion` to stamp
 //     the pod-template annotation `…/token-secret-version` (so token
-//     rotations roll the Deployment), and verifies the named key for
+//     rotations roll the StatefulSet), and verifies the named key for
 //     the `TokenSecretBound` status condition. The ideal would be the
 //     partial-metadata API (`metadata.k8s.io`), but that omits `data`
 //     keys, so we have to read the Secret object to check key presence.
@@ -38,7 +38,7 @@ limitations under the License.
 //
 // +kubebuilder:rbac:groups=access.giantswarm.io,resources=remoteapps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=access.giantswarm.io,resources=remoteapps/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
@@ -100,12 +100,12 @@ const fieldManager = "remoteapp-controller"
 // `TestController_TypedSecretAccessor` in secret_watch_test.go.
 const LabelRoleValueTokenSecret = "token-secret"
 
-// Reconciler renders a ConfigMap, Deployment, and Service in the CR's
+// Reconciler renders a ConfigMap, StatefulSet, and Service in the CR's
 // namespace, owned by the RemoteApp via OwnerReferences. It also watches
 // the tokenRef Secret and stamps the Secret's resourceVersion onto the
 // pod-template annotation `tunnelport.giantswarm.io/token-secret-version`
-// so token rotations roll the Deployment via the existing RollingUpdate
-// strategy (slice 5). It does NOT populate status (slice 4).
+// so token rotations roll the StatefulSet via the existing RollingUpdate
+// update strategy (slice 5). It does NOT populate status (slice 4).
 type Reconciler struct {
 	client.Client
 
@@ -154,8 +154,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if view.FetchErr != nil {
 		return ctrl.Result{}, fmt.Errorf("observe token Secret: %w", view.FetchErr)
 	}
-	if err := r.applyOwned(ctx, cr, renderDeployment(cr, r.PodDefaults, view.ResourceVersion)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile Deployment: %w", err)
+	if err := r.applyOwned(ctx, cr, renderStatefulSet(cr, r.PodDefaults, view.ResourceVersion)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile StatefulSet: %w", err)
 	}
 	if err := r.applyOwned(ctx, cr, renderService(cr, r.PodDefaults)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile Service: %w", err)
@@ -189,7 +189,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 //     previous client-side merge had to copy it from the existing
 //     object to avoid "field is immutable".
 //   - ConfigMap data keys we don't render — preserved.
-//   - Deployment containers other than "tbot" (sidecar injection) —
+//   - StatefulSet containers other than "tbot" (sidecar injection) —
 //     preserved.
 //
 // TypeMeta is required on the apply payload because we route through
@@ -241,12 +241,11 @@ func (r *Reconciler) applyOwned(ctx context.Context, cr *accessv1alpha1.RemoteAp
 // RemoteApp via the canonical LabelRemoteAppInstance label. Pod state
 // (CrashLoopBackOff, restart count, last termination reason) is what
 // populates status.lastError, so the reconciler must re-run on Pod
-// events. Pods are owned by the rendered ReplicaSet (transitively the
-// Deployment), so an `Owns` on Pod would not catch them — the
-// label-driven mapping is the stable seam. The manager-level cache
-// filter in cmd/main.go also restricts the Pod informer to the
-// `tunnelport.giantswarm.io/role=tbot` label, narrowing the cache to
-// pods this operator itself rendered.
+// events. Pods are owned by the rendered StatefulSet, so an `Owns` on
+// Pod would not catch them transitively — the label-driven mapping is
+// the stable seam. The manager-level cache filter in cmd/main.go also
+// restricts the Pod informer to the `tunnelport.giantswarm.io/role=tbot`
+// label, narrowing the cache to pods this operator itself rendered.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
@@ -265,7 +264,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&accessv1alpha1.RemoteApp{}).
-		Owns(&appsv1.Deployment{}).
+		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Watches(
@@ -412,8 +411,8 @@ func (r *Reconciler) mapSecretToRemoteApps(ctx context.Context, obj client.Objec
 
 // mapPodToRemoteApp routes a Pod event to the RemoteApp whose name lives
 // in the canonical LabelRemoteAppInstance label. We do not look up the
-// owning ReplicaSet/Deployment chain — the label is the stable, slice-2
-// contract on every rendered pod template.
+// owning StatefulSet — the label is the stable, slice-2 contract on
+// every rendered pod template.
 func (r *Reconciler) mapPodToRemoteApp(_ context.Context, obj client.Object) []reconcile.Request {
 	labels := obj.GetLabels()
 	if labels[LabelRole] != LabelRoleValue {
@@ -466,9 +465,9 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.Rem
 }
 
 // listTbotPods returns the pods labelled as belonging to this RemoteApp.
-// We list by label selector rather than walking the Deployment ->
-// ReplicaSet -> Pod chain to keep the reconciler decoupled from the
-// shape of the in-cluster Deployment hierarchy.
+// We list by label selector rather than walking the StatefulSet -> Pod
+// chain to keep the reconciler decoupled from the shape of the in-cluster
+// owner hierarchy.
 func (r *Reconciler) listTbotPods(ctx context.Context, cr *accessv1alpha1.RemoteApp) ([]corev1.Pod, error) {
 	pods := &corev1.PodList{}
 	err := r.List(ctx, pods,

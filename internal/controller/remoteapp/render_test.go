@@ -164,55 +164,55 @@ func TestRenderConfigMap_NotInsecureByDefault(t *testing.T) {
 	}
 }
 
-func TestRenderDeployment_DefaultsAndStrategy(t *testing.T) {
+func TestRenderStatefulSet_DefaultsAndStrategy(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
-	if dep.Name != cr.Name {
-		t.Fatalf("Deployment name: want %q, got %q", cr.Name, dep.Name)
+	if sts.Name != cr.Name {
+		t.Fatalf("StatefulSet name: want %q, got %q", cr.Name, sts.Name)
 	}
-	if dep.Namespace != cr.Namespace {
-		t.Fatalf("Deployment namespace: want %q, got %q", cr.Namespace, dep.Namespace)
+	if sts.Namespace != cr.Namespace {
+		t.Fatalf("StatefulSet namespace: want %q, got %q", cr.Namespace, sts.Namespace)
 	}
-	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 1 {
-		t.Errorf("Deployment replicas: want 1 by default, got %v", dep.Spec.Replicas)
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 1 {
+		t.Errorf("StatefulSet replicas: want 1 by default, got %v", sts.Spec.Replicas)
 	}
-	if dep.Spec.Strategy.RollingUpdate == nil {
-		t.Fatal("Deployment.Strategy.RollingUpdate must be set")
+	// ServiceName must be set — empty fails StatefulSet validation. We
+	// point it at the ClusterIP Service the operator also renders.
+	if sts.Spec.ServiceName != cr.Name {
+		t.Errorf("StatefulSet.ServiceName: want %q (the rendered Service), got %q", cr.Name, sts.Spec.ServiceName)
 	}
-	if got := dep.Spec.Strategy.RollingUpdate.MaxSurge; got == nil || got.IntValue() != 1 {
-		t.Errorf("RollingUpdate.MaxSurge: want 1, got %v", got)
-	}
-	if got := dep.Spec.Strategy.RollingUpdate.MaxUnavailable; got == nil || got.IntValue() != 0 {
-		t.Errorf("RollingUpdate.MaxUnavailable: want 0, got %v", got)
-	}
-	if got, want := dep.Spec.Selector.MatchLabels[LabelRole], LabelRoleValue; got != want {
+	if got, want := sts.Spec.Selector.MatchLabels[LabelRole], LabelRoleValue; got != want {
 		t.Errorf("Selector matchLabels[%s]: want %q, got %q", LabelRole, want, got)
 	}
-	if got, want := dep.Spec.Template.Labels[LabelRemoteAppInstance], cr.Name; got != want {
+	if got, want := sts.Spec.Template.Labels[LabelRemoteAppInstance], cr.Name; got != want {
 		t.Errorf("Pod template label[%s]: want %q, got %q", LabelRemoteAppInstance, want, got)
 	}
 }
 
-func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
+func TestRenderStatefulSet_RespectsExplicitReplicas(t *testing.T) {
 	cr := fixtureRemoteApp()
 	r := int32(3)
 	cr.Spec.Replicas = &r
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
-	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
-		t.Errorf("Deployment replicas: want 3, got %v", dep.Spec.Replicas)
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 3 {
+		t.Errorf("StatefulSet replicas: want 3, got %v", sts.Spec.Replicas)
 	}
 }
 
-func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.T) {
+// TestRenderStatefulSet_PodTemplateMountsConfigMapAndToken pins the
+// non-storage volumes attached to every tbot pod. Storage is no longer
+// in the pod's `volumes` list — it's materialised per-replica from
+// volumeClaimTemplates (see TestRenderStatefulSet_VolumeClaimTemplate).
+func TestRenderStatefulSet_PodTemplateMountsConfigMapAndToken(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
-	pod := dep.Spec.Template.Spec
+	pod := sts.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
 		t.Fatalf("expected 1 container in pod, got %d", len(pod.Containers))
 	}
@@ -250,26 +250,90 @@ func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.
 		t.Errorf("container envFrom must be empty (no Secret/ConfigMap envFrom); got %d entries", len(c.EnvFrom))
 	}
 
-	// emptyDir destination dir per ADR 0002 — no PVC.
-	dest := volumeByName(pod.Volumes, "tbot-storage")
-	if dest == nil {
-		t.Fatalf("missing tbot-storage volume; got: %v", volumeNames(pod.Volumes))
+	// Storage is per-replica via volumeClaimTemplates — must NOT appear
+	// as a pod-level Volume. Pinning this here so a regression to
+	// emptyDir/Volume can't sneak through.
+	if v := volumeByName(pod.Volumes, "tbot-storage"); v != nil {
+		t.Errorf("tbot-storage must come from volumeClaimTemplates, not pod-level Volumes; got %+v", v)
 	}
-	if dest.EmptyDir == nil {
-		t.Errorf("tbot-storage must be an EmptyDir per ADR 0002; got %+v", dest)
-	}
-	if dest.PersistentVolumeClaim != nil {
-		t.Errorf("tbot-storage must not be a PVC per ADR 0002")
+
+	// The container must still mount /var/lib/tbot — the StatefulSet
+	// controller injects the per-replica PVC reference at pod-creation
+	// time using the volumeClaimTemplate name.
+	if !hasMount(c.VolumeMounts, "tbot-storage") {
+		t.Errorf("container missing volumeMount tbot-storage (PVC-backed); got: %v", mountNames(c.VolumeMounts))
 	}
 }
 
-func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
+// TestRenderStatefulSet_VolumeClaimTemplate pins the per-replica PVC
+// shape: 1 Gi RWO, no explicit StorageClass (rely on default), labelled
+// the same way as every other owned object so platform-team scripts can
+// target it.
+func TestRenderStatefulSet_VolumeClaimTemplate(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
+
+	if got := len(sts.Spec.VolumeClaimTemplates); got != 1 {
+		t.Fatalf("volumeClaimTemplates: want 1, got %d", got)
+	}
+	vct := sts.Spec.VolumeClaimTemplates[0]
+	if vct.Name != "tbot-storage" {
+		t.Errorf("VCT name: want %q, got %q", "tbot-storage", vct.Name)
+	}
+	if got, want := vct.Spec.AccessModes, []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("VCT accessModes: want [ReadWriteOnce], got %v", got)
+	}
+	gotStorage := vct.Spec.Resources.Requests[corev1.ResourceStorage]
+	wantStorage := resource.MustParse("1Gi")
+	if gotStorage.Cmp(wantStorage) != 0 {
+		t.Errorf("VCT storage request: want 1Gi, got %s", (&gotStorage).String())
+	}
+	// StorageClassName left unset on purpose — relies on the consumer
+	// MC's default StorageClass, per ADR 0004.
+	if vct.Spec.StorageClassName != nil {
+		t.Errorf("VCT StorageClassName must be unset (rely on default SC); got %q", *vct.Spec.StorageClassName)
+	}
+	if got, want := vct.Labels[LabelRole], LabelRoleValue; got != want {
+		t.Errorf("VCT label[%s]: want %q, got %q", LabelRole, want, got)
+	}
+}
+
+// TestRenderStatefulSet_PVCRetentionPolicyDeletesOnOwnerRemoval pins the
+// retention policy that makes PVCs created from volumeClaimTemplates
+// cascade-delete with the StatefulSet (and therefore with the RemoteApp
+// CR via its OwnerReference on the StatefulSet). Without this, k8s
+// defaults to Retain on owner delete and the PVCs orphan.
+//
+// Reference: k8s.io/api/apps/v1.StatefulSetSpec — "PersistentVolumeClaim
+// RetentionPolicy describes the policy used for PVCs created from the
+// StatefulSet VolumeClaimTemplates."
+func TestRenderStatefulSet_PVCRetentionPolicyDeletesOnOwnerRemoval(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
+
+	rp := sts.Spec.PersistentVolumeClaimRetentionPolicy
+	if rp == nil {
+		t.Fatalf("PersistentVolumeClaimRetentionPolicy must be set; otherwise PVCs orphan on RemoteApp delete")
+	}
+	if rp.WhenDeleted != "Delete" {
+		t.Errorf("retention.WhenDeleted: want %q (PVC cascades with the owner), got %q", "Delete", rp.WhenDeleted)
+	}
+	// Retain on scale lets a transient scale-down preserve the keypair
+	// for the same ordinal on scale-up. Sense-check, not load-bearing.
+	if rp.WhenScaled != "Retain" {
+		t.Errorf("retention.WhenScaled: want %q (preserve keypair on scale events), got %q", "Retain", rp.WhenScaled)
+	}
+}
+
+func TestRenderStatefulSet_UsesOperatorConfigImageAndResources(t *testing.T) {
 	cr := fixtureRemoteApp()
 	cfg := fixtureConfig()
 
-	dep := renderDeployment(cr, cfg, "")
+	sts := renderStatefulSet(cr, cfg, "")
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := sts.Spec.Template.Spec.Containers[0]
 	if c.Image != cfg.TbotImage {
 		t.Errorf("container image: want %q (from config), got %q", cfg.TbotImage, c.Image)
 	}
@@ -285,12 +349,12 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 	}
 }
 
-func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
+func TestRenderStatefulSet_ContainerPortMatchesSpecPort(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := sts.Spec.Template.Spec.Containers[0]
 	if len(c.Ports) == 0 {
 		t.Fatalf("container has no ports")
 	}
@@ -299,19 +363,19 @@ func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 	}
 }
 
-// TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint pins the
+// TestRenderStatefulSet_ReadinessProbeHitsTbotDiagEndpoint pins the
 // acceptance criterion that pod-Ready means tunnel-up. tbot's diag
 // endpoint listens on 127.0.0.1:3001 and exposes /readyz, which only
 // returns 200 once the application-tunnel is established. The rendered
 // container must (a) declare a containerPort named "diag" on 3001 so the
 // kubelet has a target to probe, and (b) define a readinessProbe with an
 // HTTPGet action on that port and path.
-func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
+func TestRenderStatefulSet_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := sts.Spec.Template.Spec.Containers[0]
 
 	// diag port must be present and named so the probe can reference it.
 	var diagPort *corev1.ContainerPort
@@ -350,20 +414,20 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	}
 }
 
-// TestRenderDeployment_PodAndContainerSecurityContext pins the hardened
+// TestRenderStatefulSet_PodAndContainerSecurityContext pins the hardened
 // defaults the rendered tbot pod runs with. The values mirror the
 // operator's own pod template (helm/tunnelport/values.yaml): nonroot
 // distroless UID, RuntimeDefault seccomp at pod level; drop ALL caps,
 // readOnlyRootFilesystem, no privilege escalation at container level.
 // They are not currently CR-tunable — this test guards against silent
 // drift if anyone removes them.
-func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
+func TestRenderStatefulSet_PodAndContainerSecurityContext(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
 	// Pod-level securityContext.
-	pc := dep.Spec.Template.Spec.SecurityContext
+	pc := sts.Spec.Template.Spec.SecurityContext
 	if pc == nil {
 		t.Fatalf("PodSpec.SecurityContext must be set")
 	}
@@ -378,7 +442,7 @@ func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 	}
 
 	// Container-level securityContext.
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := sts.Spec.Template.Spec.Containers[0]
 	cc := c.SecurityContext
 	if cc == nil {
 		t.Fatalf("Container.SecurityContext must be set")
@@ -398,15 +462,15 @@ func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 	}
 }
 
-// TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem pins
+// TestRenderStatefulSet_TmpEmptyDirSatisfiesReadOnlyRootFilesystem pins
 // the /tmp emptyDir we add to keep tbot writable scratch space available
 // despite readOnlyRootFilesystem: true. Without this, Go runtime / glibc
 // resolver writes inside the container would EROFS unpredictably.
-func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.T) {
+func TestRenderStatefulSet_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
-	pod := dep.Spec.Template.Spec
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
+	pod := sts.Spec.Template.Spec
 
 	tmp := volumeByName(pod.Volumes, "tbot-tmp")
 	if tmp == nil {
@@ -432,17 +496,17 @@ func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.
 	}
 }
 
-// TestRenderDeployment_LivenessProbe pins the kubelet-driven recovery
+// TestRenderStatefulSet_LivenessProbe pins the kubelet-driven recovery
 // contract from ADR 0003: the rendered pod has a liveness probe on
 // tbot's diag port so a wedged listener triggers a restart, but the
 // thresholds are deliberately generous so transient slowness doesn't
 // induce restart storms.
-func TestRenderDeployment_LivenessProbe(t *testing.T) {
+func TestRenderStatefulSet_LivenessProbe(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	sts := renderStatefulSet(cr, fixtureConfig(), "")
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := sts.Spec.Template.Spec.Containers[0]
 	if c.LivenessProbe == nil {
 		t.Fatalf("container missing livenessProbe")
 	}

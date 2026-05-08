@@ -28,10 +28,15 @@ tbot tunnel exposed on a port); `RemoteApp` describes what the user *declares*.
 
 ### Auth model
 
-Each `RemoteApp` has its own static **join token** on Central, bound to a
+Each `RemoteApp` has its own **`bound_keypair` token** on Central, bound to a
 dedicated `TeleportBot` whose role is scoped to exactly that one app. The
-token is delivered to the consumer MC out-of-band (GitOps + secret sync)
-as a `Secret`, and the `RemoteApp` references it via `tokenRef`.
+one-time **registration secret** Teleport generates for the token is
+delivered to the consumer MC out-of-band (GitOps + secret sync) as a
+`Secret`, and the `RemoteApp` references it via `tokenRef`. tbot consumes
+the registration secret on first start, then rejoins via the persisted
+keypair (held in the per-replica PVC at `/var/lib/tbot`) on every restart.
+ADR 0005 pins `recovery.mode: relaxed` so PVC loss self-heals via a fresh
+re-registration without per-bot SRE intervention.
 
 This gives **per-app blast-radius isolation**: if one tbot pod is compromised,
 the leaked identity reaches only that one app. The cost is one paired action
@@ -39,15 +44,16 @@ on Central per `RemoteApp` (create `TeleportBot` + role + token).
 
 The `kubernetes` join method is rejected for v1: it would require per-CR
 `ServiceAccount` orchestration on the consumer side and pinning each token's
-allowed-subject on Central, for the same isolation property the static-token
+allowed-subject on Central, for the same isolation property the bound_keypair
 approach already gives.
 
 ### tbot topology
 
-One tbot Deployment per `RemoteApp`. tbot is one identity per process, and
+One tbot StatefulSet per `RemoteApp`. tbot is one identity per process, and
 identities are per-app (auth model above), so multi-tunnel-per-tbot is not an
-option. Replicas of the same `RemoteApp`'s Deployment all use the same token
-and join as separate instances of the same `TeleportBot`.
+option. Replicas of the same `RemoteApp`'s StatefulSet all bootstrap from the
+same registration secret and join as separate instances of the same
+`TeleportBot`, each persisting its own keypair on a per-replica PVC.
 
 ### `Service` exposure
 
@@ -60,11 +66,11 @@ add it then; don't ship the knob without a use case.
 
 ### Reconciliation on token rotation
 
-The operator **does** auto-roll the tbot Deployment when the referenced
+The operator **does** auto-roll the tbot StatefulSet when the referenced
 `tokenRef` Secret content changes. Mechanism: a watch on `Secret`s triggers
 reconcile, and the operator stamps the Secret's `resourceVersion` onto the
-pod-template annotation; the Deployment's RollingUpdate strategy handles the
-rest.
+pod-template annotation; the StatefulSet's default RollingUpdate update
+strategy handles the rest.
 
 Reason: in this operational model, token changes typically reflect bot
 identity changes on Central — at which point the running tbot's renewable
@@ -78,16 +84,24 @@ blast radius.
 
 ### Cert cache
 
-tbot's destination directory is an `emptyDir` mounted into the pod. The
-renewable cert lives only for the pod's lifetime — every pod restart triggers
-a re-join with the token. This is a deliberate trade against `StatefulSet` +
-`PVC` complexity (PVC provisioning, GC on CR deletion, StorageClass coupling
-to the consumer MC). The visible cost is join-rate pressure on Central during
-MC-wide pod churn (chart upgrades, node rolls); document this in the chart
-README.
+tbot's destination directory `/var/lib/tbot` is a per-replica PVC, provisioned
+via the rendered StatefulSet's `volumeClaimTemplates` (1 Gi RWO, default
+StorageClass on the consumer MC). The bound_keypair private key persists
+across pod restarts, so rolls / evictions / image bumps do not generate
+fresh Central registrations.
 
-If frequent re-joins become a real complaint, switch to `StatefulSet` later —
-`RemoteApp.spec` doesn't expose any of this, so it's an internal change.
+This shape replaces the earlier ADR 0002 `emptyDir` model, which assumed
+join tokens were reusable. Bot tokens are single-use (Teleport docs, ADR
+0004), so emptyDir + token would lock the bot out on every restart. ADR
+0005 commits to bound_keypair join with `recovery.mode: relaxed` on the
+token resource Central-side, which lets PVC loss self-heal automatically:
+tbot falls back to the registration secret in the `tokenRef` Secret,
+rebinds, and resumes.
+
+PVC retention policy on the StatefulSet is `whenDeleted: Delete,
+whenScaled: Retain` so deleting the `RemoteApp` CR cascades through
+StatefulSet → PVC, while transient scale-down preserves the keypair.
+Consumer-MC requirement: a default StorageClass.
 
 ### Failure surfacing
 
@@ -135,15 +149,17 @@ half-applicable defaults.
 
 ### Pod template defaults
 
-- `replicas` defaults to `1`. The Deployment uses
-  `strategy.rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }`, so the new
-  pod must become `Ready` (tunnel established) before the old pod is
-  terminated — no caller-visible downtime for *new* connections during a
-  roll. In-flight long-lived TCP/gRPC streams on the old pod still terminate
-  when it eventually shuts down; that's true at `replicas: 2` too. HA beyond
-  the rolling-update window is opt-in via `spec.replicas: 2`. Bonus property:
-  if Central is briefly unreachable during a roll, the new pod stays
-  `NotReady` and the old pod keeps serving — graceful auto-rollback on
+- `replicas` defaults to `1`. The StatefulSet uses the default
+  RollingUpdate `updateStrategy` — pods are recreated one at a time, in
+  reverse-ordinal order, with the next pod waiting until the previous is
+  Ready (tunnel established). At `replicas: 1` this means a brief gap
+  for *new* connections during a roll; at `replicas: 2` the surviving
+  replica keeps serving while the other rotates. In-flight long-lived
+  TCP/gRPC streams on the rotating pod still terminate when it shuts
+  down; that's true at any replica count. HA beyond the rolling-update
+  window is opt-in via `spec.replicas: 2`. Bonus property: if Central is
+  briefly unreachable during a roll, the new pod stays `NotReady` and
+  the StatefulSet pauses the rollout — graceful auto-rollback on
   transient upstream failures.
 - The tbot **image** comes from a Helm value on the operator chart, not from
   the CR. Single global version per consumer MC; the platform team upgrades
@@ -158,7 +174,7 @@ half-applicable defaults.
 The platform team provides the `tokenRef` Secret out-of-band — typically via
 GitOps with a sealed/sync mechanism. The operator never creates, copies, or
 reads the Secret's contents. If the Secret is missing when the CR is created,
-the rendered `Deployment` stays `Pending` (volume mount fails) and
+the rendered StatefulSet's pod stays `Pending` (volume mount fails) and
 `status.TokenSecretBound = false` — handling the GitOps-race case where the
 CR arrives before the Secret.
 
@@ -166,9 +182,11 @@ CR arrives before the Secret.
 
 - One operator Deployment per consumer MC, running in its own namespace
   (e.g. `tunnelport-system`).
-- Watches `RemoteApp` CRs cluster-wide. Renders `Deployment` + `Service` +
+- Watches `RemoteApp` CRs cluster-wide. Renders `StatefulSet` + `Service` +
   `ConfigMap` (tbot config) **in the CR's namespace** — no cross-namespace
-  references.
+  references. The StatefulSet's `volumeClaimTemplates` provisions a per-
+  replica PVC for `/var/lib/tbot` from the consumer MC's default
+  StorageClass.
 - RBAC: cluster-scoped read on `RemoteApp` and `Secret`; namespace-scoped
   write on the rendered resource types via a single ClusterRole.
 - The chart ships the operator and CRD only. It does **not** create
@@ -189,11 +207,11 @@ Two distinct things, decided differently:
   to `proxyAddr:443` and ingress from approved caller pods is the platform
   team's to enforce.
 - **For the operator's own manager pod**: the chart **does** render a
-  `NetworkPolicy` locking down the operator Deployment, per GS convention
-  for kubebuilder operators. Default-deny with explicit allow rules for
-  kube-apiserver egress and metrics scraping ingress. This is operator
-  hygiene, not tenant policy — the rule above only applies to the tbot
-  pods we render on behalf of `RemoteApp`s.
+  `NetworkPolicy` locking down the operator's manager Deployment, per GS
+  convention for kubebuilder operators. Default-deny with explicit allow
+  rules for kube-apiserver egress and metrics scraping ingress. This is
+  operator hygiene, not tenant policy — the rule above only applies to
+  the tbot pods we render on behalf of `RemoteApp`s.
 
 ### Roles (cluster topology)
 
@@ -201,5 +219,7 @@ Two distinct things, decided differently:
   upstream Teleport Operator and the `TeleportApp` / `TeleportBot` CRs.
 - **Producer MC** — runs `teleport-kube-agent` (Application Service mode) and
   publishes apps to Central. Managed elsewhere; out of scope.
-- **Consumer MC** — runs *this* operator, plus the `tbot` Deployments and
-  Services it renders. Workloads on this MC call the Service.
+- **Consumer MC** — runs *this* operator, plus the `tbot` StatefulSets and
+  Services it renders. Workloads on this MC call the Service. Requires a
+  default `StorageClass` (the StatefulSet's volumeClaimTemplates relies
+  on it).

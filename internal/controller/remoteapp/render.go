@@ -15,9 +15,9 @@ limitations under the License.
 */
 
 // Package remoteapp contains the controller-runtime reconciler that
-// materialises a RemoteApp CR into a ConfigMap, Deployment, and Service,
+// materialises a RemoteApp CR into a ConfigMap, StatefulSet, and Service,
 // owned by the CR via OwnerReferences. The rendering is split into pure
-// functions (renderConfigMap / renderDeployment / renderService) so they
+// functions (renderConfigMap / renderStatefulSet / renderService) so they
 // can be unit-tested without a live API server.
 package remoteapp
 
@@ -27,6 +27,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -37,7 +38,7 @@ import (
 )
 
 // Canonical labels stamped on every owned object's metadata and on the
-// Deployment's pod template. The chart README documents these as the stable
+// StatefulSet's pod template. The chart README documents these as the stable
 // selectors platform teams can target with NetworkPolicies.
 const (
 	LabelRole              = "tunnelport.giantswarm.io/role"
@@ -46,7 +47,7 @@ const (
 
 	// AnnotationConfigHash is stamped on the pod template so that ConfigMap
 	// content changes (spec.appName / spec.proxyAddr / spec.port) cause the
-	// pod-template-hash to change, which makes the Deployment roll. Without
+	// pod-template-hash to change, which makes the StatefulSet roll. Without
 	// this, ConfigMap-only updates would not propagate until pods restart
 	// for unrelated reasons.
 	AnnotationConfigHash = "tunnelport.giantswarm.io/config-hash"
@@ -55,9 +56,9 @@ const (
 	// resourceVersion observed at the most recent reconcile. A rotation
 	// of the Secret bumps resourceVersion, which the reconciler stamps
 	// here, which causes the pod-template-hash to change and the
-	// Deployment to roll via its RollingUpdate strategy. The operator
-	// reads only `metadata.resourceVersion` of the Secret — never
-	// `Secret.Data`.
+	// StatefulSet to roll via its RollingUpdate updateStrategy. The
+	// operator reads only `metadata.resourceVersion` of the Secret —
+	// never `Secret.Data`.
 	AnnotationTokenSecretVersion = "tunnelport.giantswarm.io/token-secret-version"
 )
 
@@ -103,8 +104,8 @@ func setOwnerRef(cr *accessv1alpha1.RemoteApp, obj metav1.Object) error {
 }
 
 // canonicalLabels returns the labels stamped on owned objects and used as
-// the Service selector / Deployment matchLabels. Keep this stable: changing
-// it breaks Service selection on existing Deployments.
+// the Service selector / StatefulSet matchLabels. Keep this stable: changing
+// it breaks Service selection on existing tbot pods.
 func canonicalLabels(cr *accessv1alpha1.RemoteApp) map[string]string {
 	return map[string]string{
 		LabelRole:              LabelRoleValue,
@@ -185,17 +186,40 @@ const (
 	tbotDiagReadyz         = "/readyz"
 )
 
-// renderDeployment returns the Deployment that runs tbot for this RemoteApp.
-// Replicas defaults to 1 when spec.Replicas is nil. The strategy is
-// RollingUpdate with maxSurge=1, maxUnavailable=0 — the new pod must become
-// Ready before the old one is killed, so new connections see no downtime.
+// tbotStorageSize is the requested capacity for each tbot pod's
+// `/var/lib/tbot` PVC. tbot's persisted state (the bound_keypair private
+// key, the renewable client cert, and a few small bookkeeping files) is
+// well under 1 MiB in practice; 1 Gi is the smallest size every common
+// StorageClass will satisfy without rounding surprises, and there's no
+// per-CR knob because the value is uniform across the fleet.
+var tbotStorageSize = resource.MustParse("1Gi")
+
+// renderStatefulSet returns the StatefulSet that runs tbot for this RemoteApp.
+// Replicas defaults to 1 when spec.Replicas is nil. The update strategy is
+// the StatefulSet default RollingUpdate (one pod at a time, ordered) — under
+// `bound_keypair` the persisted keypair survives the restart, so an ordered
+// roll preserves the per-pod identity while still updating the pod template
+// across replicas.
+//
+// `/var/lib/tbot` is backed by a `volumeClaimTemplates` entry (per ADR 0004,
+// superseding ADR 0002): bot tokens are single-use, so the renewable
+// certificate must outlive the pod. The PVC retention policy is
+// `whenDeleted: Delete, whenScaled: Retain`. Without this StatefulSets
+// orphan PVCs by default (k8s.io/api/apps/v1.StatefulSetSpec docs:
+// "PersistentVolumeClaimRetentionPolicy describes the policy used for PVCs
+// created from the StatefulSet VolumeClaimTemplates"). `Delete` on owner
+// removal matches the operator's "the CR owns the rendered objects" model;
+// `Retain` on scale-down keeps the keypair available if a replica is
+// transiently scaled out and back.
 //
 // The pod template mounts:
 //   - the tbot config ConfigMap (read-only, name reference),
 //   - the token Secret (read-only volume; the operator does NOT read its
-//     contents — only references it by name per ADR equivalent),
-//   - an emptyDir for tbot's renewable-cert destination directory (per
-//     ADR 0002 — no PVC, no StatefulSet).
+//     contents — only references it by name; used as the bound_keypair
+//     registration secret on first join),
+//   - the per-replica PVC at `/var/lib/tbot` (template-derived; the API
+//     server materialises one PVC per replica, named
+//     `<volumeName>-<sts>-<ordinal>`).
 //
 // Image and resources come from operator PodDefaults (Helm values via slice 6),
 // not from the CR.
@@ -221,14 +245,12 @@ const (
 // platform teams that need to relax them must fork. Consistent with the
 // project's "no escape hatches yet" stance; revisit when a real use case
 // surfaces.
-func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecretVersion string) *appsv1.Deployment {
+func renderStatefulSet(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecretVersion string) *appsv1.StatefulSet {
 	labels := canonicalLabels(cr)
 	replicas := int32(1)
 	if cr.Spec.Replicas != nil {
 		replicas = *cr.Spec.Replicas
 	}
-	maxSurge := intstr.FromInt(1)
-	maxUnavailable := intstr.FromInt(0)
 
 	// Pod-level securityContext: distroless nonroot UID + RuntimeDefault
 	// seccomp. runAsUser pinned here (not just runAsNonRoot) so the pod
@@ -250,24 +272,58 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 	// pod compromise to the Teleport credentials it already needs.
 	automountServiceAccountToken := false
 
-	return &appsv1.Deployment{
+	pvcDelete := appsv1.DeletePersistentVolumeClaimRetentionPolicyType
+	pvcRetain := appsv1.RetainPersistentVolumeClaimRetentionPolicyType
+
+	return &appsv1.StatefulSet{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
-			Kind:       "Deployment",
+			Kind:       "StatefulSet",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
 			Namespace: cr.Namespace,
 			Labels:    labels,
 		},
-		Spec: appsv1.DeploymentSpec{
+		Spec: appsv1.StatefulSetSpec{
 			Replicas: &replicas,
 			Selector: &metav1.LabelSelector{MatchLabels: labels},
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-				RollingUpdate: &appsv1.RollingUpdateDeployment{
-					MaxSurge:       &maxSurge,
-					MaxUnavailable: &maxUnavailable,
+			// ServiceName is required by the StatefulSet spec; it points at
+			// the Service the operator also renders for this RemoteApp.
+			// Per-pod DNS (`<sts>-<ordinal>.<svc>.<ns>.svc`) only resolves
+			// for headless Services, but no caller needs it here — caller
+			// traffic targets the ClusterIP Service directly. The field is
+			// non-empty to satisfy validation only.
+			ServiceName: cr.Name,
+			// PVCs are created from VolumeClaimTemplates below. Without an
+			// explicit retention policy, k8s defaults to Retain on owner
+			// delete, which would orphan our PVCs when the RemoteApp CR
+			// is deleted (the StatefulSet's OwnerRef would be GC'd, but
+			// PVCs created from templates are owned by the StatefulSet,
+			// not the RemoteApp). `whenDeleted: Delete` makes the cascade
+			// remove the PVCs along with the StatefulSet; `whenScaled:
+			// Retain` preserves the keypair across transient scale events.
+			PersistentVolumeClaimRetentionPolicy: &appsv1.StatefulSetPersistentVolumeClaimRetentionPolicy{
+				WhenDeleted: pvcDelete,
+				WhenScaled:  pvcRetain,
+			},
+			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:   volumeNameTbotStorage,
+						Labels: labels,
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: tbotStorageSize,
+							},
+						},
+						// StorageClassName left unset on purpose: rely on
+						// the consumer MC's default StorageClass. ADR 0004
+						// names this as a consumer-MC requirement.
+					},
 				},
 			},
 			Template: corev1.PodTemplateSpec{
@@ -277,12 +333,12 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 						// Hash of the rendered tbot config so a spec.appName
 						// or spec.proxyAddr change — which only updates the
 						// ConfigMap data, not the pod template directly —
-						// still rolls the Deployment via pod-template-hash.
+						// still rolls the StatefulSet via pod-template-hash.
 						AnnotationConfigHash: configHash(cr, cfg),
 						// resourceVersion of the tokenRef Secret. Stamped
 						// every reconcile; a rotation flips the value, the
-						// pod-template-hash changes, and the Deployment
-						// rolls via its existing RollingUpdate strategy.
+						// pod-template-hash changes, and the StatefulSet
+						// rolls via its RollingUpdate update strategy.
 						// Empty when the Secret hasn't been observed yet
 						// — keeps the key present so the diff is unambiguous.
 						AnnotationTokenSecretVersion: tokenSecretVersion,
@@ -319,12 +375,6 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 							},
 						},
 						{
-							Name: volumeNameTbotStorage,
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
-						{
 							// /tmp scratch space; required because
 							// readOnlyRootFilesystem: true makes the rest
 							// of the rootfs immutable.
@@ -333,6 +383,11 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
+						// volumeNameTbotStorage is materialised per-replica
+						// from VolumeClaimTemplates (above); no entry in
+						// the pod's Volumes list — the StatefulSet
+						// controller injects the right PVC reference at
+						// pod-creation time.
 					},
 					Containers: []corev1.Container{
 						{

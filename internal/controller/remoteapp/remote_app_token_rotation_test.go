@@ -30,7 +30,7 @@ import (
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
 
-// TestReconciler_TokenRefNameMutationRetargetsDeploymentVolumeAndAnnotation
+// TestReconciler_TokenRefNameMutationRetargetsStatefulSetVolumeAndAnnotation
 // is the envtest companion to the value-rotation test in
 // secret_watch_test.go. It exercises the orthogonal axis: the platform
 // engineer points spec.tokenRef.Name at a different Secret object (e.g.
@@ -40,12 +40,12 @@ import (
 // Sequence:
 //
 //  1. Create token Secret tok-a, then a RemoteApp referencing it.
-//  2. Wait for the Deployment volume to reference tok-a and the annotation
+//  2. Wait for the StatefulSet volume to reference tok-a and the annotation
 //     to track tok-a's resourceVersion.
 //  3. Create Secret tok-b with the same key.
 //  4. Update cr.spec.tokenRef.Name to tok-b. Re-reconcile happens
 //     automatically via the CR watch.
-//  5. Assert: the Deployment's tbot-token volume secretName is now tok-b
+//  5. Assert: the StatefulSet's tbot-token volume secretName is now tok-b
 //     and the token-version annotation matches tok-b's resourceVersion.
 //
 // Step 6 (separate, in-process check): re-running the field-indexer on a
@@ -53,7 +53,7 @@ import (
 // must NOT fan out to that CR. That's the watch-scoping invariant the
 // indexer guarantees, asserted here against a fake client wired up with
 // the same indexer the production reconciler registers.
-func TestReconciler_TokenRefNameMutationRetargetsDeploymentVolumeAndAnnotation(t *testing.T) {
+func TestReconciler_TokenRefNameMutationRetargetsStatefulSetVolumeAndAnnotation(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -70,22 +70,22 @@ func TestReconciler_TokenRefNameMutationRetargetsDeploymentVolumeAndAnnotation(t
 		withTokenRefName(tokA.Name),
 	)
 
-	// (2) Initial Deployment must reference tok-a in the tbot-token
+	// (2) Initial StatefulSet must reference tok-a in the tbot-token
 	// volume, and the token-version annotation must track tok-a's
 	// resourceVersion.
-	dep := &appsv1.Deployment{}
+	sts := &appsv1.StatefulSet{}
 	eventually(t, func() (bool, error) {
-		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), dep); err != nil {
+		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), sts); err != nil {
 			return false, err
 		}
-		vol := findTbotTokenVolume(dep)
+		vol := findTbotTokenVolume(sts)
 		if vol == nil {
-			return false, fmt.Errorf("Deployment missing tbot-token volume")
+			return false, fmt.Errorf("StatefulSet missing tbot-token volume")
 		}
 		if vol.Secret == nil || vol.Secret.SecretName != tokA.Name {
 			return false, fmt.Errorf("tbot-token secretName: want %q, got %+v", tokA.Name, vol.Secret)
 		}
-		if got := dep.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != tokA.ResourceVersion {
+		if got := sts.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != tokA.ResourceVersion {
 			return false, fmt.Errorf("annotation: want %q (tok-a RV), got %q", tokA.ResourceVersion, got)
 		}
 		return true, nil
@@ -112,20 +112,20 @@ func TestReconciler_TokenRefNameMutationRetargetsDeploymentVolumeAndAnnotation(t
 		t.Fatalf("update tokenRef.Name: %v", err)
 	}
 
-	// (5) The Deployment's volume must now reference tok-b and the
+	// (5) The StatefulSet's volume must now reference tok-b and the
 	// annotation must match tok-b's resourceVersion.
 	eventually(t, func() (bool, error) {
-		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), dep); err != nil {
+		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), sts); err != nil {
 			return false, err
 		}
-		vol := findTbotTokenVolume(dep)
+		vol := findTbotTokenVolume(sts)
 		if vol == nil || vol.Secret == nil {
-			return false, fmt.Errorf("Deployment missing tbot-token volume")
+			return false, fmt.Errorf("StatefulSet missing tbot-token volume")
 		}
 		if vol.Secret.SecretName != tokB.Name {
 			return false, fmt.Errorf("tbot-token secretName: want %q (tok-b), got %q", tokB.Name, vol.Secret.SecretName)
 		}
-		if got := dep.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != tokB.ResourceVersion {
+		if got := sts.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != tokB.ResourceVersion {
 			return false, fmt.Errorf("annotation: want %q (tok-b RV), got %q", tokB.ResourceVersion, got)
 		}
 		return true, nil
@@ -154,9 +154,9 @@ func TestReconciler_TokenRefNameMutationRetargetsDeploymentVolumeAndAnnotation(t
 // findTbotTokenVolume returns the named token volume the renderer attaches
 // to the tbot pod, or nil if absent. Volume name is the stable contract
 // pinned by render_test.go's mount/volume assertions.
-func findTbotTokenVolume(dep *appsv1.Deployment) *corev1.Volume {
-	for i := range dep.Spec.Template.Spec.Volumes {
-		v := &dep.Spec.Template.Spec.Volumes[i]
+func findTbotTokenVolume(sts *appsv1.StatefulSet) *corev1.Volume {
+	for i := range sts.Spec.Template.Spec.Volumes {
+		v := &sts.Spec.Template.Spec.Volumes[i]
 		if v.Name == "tbot-token" {
 			return v
 		}

@@ -69,11 +69,14 @@ rules:
 # Owned objects rendered in the CR's namespace. The operator reconciles
 # RemoteApps cluster-wide, so these have to be cluster-scoped via the
 # ClusterRole — but the operator only ever writes them in the namespace
-# of the CR being reconciled.
+# of the CR being reconciled. PVCs created from the StatefulSet's
+# volumeClaimTemplates are owned and cleaned up by the StatefulSet
+# controller (with retention policy `whenDeleted: Delete`), so the
+# operator does not need a PVC RBAC verb itself.
 - apiGroups:
   - apps
   resources:
-  - deployments
+  - statefulsets
   verbs:
   - create
   - delete

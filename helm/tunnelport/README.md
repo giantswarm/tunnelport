@@ -5,7 +5,10 @@ operator on a **consumer management cluster** (the MC that wants to
 reach Teleport-exposed apps as local Services).
 
 The operator watches `RemoteApp` CRs cluster-wide and renders a tbot
-`Deployment` + `Service` + `ConfigMap` per CR, in the CR's namespace.
+`StatefulSet` + `Service` + `ConfigMap` per CR, in the CR's namespace.
+The `StatefulSet`'s `volumeClaimTemplates` provisions a per-replica PVC
+at `/var/lib/tbot` so the bound_keypair private key survives pod
+restarts (per ADR 0004).
 See [`CONTEXT.md`](https://github.com/giantswarm/tunnelport/blob/main/CONTEXT.md)
 for the design rationale.
 
@@ -36,12 +39,12 @@ documented below. The full grant table is under
 | Resource | Verbs | Why cluster-scoped |
 |---|---|---|
 | `secrets` | `get;list;watch` | The operator must watch the user-named `tokenRef` Secret in **whatever namespace** the platform team places the `RemoteApp` CR. Per-namespace `RoleBinding`s would force chart consumers to re-grant on every new `RemoteApp` namespace. |
-| `pods` | `get;list;watch` | Status synthesis reads pod-level state (readiness, last termination, restart count) of the rendered tbot Deployments to populate `RemoteApp.status.lastError` and the `Ready` condition — also in the CR's namespace, which can be anywhere in the cluster. |
+| `pods` | `get;list;watch` | Status synthesis reads pod-level state (readiness, last termination, restart count) of the rendered tbot StatefulSets to populate `RemoteApp.status.lastError` and the `Ready` condition — also in the CR's namespace, which can be anywhere in the cluster. |
 | `access.giantswarm.io/remoteapps` | `get;list;watch` | The CR is cluster-scoped-watched by design (one operator, many consumer namespaces). |
 
 The operator **never** writes to `secrets` (no `create`/`update`/
 `patch`/`delete`), and **never** reads `pods/log` (ADR 0003). Owned-
-object writes (`deployments`, `services`, `configmaps`) are the only
+object writes (`statefulsets`, `services`, `configmaps`) are the only
 mutations it performs, all scoped to the CR's own namespace.
 
 ### The operator never reads `Secret.Data`
@@ -101,7 +104,7 @@ Operational consequences for the platform team's GitOps pipeline:
   keypair on Central (which forces the next join to re-bind) and
   re-deliver a fresh registration secret value via the same pipeline.
 * When the `tokenRef` Secret content changes, the operator auto-rolls
-  the tbot Deployment by stamping the Secret's `resourceVersion` onto
+  the tbot StatefulSet by stamping the Secret's `resourceVersion` onto
   the pod-template annotation — but it cannot help you if the new
   value is invalid. tbot pods will `CrashLoopBackOff` and
   `status.lastError` will surface the kubelet-visible failure; a human
@@ -126,7 +129,7 @@ that fixes that — it is the layer that magnifies the consequence.
 | `image.registry` / `image.name` / `image.tag` | `gsoci.azurecr.io/giantswarm/tunnelport`, tag falls back to `.Chart.AppVersion` | Operator container image. |
 | `imagePullSecret` | `gsoci-pull-secret` | The cluster-managed pull-secret for `gsoci.azurecr.io`. The chart **references** it by name; the Secret itself must be provisioned out-of-band. |
 | `resources` | 50m/64Mi → 200m/256Mi | Operator container requests/limits. |
-| `tbot.image` | `public.ecr.aws/gravitational/teleport-distroless:16@sha256:...` | Single global tbot image for **every** rendered `RemoteApp` Deployment. **Pinned by digest** so a re-push behind the floating `:16` tag can't silently change tbot's config schema underneath the operator. RemoteApp.spec deliberately has no per-CR override. |
+| `tbot.image` | `public.ecr.aws/gravitational/teleport-distroless:16@sha256:...` | Single global tbot image for **every** rendered `RemoteApp` StatefulSet. **Pinned by digest** so a re-push behind the floating `:16` tag can't silently change tbot's config schema underneath the operator. RemoteApp.spec deliberately has no per-CR override. |
 | `tbot.resources.requests` / `tbot.resources.limits` | 50m/64Mi → 200m/256Mi | Cluster-wide defaults for every rendered tbot pod. Same no-per-CR-override rule. |
 | `crds.install` | `true` | Set to `false` if the CRD is delivered by a separate bootstrap chart. The chart's CRD bundle carries `helm.sh/resource-policy: keep`, so live `RemoteApp`s survive `helm uninstall`. |
 | `networkPolicy.enabled` | `true` | The operator-pod NetworkPolicy. See "NetworkPolicy responsibilities" below for the **rendered tbot pod** policy story (different concern). |
@@ -134,7 +137,7 @@ that fixes that — it is the layer that magnifies the consequence.
 `tbot.image` and `tbot.resources` flow into the operator manager's CLI
 flags (`--tbot-image`, `--tbot-cpu-request`, `--tbot-memory-request`,
 `--tbot-cpu-limit`, `--tbot-memory-limit`) at start-up. The reconciler
-reads them once and stamps them onto every tbot Deployment it renders.
+reads them once and stamps them onto every tbot StatefulSet it renders.
 
 ---
 
@@ -158,7 +161,7 @@ creates them.
 
 ### 2. NetworkPolicy for the rendered tbot pods
 
-The operator renders a tbot `Deployment` + `Service` per `RemoteApp` in
+The operator renders a tbot `StatefulSet` + `Service` per `RemoteApp` in
 the CR's namespace. The chart **does not** render a `NetworkPolicy`
 covering those tbot pods — enforcement varies by CNI, baseline policies
 vary by org, and a chart-generated policy would interact awkwardly with
@@ -225,6 +228,14 @@ pod stays `Pending` (volume mount fails) and
 `status.TokenSecretBound = false` — handling the GitOps-race case
 where the CR arrives before the Secret.
 
+> **Default StorageClass required.** The rendered StatefulSet's
+> `volumeClaimTemplates` does not pin a `storageClassName` — every
+> consumer MC must therefore have a default `StorageClass`. This is
+> the GS norm; if your MC does not, set one (`kubectl annotate sc
+> <name> storageclass.kubernetes.io/is-default-class=true`) before
+> creating any `RemoteApp`s, or tbot pods will sit `Pending` on PVC
+> binding. ADR 0004 commits to this requirement.
+
 ### 4. Central-side preconditions per `RemoteApp`
 
 For each `RemoteApp` you deploy on the consumer MC, the platform team
@@ -261,7 +272,7 @@ Two distinct policy domains:
 | Concern | Owner | Where |
 |---|---|---|
 | The **operator's own manager pod** | This chart | `templates/networkpolicy.yaml`, gated on `networkPolicy.enabled` (default `true`). Default-deny with explicit allow rules for kube-apiserver egress, DNS egress, and metrics ingress. Operator hygiene per GS convention. |
-| The **rendered tbot pods** (one Deployment per `RemoteApp`) | Platform team, hand-written | Selector targets the stable labels listed in §2 above. Egress to `proxyAddr:443`, ingress from approved caller pods. |
+| The **rendered tbot pods** (one StatefulSet per `RemoteApp`) | Platform team, hand-written | Selector targets the stable labels listed in §2 above. Egress to `proxyAddr:443`, ingress from approved caller pods. |
 
 The chart's NetworkPolicy is *operator hygiene*, not tenant policy.
 
@@ -269,27 +280,34 @@ The chart's NetworkPolicy is *operator hygiene*, not tenant policy.
 
 ## Pod-churn caveat (per ADR 0004 + 0005)
 
-tbot's destination directory is an `emptyDir`, not a PVC. Per ADR 0005
-the operator joins via `bound_keypair` with `recovery.mode: relaxed`,
-so every tbot pod restart triggers a fresh **re-registration** against
-the registration secret — tbot generates a new keypair, binds it to
-the bot on Central, and resumes the tunnel. No SRE intervention is
-required (this was the entire point of ADR 0005, replacing the
-single-use bot-token model documented in ADR 0004).
+tbot's destination directory `/var/lib/tbot` is a per-replica PVC
+provisioned via the StatefulSet's `volumeClaimTemplates` (1 Gi RWO,
+default StorageClass). Per ADR 0005 the operator joins via
+`bound_keypair` with `recovery.mode: relaxed`. The combination means:
 
-The cost is paid against Central, not the consumer MC: **rolling many
-`RemoteApp` Deployments simultaneously** — chart upgrades that bump
-`tbot.image`, MC-wide node rolls, large-fleet redeploys — **drives
-re-registration churn** through the Teleport auth pod. tbot retries
-join with backoff and the disturbance is bounded, but at fleet scale
-this becomes the dominant join-rate term.
+* **First start (or first start after PVC loss)**: tbot reads the
+  one-time registration secret from the mounted `tokenRef` Secret,
+  generates a keypair, binds it to the bot on Central, and persists
+  the private key on the PVC.
+* **Subsequent restarts (rolls, evictions, image bumps,
+  token-Secret rotations)**: tbot reads the persisted keypair from
+  the PVC and resumes the tunnel without touching Central's join
+  path. No new bot instance is created.
+* **PVC destroyed (DR restore, accidental
+  `kubectl delete pvc`, StorageClass migration)**: tbot finds an
+  empty `/var/lib/tbot`, falls back to the registration secret, and
+  re-registers automatically. `relaxed` recovery mode permits this
+  without per-bot SRE intervention.
 
-If re-registration churn becomes a recurring problem, the operator
-can switch to `StatefulSet` + `volumeClaimTemplates` to persist the
-keypair across restarts (ADR 0004 names this as the rendered-object
-shape; tracked separately as the perf follow-up). `RemoteApp.spec`
-exposes none of this, so the migration is an internal operator
-change.
+What this rules out: the per-restart SRE token-rotation toil
+documented in (now-superseded) ADR 0002 — bot tokens are single-use,
+emptyDir would lock the bot out on every restart, ADR 0004 fixed
+that by persisting the data dir.
+
+PVC retention policy on the StatefulSet is `whenDeleted: Delete`,
+`whenScaled: Retain`. Deleting the `RemoteApp` CR cascades through
+StatefulSet → PVC. Scaling down `spec.replicas` keeps the
+keypair available if you scale back up.
 
 ---
 
@@ -302,7 +320,7 @@ Generated from `templates/rbac.yaml`:
 | `access.giantswarm.io/remoteapps` | `get;list;watch` | Spec is read-only. |
 | `access.giantswarm.io/remoteapps/status` | `get;update;patch` | Slice 4 populates this. |
 | `secrets` | `get;list;watch` | **Metadata-only by code** — see "Token Secret delivery". No `create`/`update`/`patch`/`delete`. |
-| `apps/deployments` | `get;list;watch;create;update;patch;delete` | Owned objects. |
+| `apps/statefulsets` | `get;list;watch;create;update;patch;delete` | Owned objects. PVCs created from `volumeClaimTemplates` are managed by the in-cluster StatefulSet controller, so no PVC RBAC verb is needed here. |
 | `services`, `configmaps` | `get;list;watch;create;update;patch;delete` | Owned objects. |
 | `coordination.k8s.io/leases` | full | Leader election. |
 | `events` | `create;patch` | Status companion. |

@@ -62,14 +62,14 @@ func secretMeta(namespace, name string) *corev1.Secret {
 	}
 }
 
-func TestRenderDeployment_StampsTokenSecretVersionAnnotation(t *testing.T) {
+func TestRenderStatefulSet_StampsTokenSecretVersionAnnotation(t *testing.T) {
 	cr := fixtureRemoteApp()
 
 	// Empty version means "Secret not yet observed" — annotation must
 	// still be present so absence vs. value-change is unambiguous in
 	// the pod-template diff.
-	depEmpty := renderDeployment(cr, fixtureConfig(), "")
-	gotEmpty, ok := depEmpty.Spec.Template.Annotations[AnnotationTokenSecretVersion]
+	stsEmpty := renderStatefulSet(cr, fixtureConfig(), "")
+	gotEmpty, ok := stsEmpty.Spec.Template.Annotations[AnnotationTokenSecretVersion]
 	if !ok {
 		t.Fatalf("pod template missing %s annotation when version is empty", AnnotationTokenSecretVersion)
 	}
@@ -79,21 +79,21 @@ func TestRenderDeployment_StampsTokenSecretVersionAnnotation(t *testing.T) {
 
 	// Non-empty version is stamped verbatim — the reconciler reads
 	// `secret.ObjectMeta.ResourceVersion` and threads it through.
-	depV1 := renderDeployment(cr, fixtureConfig(), "12345")
-	if got := depV1.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != "12345" {
+	stsV1 := renderStatefulSet(cr, fixtureConfig(), "12345")
+	if got := stsV1.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != "12345" {
 		t.Errorf("annotation value: want %q, got %q", "12345", got)
 	}
 
 	// A different version produces a different pod-template annotation
-	// — the Deployment controller treats this as a template change and
+	// — the StatefulSet controller treats this as a template change and
 	// rolls. The existing config-hash must be stable across calls so a
 	// pure token-version change rolls only on the version annotation.
-	depV2 := renderDeployment(cr, fixtureConfig(), "67890")
-	if got := depV2.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != "67890" {
+	stsV2 := renderStatefulSet(cr, fixtureConfig(), "67890")
+	if got := stsV2.Spec.Template.Annotations[AnnotationTokenSecretVersion]; got != "67890" {
 		t.Errorf("annotation value after rotation: want %q, got %q", "67890", got)
 	}
-	if depV1.Spec.Template.Annotations[AnnotationConfigHash] !=
-		depV2.Spec.Template.Annotations[AnnotationConfigHash] {
+	if stsV1.Spec.Template.Annotations[AnnotationConfigHash] !=
+		stsV2.Spec.Template.Annotations[AnnotationConfigHash] {
 		t.Errorf("config-hash should be independent of token-secret-version")
 	}
 }
@@ -294,21 +294,21 @@ func equalSorted(a, b []string) bool {
 	return true
 }
 
-// TestReconciler_TokenSecretRotationStampsAnnotationAndRollsDeployment is the
-// end-to-end happy-path integration test for slice 5. It drives the live
+// TestReconciler_TokenSecretRotationStampsAnnotationAndRollsStatefulSet is
+// the end-to-end happy-path integration test for slice 5. It drives the live
 // envtest API server and the controller-runtime manager wired up in
 // suite_test.go. The sequence:
 //
 //  1. Create a Secret with the join token, then a RemoteApp pointing at it.
-//  2. Wait for the Deployment to render and read the initial annotation
+//  2. Wait for the StatefulSet to render and read the initial annotation
 //     value — must equal the Secret's resourceVersion.
 //  3. Update the Secret's `Data` (only the user is allowed to read/write
 //     `.Data`, not the operator). The Secret's resourceVersion bumps.
-//  4. Wait for the Deployment annotation to track the new resourceVersion.
+//  4. Wait for the StatefulSet annotation to track the new resourceVersion.
 //     A different annotation value means the pod template differs from
-//     the previous template — the Deployment controller computes a new
+//     the previous template — the StatefulSet controller computes a new
 //     pod-template-hash and a rolling update is triggered.
-func TestReconciler_TokenSecretRotationStampsAnnotationAndRollsDeployment(t *testing.T) {
+func TestReconciler_TokenSecretRotationStampsAnnotationAndRollsStatefulSet(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -328,24 +328,24 @@ func TestReconciler_TokenSecretRotationStampsAnnotationAndRollsDeployment(t *tes
 		withTokenRefName(tokenSecret.Name),
 	)
 
-	// Initial Deployment annotation must equal the Secret's
+	// Initial StatefulSet annotation must equal the Secret's
 	// resourceVersion at create time.
 	initialRV := tokenSecret.ResourceVersion
 	if initialRV == "" {
 		t.Fatalf("token Secret has empty resourceVersion after create")
 	}
-	dep := &appsv1.Deployment{}
+	sts := &appsv1.StatefulSet{}
 	eventually(t, func() (bool, error) {
-		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts); err != nil {
 			return false, err
 		}
-		got := dep.Spec.Template.Annotations[AnnotationTokenSecretVersion]
+		got := sts.Spec.Template.Annotations[AnnotationTokenSecretVersion]
 		if got != initialRV {
 			return false, fmt.Errorf("annotation %s: want %q, got %q", AnnotationTokenSecretVersion, initialRV, got)
 		}
 		return true, nil
 	})
-	templateBefore := dep.Spec.Template.DeepCopy()
+	templateBefore := sts.Spec.Template.DeepCopy()
 
 	// Rotate the Secret's content. resourceVersion bumps on Update.
 	if err := testClient.Get(ctx, client.ObjectKeyFromObject(tokenSecret), tokenSecret); err != nil {
@@ -362,27 +362,27 @@ func TestReconciler_TokenSecretRotationStampsAnnotationAndRollsDeployment(t *tes
 
 	// Annotation must track the rotated resourceVersion. Pod template
 	// must differ from the pre-rotation template — that's the signal the
-	// Deployment controller uses to compute a new pod-template-hash and
+	// StatefulSet controller uses to compute a new pod-template-hash and
 	// trigger a rolling restart.
 	eventually(t, func() (bool, error) {
-		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts); err != nil {
 			return false, err
 		}
-		got := dep.Spec.Template.Annotations[AnnotationTokenSecretVersion]
+		got := sts.Spec.Template.Annotations[AnnotationTokenSecretVersion]
 		if got != rotatedRV {
 			return false, fmt.Errorf("annotation %s after rotation: want %q, got %q", AnnotationTokenSecretVersion, rotatedRV, got)
 		}
-		if equalPodTemplate(*templateBefore, dep.Spec.Template) {
-			return false, fmt.Errorf("pod template unchanged after Secret rotation — Deployment would not roll")
+		if equalPodTemplate(*templateBefore, sts.Spec.Template) {
+			return false, fmt.Errorf("pod template unchanged after Secret rotation — StatefulSet would not roll")
 		}
 		return true, nil
 	})
 }
 
-// TestReconciler_UnrelatedSecretEditDoesNotAffectDeployment exercises the
+// TestReconciler_UnrelatedSecretEditDoesNotAffectStatefulSet exercises the
 // watch-scoping invariant: only Secrets actually referenced by some
 // RemoteApp.spec.tokenRef trigger reconciles. We assert the negative by
-// recording the Deployment's pod template before and after editing an
+// recording the StatefulSet's pod template before and after editing an
 // unrelated Secret in the same namespace and showing the template — and
 // crucially the token-version annotation — is unchanged.
 //
@@ -390,7 +390,7 @@ func TestReconciler_TokenSecretRotationStampsAnnotationAndRollsDeployment(t *tes
 // requests for unreferenced Secrets; this test is the integration-level
 // belt-and-braces check that the wiring in SetupWithManager hooks the
 // mapper into the workqueue correctly.
-func TestReconciler_UnrelatedSecretEditDoesNotAffectDeployment(t *testing.T) {
+func TestReconciler_UnrelatedSecretEditDoesNotAffectStatefulSet(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -408,22 +408,22 @@ func TestReconciler_UnrelatedSecretEditDoesNotAffectDeployment(t *testing.T) {
 		withTokenRefName(tokenSecret.Name),
 	)
 
-	dep := &appsv1.Deployment{}
+	sts := &appsv1.StatefulSet{}
 	eventually(t, func() (bool, error) {
-		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sts); err != nil {
 			return false, err
 		}
-		if dep.Spec.Template.Annotations[AnnotationTokenSecretVersion] != tokenSecret.ResourceVersion {
+		if sts.Spec.Template.Annotations[AnnotationTokenSecretVersion] != tokenSecret.ResourceVersion {
 			return false, fmt.Errorf("annotation not yet stamped")
 		}
 		return true, nil
 	})
-	rvBefore := dep.ResourceVersion
-	annotationBefore := dep.Spec.Template.Annotations[AnnotationTokenSecretVersion]
+	rvBefore := sts.ResourceVersion
+	annotationBefore := sts.Spec.Template.Annotations[AnnotationTokenSecretVersion]
 
 	// Edit an unrelated Secret in the same namespace. No RemoteApp's
 	// tokenRef points at it, so the mapper must return no requests and
-	// the Deployment must not change.
+	// the StatefulSet must not change.
 	noisy := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "noisy-unrelated", Namespace: ns},
 		Type:       corev1.SecretTypeOpaque,
@@ -442,15 +442,15 @@ func TestReconciler_UnrelatedSecretEditDoesNotAffectDeployment(t *testing.T) {
 
 	// Give the manager a chance to do something wrong. We don't have a
 	// strict signal "no reconcile happened", so we instead assert the
-	// observable consequences are absent: the Deployment's
+	// observable consequences are absent: the StatefulSet's
 	// resourceVersion and token-version annotation are unchanged.
 	consistentlyFor(t, pollTimeout/2, func() error {
-		got := &appsv1.Deployment{}
+		got := &appsv1.StatefulSet{}
 		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, got); err != nil {
-			return fmt.Errorf("get Deployment: %w", err)
+			return fmt.Errorf("get StatefulSet: %w", err)
 		}
 		if got.ResourceVersion != rvBefore {
-			return fmt.Errorf("Deployment resourceVersion changed (%q -> %q) after unrelated Secret edit",
+			return fmt.Errorf("StatefulSet resourceVersion changed (%q -> %q) after unrelated Secret edit",
 				rvBefore, got.ResourceVersion)
 		}
 		if a := got.Spec.Template.Annotations[AnnotationTokenSecretVersion]; a != annotationBefore {
