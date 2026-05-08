@@ -1,8 +1,19 @@
 # `kubernetes.type: static_jwks` for tunnelport's join trust
 
-ADR 0007 adopted `kubernetes` join. This ADR commits to the trust mode:
-the `TeleportProvisionToken` resources tunnelport relies on use
-`kubernetes.type: static_jwks` (not `oidc`, not `in_cluster`).
+Supersedes: ADR 0001 (static-token join per `RemoteApp`), ADR 0004 (persist
+tbot data dir), ADR 0005 (bound_keypair join with relaxed recovery).
+
+This ADR commits to two coupled decisions for tunnelport's join:
+
+1. **Join method.** tbot joins Central via the `kubernetes` join method —
+   each tbot pod presents its mounted `ServiceAccount` token, and Central
+   verifies it. This replaces the `bound_keypair` join adopted in ADR 0005
+   and the `tokenRef` Secret delivery model from ADR 0001. The operator
+   renders a per-`RemoteApp` `ServiceAccount` on the consumer MC; tbot
+   joins as that SA's identity, removing the need to persist registration
+   state across restarts (ADR 0004).
+2. **Trust mode.** The `TeleportProvisionToken` resources tunnelport relies
+   on use `kubernetes.type: static_jwks` (not `oidc`, not `in_cluster`).
 
 ## Why static_jwks, not oidc
 
