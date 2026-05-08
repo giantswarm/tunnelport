@@ -226,13 +226,15 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set image.tag=smoke \
   --set image.pullPolicy=IfNotPresent \
   --set imagePullSecret="" \
-  --set tbot.image=public.ecr.aws/gravitational/tbot-distroless:18.4.0 \
   --set tbot.insecure=true \
   --wait --timeout 2m
 ```
 
-The `tbot.image` value flows through to the rendered tbot Deployment
-in step 6d.
+`tbot.image` is intentionally not overridden — the smoke uses the
+chart's default so a default-shaped install is exercised end-to-end.
+This is what catches major-version skew between the chart-default
+tbot and the Teleport server tested above. The default flows through
+to the rendered tbot Deployment in step 6d.
 
 ### 6c. Deliver the bot token Secret
 

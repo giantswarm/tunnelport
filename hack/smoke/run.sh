@@ -29,7 +29,12 @@ cd "${REPO_ROOT}"
 # ---------------------------------------------------------------------
 
 TELEPORT_CHART_VERSION="${TELEPORT_CHART_VERSION:-18.4.0}"
-TBOT_IMAGE="${TBOT_IMAGE:-public.ecr.aws/gravitational/tbot-distroless:18.4.0}"
+# tbot.image is intentionally NOT overridden here — the smoke install
+# uses the chart's default `tbot.image` so a default-shaped consumer
+# install is exercised end-to-end. This is what catches major-version
+# skew between the chart-default tbot and the Teleport server tested
+# above (TELEPORT_CHART_VERSION). Override with `--set tbot.image=...`
+# manually if you need to test a non-default image locally.
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-tunnelport:smoke}"
 EXPECTED_BODY="${EXPECTED_BODY:-hello-from-producer}"
 
@@ -194,7 +199,6 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set image.tag="${OPERATOR_IMAGE##*:}" \
   --set image.pullPolicy=IfNotPresent \
   --set imagePullSecret="" \
-  --set tbot.image="${TBOT_IMAGE}" \
   --set tbot.insecure=true \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
