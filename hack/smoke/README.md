@@ -151,29 +151,60 @@ declarative path, replace `REPLACE_WITH_PRODUCER_AGENT_TOKEN` in
 `tokens.yaml` with a value of your own and `tctl create -f` it
 instead.
 
-## 4. Provision the role, bot, and bot token
+## 4. Provision the role, bot, and bot token (bound_keypair)
+
+Per ADR 0005 the operator joins via `bound_keypair` with
+`recovery.mode: relaxed`. The Central-side flow is fully declarative:
+apply the role, the bot, and the token resource, then retrieve the
+auto-generated registration secret from the token's `.status` for
+delivery to the consumer cluster.
 
 ```bash
 # 4a. Role (allows the bot to tunnel to apps labelled app-name=smoke-app):
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/role.yaml
 
-# 4b. Bot identity AND its static join token in a single call.
-#     `tctl bots add` returns the token in the JSON output as `token_id`.
-#     This is the v18 idiom — there is no `tctl bots tokens add`
-#     subcommand, and `tctl tokens add --type=bot` does not accept a
-#     `--bot-name` flag.
-kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-  tctl bots add smoke-bot --roles=smoke-app-tunnel --format=json \
-  > /tmp/smoke-bot-token.json
-jq -r .token_id /tmp/smoke-bot-token.json > /tmp/smoke-bot-token
+# 4b. Bot resource — names the identity, binds it to the role.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/bot.yaml
 
-cat /tmp/smoke-bot-token   # sanity: a hex string
+# 4c. Token resource — declares join_method: bound_keypair and
+#     recovery.mode: relaxed (see hack/smoke/teleport/tokens.yaml).
+#     The producer-agent-token entry in the same file is a placeholder
+#     for step 3; only the smoke-bot-token entry is needed here. The
+#     simplest path is to apply the file as-is and ignore the producer
+#     entry — `tctl create -f` is idempotent on identical specs.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/tokens.yaml || true
+# (The `|| true` swallows the producer-agent-token's "literal token
+# missing" error if you haven't materialised it yet — that token is
+# step 3's responsibility, not step 4's.)
+
+# 4d. Read out the registration secret Teleport generated for the
+#     bound_keypair token. This value is what tbot presents on first
+#     join; the operator delivers it to the consumer cluster as a
+#     plain Secret in step 6c.
+kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+  tctl get token/smoke-bot-token --format=json \
+  | jq -r '.[0].status.bound_keypair.registration_secret' \
+  > /tmp/smoke-bot-registration-secret
+
+cat /tmp/smoke-bot-registration-secret   # sanity: a base64-ish string
 ```
 
-`tctl bots add` produces a token whose `roles: [Bot]` and
-`bot_name: smoke-bot` are wired correctly without you authoring the
-YAML.
+Why declarative end-to-end: bound_keypair tokens carry policy
+(`recovery.mode`, optional `recovery.limit`, `bot_name`, `roles`) that
+`tctl bots add` cannot express via flags. `tctl create -f` against the
+checked-in YAML is the only path that captures the policy in source
+control alongside the rest of the smoke harness.
+
+**Naming convention** (load-bearing): the operator renders
+`onboarding.token: <name>` in tbot.yaml using the consumer-side Secret
+name (`RemoteApp.spec.tokenRef.name`). That string MUST match the
+Central-side token resource's `metadata.name`. In the smoke harness
+both are `smoke-bot-token`; in production, the platform team is
+responsible for keeping the names in lockstep when provisioning a new
+`RemoteApp`.
 
 ## 5. Bring up the producer cluster
 
@@ -251,21 +282,27 @@ This is what catches major-version skew between the chart-default
 tbot and the Teleport server tested above. The default flows through
 to the rendered tbot Deployment in step 6d.
 
-### 6c. Deliver the bot token Secret
+### 6c. Deliver the registration-secret Secret
 
 For the smoke environment we use plain `kubectl create secret`. In
 production this is replaced by sealed-secrets / external-secrets-
 operator / your team's chosen pattern.
 
+The Secret carries the **bound_keypair registration secret** (step
+4d), not a multi-use static token. With `recovery.mode: relaxed`, the
+secret remains usable for re-registration indefinitely — see
+`helm/tunnelport/README.md` "Registration-secret rotation" for the
+production rotation contract.
+
 ```bash
 kubectl --context kind-consumer create namespace smoke || true
 kubectl --context kind-consumer -n smoke create secret generic smoke-bot-token \
-  --from-literal=token=$(cat /tmp/smoke-bot-token)
+  --from-literal=token=$(cat /tmp/smoke-bot-registration-secret)
 ```
 
 Alternative: edit `hack/smoke/consumer/token-secret.yaml.template`,
-replacing `REPLACE_WITH_SMOKE_BOT_TOKEN` with the literal token, and
-`kubectl apply -f` it.
+replacing `REPLACE_WITH_SMOKE_BOT_REGISTRATION_SECRET` with the literal
+value, and `kubectl apply -f` it.
 
 ### 6d. Apply the RemoteApp CR
 
@@ -313,7 +350,8 @@ from the consumer cluster proves the data path works: curl → Service
 kind delete cluster --name consumer
 kind delete cluster --name producer
 kind delete cluster --name teleport
-rm /tmp/producer-agent-token /tmp/smoke-bot-token /tmp/*.json /tmp/producer-kube-agent-values.yaml
+rm /tmp/producer-agent-token /tmp/smoke-bot-registration-secret \
+   /tmp/*.json /tmp/producer-kube-agent-values.yaml
 ```
 
 ## Troubleshooting
@@ -363,10 +401,24 @@ empty, redo step 6c.
 
 **The curl Job fails with `Connection refused`.**
 The tbot pod is up but the tunnel isn't established. The Job's
-`--retry-connrefused` should ride this out; if it doesn't, the bot
-token in the Secret doesn't match the one Teleport issued. The
-`smoke-bot-token` files written in step 4 and the Secret in step 6c
-must be the same string.
+`--retry-connrefused` should ride this out; if it doesn't, the
+registration secret in the Secret doesn't match what Teleport has on
+the token resource. Re-run step 4d to read the current secret out of
+`tctl get token/smoke-bot-token`; the Secret in step 6c must be the
+same value. (If the secret has been consumed and you're not in
+`recovery.mode: relaxed`, the value rotates and you must re-run 4d
++ 6c — but the smoke harness defaults to relaxed for exactly this
+reason.)
+
+**tbot logs `name "smoke-bot-token" not found`.**
+The `onboarding.token` field in the rendered tbot.yaml is the *name
+of the Teleport token resource*, not a literal value. If it doesn't
+match the Central-side resource name from step 4c, tbot can't look up
+the join policy. Double-check that `RemoteApp.spec.tokenRef.name`
+(consumer-side, `hack/smoke/consumer/remoteapp.yaml`) equals the
+`metadata.name` of the smoke-bot-token entry in
+`hack/smoke/teleport/tokens.yaml`. The operator renders the former
+into the latter's slot in tbot.yaml — the two MUST match.
 
 ## Production differences
 
