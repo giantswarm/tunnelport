@@ -1,5 +1,7 @@
 # Static join token per `RemoteApp`; `kubernetes` join method rejected for v1
 
+Superseded by: ADR 0006
+
 Each `RemoteApp` references its own static Teleport join token (delivered as
 a `Secret` via the platform team's existing GitOps + secret-sync pipeline)
 that is bound on Central to a dedicated `TeleportBot` whose role matches

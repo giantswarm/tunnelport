@@ -1,5 +1,7 @@
 # Persist tbot's data directory; bot tokens are single-use (supersedes ADR 0002)
 
+Superseded by: ADR 0006
+
 `RemoteApp` join tokens are created on Central as bot tokens (`tctl bots add`,
 or the upstream Teleport Operator's `TeleportBot` + `TeleportToken` flow,
 producing a `kind: token` resource with `roles: [Bot]` and `bot_name: <name>`).

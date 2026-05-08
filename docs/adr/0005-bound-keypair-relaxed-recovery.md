@@ -1,5 +1,7 @@
 # Use `bound_keypair` join with `recovery.mode: relaxed` for fleet self-healing
 
+Superseded by: ADR 0006
+
 ADR 0004 settled that `/var/lib/tbot` must persist and left the choice between
 (A) PVC + `join_method: token` and (C) PVC + `join_method: bound_keypair` for
 follow-up. We pick C with `recovery.mode: relaxed`.
