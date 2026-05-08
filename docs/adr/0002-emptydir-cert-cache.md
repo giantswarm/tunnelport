@@ -1,5 +1,10 @@
 # `emptyDir` for tbot's destination directory; accept re-join on every pod restart
 
+> **Superseded by ADR 0004.** The premise below — that the static token is
+> "a credential tbot is designed to refetch cheaply" — does not hold for bot
+> tokens (`roles: [Bot]`), which are single-use. See ADR 0004 for the
+> corrected model and the decision to persist `/var/lib/tbot`.
+
 The tbot Deployment mounts an `emptyDir` for the renewable-cert destination
 directory. The cert lives only for the pod's lifetime — every pod restart
 (rolls, evictions, image bumps, token-Secret rotations) triggers a fresh

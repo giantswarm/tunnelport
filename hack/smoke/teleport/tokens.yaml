@@ -1,20 +1,32 @@
-# Two static join tokens for the smoke environment.
+# Two join tokens for the smoke environment.
 #
 #  1) producer-agent-token    — used by the producer cluster's
 #     teleport-kube-agent to register the smoke app with Teleport.
-#     Roles: [Node, App].
+#     Roles: [Node, App]. join_method: token (multi-use static token).
 #
 #  2) smoke-bot-token         — used by the consumer cluster's tbot
 #     (rendered by the operator) to join as the smoke-bot identity.
-#     Role: [Bot]. The `bot_name` field MUST match the bot's metadata
-#     name in bot.yaml.
+#     Role: [Bot]. join_method: bound_keypair with recovery.mode:
+#     relaxed (per ADR 0005). The `bot_name` field MUST match the
+#     bot's metadata name in bot.yaml.
+#
+#     Why bound_keypair: bot tokens (roles: [Bot]) are single-use.
+#     With join_method: token, the bot is locked out the moment its
+#     persisted cert is lost (e.g. emptyDir + pod restart) — see
+#     ADR 0004. bound_keypair lets tbot self-recover by re-registering
+#     a fresh keypair against the registration_secret on every cold
+#     start. `recovery.mode: relaxed` permits unlimited automatic
+#     recoveries while keeping Teleport's join-state verification on.
 #
 # Apply with:
 #   tctl create -f hack/smoke/teleport/tokens.yaml
 #
-# The runbook captures the literal token strings — these YAML values
-# are placeholders. Replace before applying, or generate via
-# `tctl tokens add` and skip this file entirely.
+# The producer-agent-token's literal value is a placeholder you replace
+# before applying. The smoke-bot-token entry is fully declarative —
+# Teleport generates the registration secret on creation; retrieve it
+# via:
+#   tctl get token/smoke-bot-token --format=json |
+#     jq -r '.[0].status.bound_keypair.registration_secret'
 kind: token
 version: v2
 metadata:
@@ -36,7 +48,12 @@ spec:
   roles:
     - Bot
   bot_name: smoke-bot
-  join_method: token
-  # Replace before applying. The same value goes into the consumer
-  # cluster's token Secret (token-secret.yaml.template).
-  token: REPLACE_WITH_SMOKE_BOT_TOKEN
+  join_method: bound_keypair
+  bound_keypair:
+    recovery:
+      # `relaxed`: unlimited automatic recoveries. tbot can re-register
+      # a fresh keypair on every cold start (emptyDir loses the cached
+      # keypair) without operator intervention. Join-state verification
+      # stays on — only `insecure` would disable it, and `insecure` is
+      # explicitly out of scope for the operator (ADR 0005).
+      mode: relaxed
