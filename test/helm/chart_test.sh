@@ -81,7 +81,7 @@ echo "==> tbot value flow assertions"
 
 # 3a. Default tbot.image flows through to a --tbot-image flag on the manager.
 assert "default tbot.image flows to --tbot-image" \
-  "printf '%s' \"\${RENDERED}\" | grep -E -- '--tbot-image=public.ecr.aws/gravitational/teleport-distroless:16'"
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--tbot-image=public.ecr.aws/gravitational/tbot-distroless:18'"
 
 # 3b. tbot.resources.requests.cpu flows.
 assert "tbot.resources.requests.cpu flows to --tbot-cpu-request" \
