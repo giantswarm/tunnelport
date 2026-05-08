@@ -32,6 +32,12 @@ import (
 const (
 	intstrTypeInt    = intstr.Int
 	intstrTypeString = intstr.String
+
+	// kindRemoteApp is the OwnerReference Kind every owned object carries.
+	// Hoisted out of individual test bodies so goconst doesn't trip when
+	// new owner-ref assertions land — the kind itself is a single source
+	// of truth.
+	kindRemoteApp = "RemoteApp"
 )
 
 // renderFixtureOpts is the renderer-test-specific override of
@@ -516,6 +522,147 @@ func mountNames(ms []corev1.VolumeMount) []string {
 	return out
 }
 
+// TestRenderServiceAccount_NamedAfterCRWithCanonicalLabels pins the
+// per-RemoteApp ServiceAccount contract from ADR 0006 slice 1: the SA's
+// name matches the CR's name (the same convention Service / Deployment /
+// ConfigMap already follow), and it carries the canonical role labels so
+// platform teams have a stable selector. The SA exists so a future slice
+// can flip tbot's join_method to `kubernetes`; this slice only renders it.
+func TestRenderServiceAccount_NamedAfterCRWithCanonicalLabels(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	sa := renderServiceAccount(cr, fixtureConfig())
+
+	if sa.Name != cr.Name {
+		t.Errorf("ServiceAccount name: want %q (matches Deployment/Service/ConfigMap convention), got %q", cr.Name, sa.Name)
+	}
+	if sa.Namespace != cr.Namespace {
+		t.Errorf("ServiceAccount namespace: want %q, got %q", cr.Namespace, sa.Namespace)
+	}
+	if got, want := sa.Labels[LabelRole], LabelRoleValue; got != want {
+		t.Errorf("ServiceAccount label[%s]: want %q, got %q", LabelRole, want, got)
+	}
+	if got, want := sa.Labels[LabelRemoteAppInstance], cr.Name; got != want {
+		t.Errorf("ServiceAccount label[%s]: want %q, got %q", LabelRemoteAppInstance, want, got)
+	}
+	// TypeMeta is required for Server-Side Apply through the same code
+	// path that already applies ConfigMap / Deployment / Service.
+	if sa.APIVersion != "v1" || sa.Kind != "ServiceAccount" {
+		t.Errorf("ServiceAccount TypeMeta: want apiVersion=v1 kind=ServiceAccount, got %q/%q", sa.APIVersion, sa.Kind)
+	}
+}
+
+// TestRenderServiceAccount_OwnerRefViaSetOwnerRef confirms the SA can carry
+// a controller OwnerReference back to the RemoteApp via the same helper
+// the other rendered objects use, so Kubernetes garbage collection
+// cascade-deletes the SA when the CR is deleted.
+func TestRenderServiceAccount_OwnerRefViaSetOwnerRef(t *testing.T) {
+	cr := fixtureRemoteApp()
+	sa := renderServiceAccount(cr, fixtureConfig())
+
+	if err := setOwnerRef(cr, sa); err != nil {
+		t.Fatalf("setOwnerRef: %v", err)
+	}
+
+	if len(sa.OwnerReferences) != 1 {
+		t.Fatalf("ownerReferences: want 1, got %d", len(sa.OwnerReferences))
+	}
+	or := sa.OwnerReferences[0]
+	if or.UID != cr.UID {
+		t.Errorf("ownerRef UID: want %q, got %q", cr.UID, or.UID)
+	}
+	if or.Kind != kindRemoteApp {
+		t.Errorf("ownerRef Kind: want %s, got %q", kindRemoteApp, or.Kind)
+	}
+	if or.Controller == nil || !*or.Controller {
+		t.Errorf("ownerRef.Controller: want true, got %v", or.Controller)
+	}
+}
+
+// TestRenderDeployment_PodRunsAsRenderedServiceAccount pins the wiring the
+// pod template needs so that, when slice 02 flips tbot's join method to
+// `kubernetes`, the projected SA token tbot presents is signed for the
+// per-RemoteApp identity Central will be configured to accept. The pod
+// must (a) declare spec.serviceAccountName = the rendered SA's name
+// (= cr.Name) and (b) keep automountServiceAccountToken: false so the
+// default mount doesn't leak the token at /var/run/secrets/... — the
+// token is delivered via an explicit projected volume so its audience can
+// be pinned later.
+func TestRenderDeployment_PodRunsAsRenderedServiceAccount(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig(), "")
+
+	pod := dep.Spec.Template.Spec
+	if pod.ServiceAccountName != cr.Name {
+		t.Errorf("Pod.spec.serviceAccountName: want %q (== rendered SA name), got %q", cr.Name, pod.ServiceAccountName)
+	}
+	// Default-mount stays off — the projected mount below carries the
+	// token at a known path tbot can read explicitly.
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Errorf("Pod.spec.automountServiceAccountToken: want false (token delivered via projected volume), got %v", pod.AutomountServiceAccountToken)
+	}
+}
+
+// TestRenderDeployment_ProjectedSATokenVolumeMounted pins the projected
+// volume strategy: the SA token reaches the tbot container's filesystem
+// via a projected volume with an explicit audience, mounted at a stable
+// path. Slice 02 will read that token from this path. The audience
+// `tunnelport.giantswarm.io` matches the value Central's
+// `TeleportProvisionToken` will require under `kubernetes.type:
+// static_jwks` (ADR 0006).
+func TestRenderDeployment_ProjectedSATokenVolumeMounted(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig(), "")
+	pod := dep.Spec.Template.Spec
+
+	vol := volumeByName(pod.Volumes, volumeNameTbotSAToken)
+	if vol == nil {
+		t.Fatalf("missing %q volume; got: %v", volumeNameTbotSAToken, volumeNames(pod.Volumes))
+	}
+	if vol.Projected == nil {
+		t.Fatalf("%q must be a projected volume; got %+v", volumeNameTbotSAToken, vol)
+	}
+	var saSrc *corev1.ServiceAccountTokenProjection
+	for i := range vol.Projected.Sources {
+		if s := vol.Projected.Sources[i].ServiceAccountToken; s != nil {
+			saSrc = s
+			break
+		}
+	}
+	if saSrc == nil {
+		t.Fatalf("%q has no ServiceAccountToken projection; got %+v", volumeNameTbotSAToken, vol.Projected.Sources)
+	}
+	if saSrc.Audience != saTokenAudience {
+		t.Errorf("ServiceAccountToken audience: want %q, got %q", saTokenAudience, saSrc.Audience)
+	}
+	if saSrc.ExpirationSeconds == nil || *saSrc.ExpirationSeconds < 600 {
+		t.Errorf("ServiceAccountToken expirationSeconds: want >=600, got %v", saSrc.ExpirationSeconds)
+	}
+	if saSrc.Path == "" {
+		t.Errorf("ServiceAccountToken path must be set so the projected file has a deterministic name")
+	}
+
+	c := pod.Containers[0]
+	var saMount *corev1.VolumeMount
+	for i := range c.VolumeMounts {
+		if c.VolumeMounts[i].Name == volumeNameTbotSAToken {
+			saMount = &c.VolumeMounts[i]
+			break
+		}
+	}
+	if saMount == nil {
+		t.Fatalf("container missing %q mount; got: %v", volumeNameTbotSAToken, mountNames(c.VolumeMounts))
+	}
+	if saMount.MountPath != mountPathTbotSAToken {
+		t.Errorf("SA token mountPath: want %q, got %q", mountPathTbotSAToken, saMount.MountPath)
+	}
+	if !saMount.ReadOnly {
+		t.Errorf("SA token mount must be readOnly")
+	}
+}
+
 func TestSetOwnerRef_StampsControllerRefBackToCR(t *testing.T) {
 	cr := fixtureRemoteApp()
 	cm := renderConfigMap(cr, fixtureConfig())
@@ -534,8 +681,8 @@ func TestSetOwnerRef_StampsControllerRefBackToCR(t *testing.T) {
 	if or.Name != cr.Name {
 		t.Errorf("ownerRef Name: want %q, got %q", cr.Name, or.Name)
 	}
-	if or.Kind != "RemoteApp" {
-		t.Errorf("ownerRef Kind: want RemoteApp, got %q", or.Kind)
+	if or.Kind != kindRemoteApp {
+		t.Errorf("ownerRef Kind: want %s, got %q", kindRemoteApp, or.Kind)
 	}
 	if or.Controller == nil || !*or.Controller {
 		t.Errorf("ownerRef.Controller: want true, got %v", or.Controller)

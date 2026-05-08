@@ -363,6 +363,82 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 	})
 }
 
+// TestReconciler_RendersOwnedServiceAccountAndPodUsesIt asserts the
+// per-RemoteApp ServiceAccount lifecycle through the reconciler — the
+// renderer-level test pins the static shape, this one pins that the
+// reconcile loop actually creates the SA, owns it, and wires the
+// Deployment's serviceAccountName at the same time. Reusing-across-
+// reconciles is covered by re-fetching the SA after a benign spec edit
+// and confirming the same UID survives.
+func TestReconciler_RendersOwnedServiceAccountAndPodUsesIt(t *testing.T) {
+	ctx := context.Background()
+	ns := uniqueNS(t, ctx)
+
+	cr := makeRemoteApp(ctx, t, ns, "with-sa")
+
+	sa := &corev1.ServiceAccount{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sa)
+
+	if sa.Name != cr.Name {
+		t.Errorf("ServiceAccount name: want %q (== cr.Name), got %q", cr.Name, sa.Name)
+	}
+	if got, want := sa.Labels[LabelRole], LabelRoleValue; got != want {
+		t.Errorf("ServiceAccount label[%s]: want %q, got %q", LabelRole, want, got)
+	}
+
+	// OwnerReference back to the CR with controller + blockOwnerDeletion,
+	// matching the contract every other rendered object honours.
+	ors := sa.GetOwnerReferences()
+	if len(ors) != 1 {
+		t.Fatalf("ServiceAccount ownerReferences: want 1, got %d", len(ors))
+	}
+	or := ors[0]
+	if or.UID != cr.UID || or.Kind != "RemoteApp" ||
+		or.Controller == nil || !*or.Controller ||
+		or.BlockOwnerDeletion == nil || !*or.BlockOwnerDeletion {
+		t.Errorf("ServiceAccount owner ref invariant violated: %+v", or)
+	}
+
+	// Deployment runs as the SA we just rendered.
+	dep := &appsv1.Deployment{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep)
+	if got := dep.Spec.Template.Spec.ServiceAccountName; got != cr.Name {
+		t.Errorf("Deployment.spec.template.spec.serviceAccountName: want %q (== rendered SA), got %q", cr.Name, got)
+	}
+
+	// Reconcile-stable: bumping spec.replicas re-runs the loop without
+	// re-creating the SA. UID must survive — proves applyOwned reuses
+	// the existing SA rather than racing a delete/create cycle.
+	saUIDBefore := sa.UID
+	got := &accessv1alpha1.RemoteApp{}
+	if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
+		t.Fatalf("get cr: %v", err)
+	}
+	r := int32(2)
+	got.Spec.Replicas = &r
+	if err := testClient.Update(ctx, got); err != nil {
+		t.Fatalf("update replicas: %v", err)
+	}
+	eventually(t, func() (bool, error) {
+		current := &corev1.ServiceAccount{}
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, current); err != nil {
+			return false, err
+		}
+		if current.UID != saUIDBefore {
+			return false, fmt.Errorf("ServiceAccount UID changed across reconciles: before=%s after=%s", saUIDBefore, current.UID)
+		}
+		// Simultaneously confirm the Deployment still references it.
+		d := &appsv1.Deployment{}
+		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, d); err != nil {
+			return false, err
+		}
+		if d.Spec.Template.Spec.ServiceAccountName != cr.Name {
+			return false, fmt.Errorf("Deployment serviceAccountName drifted: %q", d.Spec.Template.Spec.ServiceAccountName)
+		}
+		return true, nil
+	})
+}
+
 func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)

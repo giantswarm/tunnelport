@@ -112,6 +112,36 @@ func canonicalLabels(cr *accessv1alpha1.RemoteApp) map[string]string {
 	}
 }
 
+// renderServiceAccount returns the per-`RemoteApp` ServiceAccount the tbot
+// Deployment runs as. It exists as the join identity tbot will present to
+// Teleport once slice 02 flips `join_method` to `kubernetes` (ADR 0006);
+// in this slice the SA is rendered, owned by the CR, and the pod uses
+// it, but tbot still joins via `bound_keypair` and ignores the projected
+// token at `mountPathTbotSAToken`.
+//
+// The SA name matches the CR name — same convention the rendered
+// Deployment, Service, and ConfigMap follow. On Central, slice 02's
+// `TeleportBot` and `TeleportProvisionToken` will be named
+// `tunnelport-${cr.Name}` (ADR 0006), and the token's `kubernetes.allow`
+// rule will list this SA as the single permitted subject (per-app
+// blast-radius isolation).
+//
+// TypeMeta is set explicitly because `applyOwned` routes through Server-
+// Side Apply, which requires `apiVersion`/`kind` on the payload.
+func renderServiceAccount(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "ServiceAccount",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Name,
+			Namespace: cr.Namespace,
+			Labels:    canonicalLabels(cr),
+		},
+	}
+}
+
 // renderConfigMap returns the ConfigMap holding tbot.yaml — tbot's
 // application-tunnel configuration for this RemoteApp. The token Secret is
 // referenced by name only; its contents are never read by the operator.
@@ -149,11 +179,44 @@ const (
 	// writable via emptyDir avoids surprise EROFS without relaxing the
 	// root-fs hardening.
 	volumeNameTbotTmp = "tbot-tmp"
+	// volumeNameTbotSAToken carries the per-RemoteApp ServiceAccount's
+	// projected JWT (ADR 0006 slice 1). The token mount is rendered
+	// *now* so a future slice can flip tbot's join_method from
+	// `bound_keypair` to `kubernetes` without a second pod-template
+	// change. Audience is pinned via `saTokenAudience` so the token
+	// Central accepts is always the one tbot mounts.
+	volumeNameTbotSAToken = "tbot-sa-token"
 
 	mountPathTbotConfig  = "/etc/tbot"
 	mountPathTbotToken   = "/etc/tbot-token"
 	mountPathTbotStorage = "/var/lib/tbot"
 	mountPathTbotTmp     = "/tmp"
+	// mountPathTbotSAToken is the directory the projected SA token
+	// volume mounts at; the file inside it is named `saTokenFileName`.
+	// Slice 02 reads `mountPathTbotSAToken + "/" + saTokenFileName`
+	// from inside the tbot container.
+	mountPathTbotSAToken = "/var/run/secrets/tunnelport.giantswarm.io/serviceaccount"
+
+	// saTokenFileName is the projected token's filename inside
+	// mountPathTbotSAToken. Pinned so the eventual tbot config in
+	// slice 02 has a stable path to point at.
+	saTokenFileName = "token"
+
+	// saTokenAudience is the audience claim baked into every projected
+	// SA token. Central's `TeleportProvisionToken` (`kubernetes.type:
+	// static_jwks`, per ADR 0006) verifies this audience when it
+	// validates the JWT a tbot pod presents on join. The value is
+	// project-specific (not `https://kubernetes.default.svc`) so that a
+	// stray default-audience SA token from elsewhere on the MC cannot
+	// satisfy the join.
+	saTokenAudience = "tunnelport.giantswarm.io"
+
+	// saTokenExpirationSeconds is the projected token's lifetime.
+	// kubelet auto-rotates the projected file before expiry, so this
+	// is the worst-case staleness window, not the rotation cadence.
+	// 1h matches the upstream kubelet default for projected SA tokens
+	// and gives plenty of headroom for tbot's own join cadence.
+	saTokenExpirationSeconds int64 = 3600
 
 	// tbotDiagPort is tbot's diagnostics HTTP listener. We render
 	// `diag_addr: 0.0.0.0:tbotDiagPort` in tbot.yaml (see
@@ -243,11 +306,15 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 	allowPrivilegeEscalation := false
 	readOnlyRootFilesystem := true
 
-	// tbot speaks only to the Teleport proxy and to the kube-apiserver
-	// is irrelevant to its job: it has no need for a ServiceAccount
-	// JWT mounted into the pod. Disabling automount keeps the SA token
-	// off the pod's filesystem, narrowing the blast radius of a tbot
-	// pod compromise to the Teleport credentials it already needs.
+	// The pod runs as the per-RemoteApp ServiceAccount renderServiceAccount
+	// emits (ADR 0006 slice 1). Default-mount stays off — the SA token is
+	// delivered via an explicit projected volume below so its audience can
+	// be pinned to `saTokenAudience` (Central will only accept that
+	// audience under `kubernetes.type: static_jwks`). Two outcomes:
+	//   - the legacy /var/run/secrets/kubernetes.io/serviceaccount path is
+	//     absent (no default-audience token leaks),
+	//   - the projected file at `mountPathTbotSAToken` is the *only* SA
+	//     token tbot ever sees.
 	automountServiceAccountToken := false
 
 	return &appsv1.Deployment{
@@ -289,6 +356,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 					},
 				},
 				Spec: corev1.PodSpec{
+					ServiceAccountName:           cr.Name,
 					AutomountServiceAccountToken: &automountServiceAccountToken,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
@@ -331,6 +399,31 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 							Name: volumeNameTbotTmp,
 							VolumeSource: corev1.VolumeSource{
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						{
+							// Projected ServiceAccountToken with an
+							// explicit audience (`saTokenAudience`).
+							// Slice 02 will configure tbot's
+							// `join_method: kubernetes` to read the
+							// token from `mountPathTbotSAToken/saTokenFileName`;
+							// this slice mounts it ahead of that flip
+							// so the pod template doesn't change again.
+							// kubelet auto-rotates the file before
+							// `saTokenExpirationSeconds` lapses.
+							Name: volumeNameTbotSAToken,
+							VolumeSource: corev1.VolumeSource{
+								Projected: &corev1.ProjectedVolumeSource{
+									Sources: []corev1.VolumeProjection{
+										{
+											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+												Audience:          saTokenAudience,
+												ExpirationSeconds: ptrInt64(saTokenExpirationSeconds),
+												Path:              saTokenFileName,
+											},
+										},
+									},
+								},
 							},
 						},
 					},
@@ -435,6 +528,11 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 									Name:      volumeNameTbotTmp,
 									MountPath: mountPathTbotTmp,
 								},
+								{
+									Name:      volumeNameTbotSAToken,
+									MountPath: mountPathTbotSAToken,
+									ReadOnly:  true,
+								},
 							},
 						},
 					},
@@ -480,6 +578,11 @@ func renderService(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.Service 
 		},
 	}
 }
+
+// ptrInt64 returns a pointer to its argument. Used by renderDeployment to
+// fill optional `*int64` fields (e.g. ProjectedServiceAccountToken's
+// ExpirationSeconds) without sprinkling temporary local variables.
+func ptrInt64(v int64) *int64 { return &v }
 
 // configHash returns a stable, content-addressable hash of the tbot config
 // so the pod template re-hashes whenever a CR field that lands in the

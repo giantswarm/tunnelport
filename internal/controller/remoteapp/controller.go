@@ -41,6 +41,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 package remoteapp
@@ -147,6 +148,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
+	// ServiceAccount goes first so the Deployment that references it via
+	// `spec.template.spec.serviceAccountName` always finds it during pod
+	// admission. ADR 0006 slice 1: the SA is the join identity tbot will
+	// present once slice 02 flips `join_method` to `kubernetes`.
+	if err := r.applyOwned(ctx, cr, renderServiceAccount(cr, r.PodDefaults)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconcile ServiceAccount: %w", err)
+	}
 	if err := r.applyOwned(ctx, cr, renderConfigMap(cr, r.PodDefaults)); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconcile ConfigMap: %w", err)
 	}
@@ -268,6 +276,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Owns(&corev1.ServiceAccount{}).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToRemoteApps),

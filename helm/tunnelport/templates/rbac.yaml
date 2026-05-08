@@ -87,6 +87,12 @@ rules:
   resources:
   - services
   - configmaps
+  # ServiceAccounts: the operator renders one per RemoteApp so a future
+  # slice can flip tbot's `join_method` to `kubernetes` (ADR 0006). The
+  # SA carries no permissions of its own beyond what its mounted
+  # projected token (audience `tunnelport.giantswarm.io`) lets Central
+  # accept; no Roles or RoleBindings are rendered alongside it.
+  - serviceaccounts
   verbs:
   - create
   - delete
