@@ -60,6 +60,9 @@ spec:
         {{- if .Values.tbot.insecure }}
         - --tbot-insecure=true
         {{- end }}
+        {{- if .Values.tbot.saTokenAudience }}
+        - --tbot-sa-token-audience={{ .Values.tbot.saTokenAudience }}
+        {{- end }}
         ports:
         - name: metrics
           containerPort: {{ .Values.ports.metrics }}

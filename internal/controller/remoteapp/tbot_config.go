@@ -55,18 +55,16 @@ import (
 //     `TeleportProvisionToken` reference this same name shape; changing
 //     the format here would force a coordinated rename on Central and
 //     in `teleport-fleet`.
-//   - `onboarding.kubernetes.token_path` points tbot at the projected
-//     SA-token file slice 01 mounts. Upstream's
-//     `KubernetesOnboardingConfig.TokenPath` (yaml `token_path`,
-//     `lib/tbot/bot/onboarding/config.go`) defaults to
-//     `/var/run/secrets/kubernetes.io/serviceaccount/token` when unset
-//     — but slice 01 deliberately mounts at a project-specific path so
-//     the audience can be pinned to `saTokenAudience` and a stray
-//     default-audience SA token elsewhere on the MC cannot satisfy the
-//     join. We set `token_path` explicitly rather than overriding the
-//     default mount, because (a) the projected path is part of slice
-//     01's locked-in interface and (b) the per-RemoteApp SA's
-//     audience-pinned token is the *only* token tbot should ever see.
+//   - There is no `onboarding.kubernetes.token_path` block. The
+//     chart-default tbot reads the SA token from the upstream default
+//     `/var/run/secrets/kubernetes.io/serviceaccount/token` regardless
+//     of any `kubernetes.token_path` knob (the field is a no-op in this
+//     release). The operator mounts the per-`RemoteApp` projected SA
+//     token there with `automountServiceAccountToken: false` so kubelet
+//     does not also auto-mount a default-audience token to the same
+//     path. The audience is pinned to `saTokenAudience` by the
+//     projected volume, so a stray default-audience SA token elsewhere
+//     on the MC still cannot satisfy the join.
 //   - `services.application-tunnel.listen` (NOT `listener`) — the upstream
 //     YAML tag is `listen` (see `lib/tbot/services/application/tunnel_config.go`).
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
@@ -84,18 +82,8 @@ type tbotFile struct {
 }
 
 type tbotOnboarding struct {
-	JoinMethod string                   `json:"join_method"`
-	Token      string                   `json:"token"`
-	Kubernetes tbotKubernetesOnboarding `json:"kubernetes"`
-}
-
-// tbotKubernetesOnboarding mirrors upstream's
-// `KubernetesOnboardingConfig` (lib/tbot/bot/onboarding/config.go). Only
-// `token_path` is populated; the audience claim is enforced on the
-// kubelet side via the projected volume's audience field (see
-// `saTokenAudience` in render.go).
-type tbotKubernetesOnboarding struct {
-	TokenPath string `json:"token_path"`
+	JoinMethod string `json:"join_method"`
+	Token      string `json:"token"`
 }
 
 type tbotStorage struct {
@@ -129,13 +117,13 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 			// `tunnelport-${cr.Name}`. Single source of truth in
 			// `teleportProvisionTokenName`.
 			Token: teleportProvisionTokenName(cr),
-			Kubernetes: tbotKubernetesOnboarding{
-				// Path to the projected SA JWT slice 01 mounts. The
-				// audience claim on that token is pinned by the
-				// projected volume's `Audience` field; tbot just reads
-				// the file.
-				TokenPath: mountPathTbotSAToken + "/" + saTokenFileName,
-			},
+			// No `kubernetes.token_path` config: tbot reads the SA
+			// token from the upstream default path
+			// (`/var/run/secrets/kubernetes.io/serviceaccount/token`)
+			// unconditionally, and the operator mounts the
+			// projected SA token there (see render.go's
+			// `mountPathTbotSAToken`). The audience is still pinned to
+			// `saTokenAudience` via the projected volume.
 		},
 		Storage: tbotStorage{
 			Type: "directory",

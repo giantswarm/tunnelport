@@ -470,9 +470,6 @@ func TestReconciler_KubernetesJoinConfigMapShape(t *testing.T) {
 		// `tunnelport-${cr.Name}` — the locked-in convention from ADR
 		// 0006 referenced by the slice-05 runbook and slice-06 cutover.
 		"token: tunnelport-k8s-join",
-		// tbot reads the SA JWT from this projected file. Path is the
-		// public surface slice 01 committed to.
-		"token_path: /var/run/secrets/tunnelport.giantswarm.io/serviceaccount/token",
 	}
 	for _, want := range wants {
 		if !strings.Contains(body, want) {

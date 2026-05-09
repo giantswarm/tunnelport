@@ -52,10 +52,12 @@ CURL_WAIT="${CURL_WAIT:-120}"
 
 TMP=/tmp
 PRODUCER_TOKEN_FILE="${TMP}/smoke-producer-agent-token"
-# Per ADR 0005 the bot joins via bound_keypair; the file holds the
-# auto-generated registration_secret retrieved from the token's
-# .status, not a static-token value.
-BOT_TOKEN_FILE="${TMP}/smoke-bot-registration-secret"
+# Per ADR 0006 the bot joins via `kubernetes` with `static_jwks` trust
+# mode. tbot presents the per-RemoteApp SA's projected JWT; Teleport
+# validates it offline against the consumer cluster's JWKS embedded
+# in the smoke-bot token resource on Central. No registration secret,
+# no consumer-side Secret to deliver.
+SMOKE_TOKENS_FILE="${TMP}/smoke-tokens.yaml"
 TELEPORT_VALUES_FILE="${TMP}/smoke-teleport-values.yaml"
 KUBE_AGENT_VALUES_FILE="${TMP}/smoke-kube-agent-values.yaml"
 
@@ -75,7 +77,7 @@ teardown() {
   for c in consumer producer teleport; do
     kind delete cluster --name "$c" >/dev/null 2>&1 || true
   done
-  rm -f "$PRODUCER_TOKEN_FILE" "$BOT_TOKEN_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE"
+  rm -f "$PRODUCER_TOKEN_FILE" "$SMOKE_TOKENS_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE"
   rm -f "${TMP}/smoke-producer-agent-token.json"
 }
 
@@ -108,10 +110,16 @@ make docker-build IMG="${OPERATOR_IMAGE}" >/dev/null
 # and local-path-provisioner then crashloop on the 2nd/3rd cluster. The
 # kind project documents these as the recommended values:
 # https://kind.sigs.k8s.io/docs/user/known-issues/
-if command -v sudo >/dev/null 2>&1; then
+#
+# Only Linux has fs.inotify; macOS uses kqueue and isn't subject to the
+# limit. We probe for the sysctl and run non-interactively, tolerating
+# failure (the local laptop case where the limits are already wide
+# enough but `sudo -n` would prompt).
+if [[ -d /proc/sys/fs/inotify ]] && command -v sudo >/dev/null 2>&1; then
   step "Raising inotify limits (kind multi-cluster requirement)"
-  sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null
-  sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null
+  sudo -n sysctl -w fs.inotify.max_user_watches=524288 >/dev/null 2>&1 || \
+    warn "sudo unavailable — skipping inotify bump (kind may crashloop on Linux without manual sysctl)"
+  sudo -n sysctl -w fs.inotify.max_user_instances=512 >/dev/null 2>&1 || true
 fi
 
 step "Creating kind clusters in parallel"
@@ -186,34 +194,38 @@ kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
   > "${TMP}/smoke-producer-agent-token.json"
 jq -r .token "${TMP}/smoke-producer-agent-token.json" > "${PRODUCER_TOKEN_FILE}"
 
-# Bot identity + bound_keypair token, declarative.
-# Per ADR 0005, the bot joins via bound_keypair with recovery.mode:
-# relaxed; the token resource carries the policy and Teleport
-# auto-generates the registration_secret on creation. We read it back
-# out of `tctl get token/<name>`.
-#
-# `tctl create -f` accepts a stream containing multiple documents.
-# tokens.yaml carries both the producer-agent-token (which is just a
-# placeholder shape — not used here; we use the dynamically-generated
-# producer agent token from a few lines up) and the smoke-bot-token
-# entry. We feed only bot.yaml and tokens.yaml that matter — the
-# producer-agent-token literal isn't consumed by anyone here, so its
-# placeholder is harmless on creation but we route it via `|| true`
-# in case Teleport rejects the placeholder string at validation.
+# Bot identity (kubernetes join, static_jwks per ADR 0006). The
+# tunnelport-smoke-app token resource embeds the consumer kind
+# cluster's JWKS so Teleport can validate the per-RemoteApp SA's
+# projected JWT offline — no network call from Teleport to the
+# consumer apiserver, and no registration secret to deliver.
+CONSUMER_JWKS="$(kubectl --context kind-consumer get --raw=/openid/v1/jwks | jq -c .)"
+
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/bot.yaml >/dev/null
+
+# Template JWKS into tokens.yaml as a YAML single-quoted scalar.
+# Using sed risks scalar-vs-flow-mapping ambiguity (the raw JWKS is
+# valid YAML flow syntax for a mapping, not the string Teleport
+# wants). Python writes the file with explicit YAML single-quoting,
+# doubling any embedded single quotes per the YAML 1.2 spec.
+python3 - "${CONSUMER_JWKS}" hack/smoke/teleport/tokens.yaml > "${SMOKE_TOKENS_FILE}" <<'PY'
+import sys
+jwks, infile = sys.argv[1], sys.argv[2]
+yaml_safe = jwks.replace("'", "''")
+content = open(infile).read()
+sys.stdout.write(content.replace("REPLACE_WITH_CONSUMER_JWKS", "'" + yaml_safe + "'"))
+PY
+
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
-  tctl create -f - < hack/smoke/teleport/tokens.yaml >/dev/null || true
+  tctl create -f - < "${SMOKE_TOKENS_FILE}" >/dev/null
 
+# Sanity: confirm the token landed.
 kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-  tctl get token/smoke-bot-token --format=json \
-  | jq -r '.[0].status.bound_keypair.registration_secret' \
-  > "${BOT_TOKEN_FILE}"
-
-if [[ ! -s "${BOT_TOKEN_FILE}" ]]; then
-  warn "Failed to read bound_keypair.registration_secret from token/smoke-bot-token"
-  exit 1
-fi
+  tctl get token/tunnelport-smoke-app >/dev/null || {
+    warn "tunnelport-smoke-app token did not land on Central; aborting."
+    exit 1
+  }
 
 step "Bringing up the producer (http-echo + teleport-kube-agent)"
 kubectl --context kind-producer apply -f hack/smoke/producer/http-echo.yaml >/dev/null
@@ -254,20 +266,15 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set image.pullPolicy=IfNotPresent \
   --set imagePullSecret="" \
   --set tbot.insecure=true \
+  --set tbot.saTokenAudience=smoke.tunnelport.local \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
-step "Delivering the bot token Secret to the consumer cluster"
+step "Creating the smoke namespace on the consumer cluster"
+# Per ADR 0006: no token Secret to deliver. The operator renders a
+# per-RemoteApp ServiceAccount whose projected JWT is what tbot
+# presents to Central; the trust on Central is the JWKS embedded in
+# the tunnelport-smoke-app token resource.
 kubectl --context kind-consumer create namespace smoke >/dev/null 2>&1 || true
-# The operator's informer cache is scoped to Secrets carrying
-# `tunnelport.giantswarm.io/role=token-secret`. Without this label the
-# Secret is invisible to the operator and TokenSecretBound stays False,
-# so the smoke would never reach status.ready=true.
-kubectl --context kind-consumer -n smoke create secret generic smoke-bot-token \
-  --from-literal=token="$(cat "${BOT_TOKEN_FILE}")" \
-  --dry-run=client -o yaml \
-  | kubectl --context kind-consumer apply -f - >/dev/null
-kubectl --context kind-consumer -n smoke label secret smoke-bot-token \
-  tunnelport.giantswarm.io/role=token-secret --overwrite >/dev/null
 
 step "Applying the RemoteApp CR"
 sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \

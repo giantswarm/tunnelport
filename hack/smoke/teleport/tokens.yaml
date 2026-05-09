@@ -1,59 +1,38 @@
-# Two join tokens for the smoke environment.
+# Bot join token for the smoke environment.
 #
-#  1) producer-agent-token    — used by the producer cluster's
-#     teleport-kube-agent to register the smoke app with Teleport.
-#     Roles: [Node, App]. join_method: token (multi-use static token).
+# tunnelport-smoke-app    — used by the consumer cluster's tbot
+#   (rendered by the operator) to join as the tunnelport-smoke-app
+#   identity. Role: [Bot]. join_method: kubernetes with
+#   `kubernetes.type: static_jwks` per ADR 0006.
 #
-#  2) smoke-bot-token         — used by the consumer cluster's tbot
-#     (rendered by the operator) to join as the smoke-bot identity.
-#     Role: [Bot]. join_method: bound_keypair with recovery.mode:
-#     relaxed (per ADR 0005). The `bot_name` field MUST match the
-#     bot's metadata name in bot.yaml.
+#   The consumer kind cluster's JWKS is templated into
+#   `kubernetes.static_jwks.jwks` by run.sh after the consumer
+#   cluster is up — Teleport validates the projected SA token
+#   offline against this JWKS, so no network reachability from
+#   Teleport to the consumer apiserver is required.
 #
-#     Why bound_keypair: bot tokens (roles: [Bot]) are single-use.
-#     With join_method: token, the bot is locked out the moment its
-#     persisted cert is lost (e.g. emptyDir + pod restart) — see
-#     ADR 0004. bound_keypair lets tbot self-recover by re-registering
-#     a fresh keypair against the registration_secret on every cold
-#     start. `recovery.mode: relaxed` permits unlimited automatic
-#     recoveries while keeping Teleport's join-state verification on.
+#   `kubernetes.allow.service_account` matches the per-RemoteApp SA
+#   the operator renders in the consumer cluster: namespace=`smoke`,
+#   name=`smoke-app` (slice 01's convention: SA name = cr.Name).
 #
-# Apply with:
-#   tctl create -f hack/smoke/teleport/tokens.yaml
+# The token resource name MUST match the operator's `onboarding.token`
+# convention `tunnelport-${cr.Name}` (locked in ADR 0006 / slice 02).
 #
-# The producer-agent-token's literal value is a placeholder you replace
-# before applying. The smoke-bot-token entry is fully declarative —
-# Teleport generates the registration secret on creation; retrieve it
-# via:
-#   tctl get token/smoke-bot-token --format=json |
-#     jq -r '.[0].status.bound_keypair.registration_secret'
+# The producer-agent-token used by `teleport-kube-agent` is generated
+# dynamically by run.sh via `tctl tokens add --type=node,app`; it does
+# NOT live in this file.
 kind: token
 version: v2
 metadata:
-  name: producer-agent-token
-spec:
-  roles:
-    - Node
-    - App
-  join_method: token
-  # Replace before applying. Generate one with:
-  #   openssl rand -hex 16
-  token: REPLACE_WITH_PRODUCER_AGENT_TOKEN
----
-kind: token
-version: v2
-metadata:
-  name: smoke-bot-token
+  name: tunnelport-smoke-app
 spec:
   roles:
     - Bot
-  bot_name: smoke-bot
-  join_method: bound_keypair
-  bound_keypair:
-    recovery:
-      # `relaxed`: unlimited automatic recoveries. tbot can re-register
-      # a fresh keypair on every cold start (emptyDir loses the cached
-      # keypair) without operator intervention. Join-state verification
-      # stays on — only `insecure` would disable it, and `insecure` is
-      # explicitly out of scope for the operator (ADR 0005).
-      mode: relaxed
+  bot_name: tunnelport-smoke-app
+  join_method: kubernetes
+  kubernetes:
+    type: static_jwks
+    static_jwks:
+      jwks: REPLACE_WITH_CONSUMER_JWKS
+    allow:
+      - service_account: "smoke:smoke-app"

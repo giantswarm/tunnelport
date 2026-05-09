@@ -7,7 +7,10 @@
 kind: bot
 version: v1
 metadata:
-  name: smoke-bot
+  # Name matches the operator's `onboarding.token` convention
+  # `tunnelport-${cr.Name}` (ADR 0006 / slice 02). The token resource
+  # in tokens.yaml carries the same name and `bot_name` field.
+  name: tunnelport-smoke-app
 spec:
   roles:
     - smoke-app-tunnel

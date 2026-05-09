@@ -72,6 +72,16 @@ type PodDefaults struct {
 	// IP). Adds `insecure: true` to the rendered tbot config. Never
 	// set this in production.
 	Insecure bool
+
+	// SATokenAudience is the audience claim baked into every projected
+	// SA token mounted on a tbot pod. Teleport's `kubernetes` join
+	// (`kubernetes.type: static_jwks`, per ADR 0006) validates the JWT
+	// `aud` claim against the Teleport cluster's name — there is no
+	// per-token audience override on the Teleport side, so the
+	// operator MUST set this to whatever the consumer MC's Teleport
+	// cluster expects. Cluster-wide value, set via Helm; not exposed
+	// on the CR.
+	SATokenAudience string
 }
 
 // renderScheme is a private scheme used by setOwnerRef so unit tests can
@@ -185,34 +195,49 @@ const (
 	mountPathTbotTmp     = "/tmp"
 	// mountPathTbotSAToken is the directory the projected SA token
 	// volume mounts at; the file inside it is named `saTokenFileName`.
-	// tbot reads `mountPathTbotSAToken + "/" + saTokenFileName` via
-	// `onboarding.kubernetes.token_path` in tbot.yaml. The path is
-	// project-specific (not the upstream default
-	// `/var/run/secrets/kubernetes.io/serviceaccount/token`) so that a
-	// stray default-audience SA token elsewhere on the MC cannot satisfy
-	// the join.
-	mountPathTbotSAToken = "/var/run/secrets/tunnelport.giantswarm.io/serviceaccount"
+	// We mount at the upstream default SA path because tbot's
+	// `kubernetes` join reads from that path unconditionally — the
+	// `onboarding.kubernetes.token_path` knob in newer Teleport is not
+	// honored by the chart-default tbot release we ship against. The
+	// audience (`saTokenAudience`) is still project-specific via the
+	// projected volume's explicit `Audience` field, so a stray
+	// default-audience SA token elsewhere on the MC cannot satisfy the
+	// join. `automountServiceAccountToken: false` ensures the kubelet
+	// does not also auto-mount a default-audience token at this path.
+	mountPathTbotSAToken = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 	// saTokenFileName is the projected token's filename inside
-	// mountPathTbotSAToken. Pinned so tbot.yaml's
-	// `onboarding.kubernetes.token_path` has a stable target.
+	// mountPathTbotSAToken. `token` matches the upstream SA-token
+	// filename so tbot's default token-read path resolves cleanly.
 	saTokenFileName = "token"
 
-	// saTokenAudience is the audience claim baked into every projected
-	// SA token. Central's `TeleportProvisionToken` (`kubernetes.type:
-	// static_jwks`, per ADR 0006) verifies this audience when it
-	// validates the JWT a tbot pod presents on join. The value is
-	// project-specific (not `https://kubernetes.default.svc`) so that a
-	// stray default-audience SA token from elsewhere on the MC cannot
-	// satisfy the join.
-	saTokenAudience = "tunnelport.giantswarm.io"
+	// saTokenAudienceDefault is the fallback audience when PodDefaults
+	// does not specify one. Production deployments override this via
+	// the `tbot.saTokenAudience` Helm value to match their Teleport
+	// cluster's name (Teleport's static_jwks join validates the JWT
+	// `aud` against the cluster name and exposes no per-token override).
+	saTokenAudienceDefault = "teleport.giantswarm.io"
+)
 
+// saTokenAudienceOrDefault returns the configured SA-token audience or
+// the historical default when PodDefaults leaves it empty. Centralised
+// here so the rendered Deployment, configHash, and any future caller
+// always agree on the value used.
+func saTokenAudienceOrDefault(cfg PodDefaults) string {
+	if cfg.SATokenAudience != "" {
+		return cfg.SATokenAudience
+	}
+	return saTokenAudienceDefault
+}
+
+const (
 	// saTokenExpirationSeconds is the projected token's lifetime.
 	// kubelet auto-rotates the projected file before expiry, so this
 	// is the worst-case staleness window, not the rotation cadence.
-	// 1h matches the upstream kubelet default for projected SA tokens
-	// and gives plenty of headroom for tbot's own join cadence.
-	saTokenExpirationSeconds int64 = 3600
+	// Capped at 600s (10m) because Teleport's `kubernetes.type:
+	// static_jwks` join rejects SA tokens with a TTL >= 30m, and 10m
+	// is the kubelet-enforced floor for projected SA tokens.
+	saTokenExpirationSeconds int64 = 600
 
 	// tbotDiagPort is tbot's diagnostics HTTP listener. We render
 	// `diag_addr: 0.0.0.0:tbotDiagPort` in tbot.yaml (see
@@ -399,7 +424,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 									Sources: []corev1.VolumeProjection{
 										{
 											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-												Audience:          saTokenAudience,
+												Audience:          saTokenAudienceOrDefault(cfg),
 												ExpirationSeconds: ptrInt64(saTokenExpirationSeconds),
 												Path:              saTokenFileName,
 											},

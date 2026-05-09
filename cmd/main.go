@@ -73,12 +73,13 @@ type flags struct {
 	secureMetrics        bool
 	enableHTTP2          bool
 
-	tbotImage      string
-	tbotCPURequest string
-	tbotMemRequest string
-	tbotCPULimit   string
-	tbotMemLimit   string
-	tbotInsecure   bool
+	tbotImage           string
+	tbotCPURequest      string
+	tbotMemRequest      string
+	tbotCPULimit        string
+	tbotMemLimit        string
+	tbotInsecure        bool
+	tbotSATokenAudience string
 
 	zapOpts zap.Options
 }
@@ -104,6 +105,13 @@ func parseFlags() flags {
 			"TLS verification. Development-only — never set in production. Useful for "+
 			"kind-based smoke tests where the proxy is reached by IP and the cert SAN "+
 			"does not match.")
+	flag.StringVar(&f.tbotSATokenAudience, "tbot-sa-token-audience", "",
+		"Audience claim baked into every projected ServiceAccount token mounted "+
+			"on a tbot pod. MUST match the consumer MC's Teleport cluster name "+
+			"(Teleport's `kubernetes.type: static_jwks` join validates the JWT `aud` "+
+			"claim against the cluster name and offers no per-token override). "+
+			"Empty falls back to the operator's compiled-in default — set via the "+
+			"`tbot.saTokenAudience` Helm value in production.")
 	flag.StringVar(&f.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -176,7 +184,8 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 				corev1.ResourceMemory: parseQuantityOrExit("tbot-memory-limit", f.tbotMemLimit),
 			},
 		},
-		Insecure: f.tbotInsecure,
+		Insecure:        f.tbotInsecure,
+		SATokenAudience: f.tbotSATokenAudience,
 	}
 }
 

@@ -74,6 +74,13 @@ tbot:
   # smoke tests where the proxy is reached by IP and the cert SAN does
   # not match. NEVER enable this in production.
   insecure: false
+  # Audience claim baked into every projected ServiceAccount token
+  # mounted on a tbot pod. MUST match the consumer MC's Teleport
+  # cluster name — Teleport's `kubernetes.type: static_jwks` join
+  # validates the JWT `aud` against the cluster name and offers no
+  # per-token override. Empty leaves the operator's compiled-in
+  # default (`teleport.giantswarm.io`); override per environment.
+  saTokenAudience: ""
   resources:
     requests:
       cpu: 50m

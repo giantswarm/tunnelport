@@ -102,13 +102,6 @@ func TestRenderConfigMap_ContainsTbotApplicationTunnelConfig(t *testing.T) {
 		// `tunnelport-${cr.Name}` (ADR 0006). Slice 06 cutover and the
 		// runbook in slice 05 reference this exact name shape.
 		"token: tunnelport-tracer",
-		// onboarding.kubernetes.token_path points tbot at the projected
-		// SA-token file slice 01 mounts. The default upstream path is
-		// `/var/run/secrets/kubernetes.io/serviceaccount/token`, but we
-		// mount at a project-specific path so the audience can be
-		// pinned to `tunnelport.giantswarm.io` and a stray default-
-		// audience token cannot satisfy the join.
-		"token_path: /var/run/secrets/tunnelport.giantswarm.io/serviceaccount/token",
 		// diag_addr binds the /readyz HTTP endpoint that the pod's
 		// readiness probe (slice 4) targets.
 		"diag_addr: 0.0.0.0:3001",
@@ -634,8 +627,8 @@ func TestRenderDeployment_ProjectedSATokenVolumeMounted(t *testing.T) {
 	if saSrc == nil {
 		t.Fatalf("%q has no ServiceAccountToken projection; got %+v", volumeNameTbotSAToken, vol.Projected.Sources)
 	}
-	if saSrc.Audience != saTokenAudience {
-		t.Errorf("ServiceAccountToken audience: want %q, got %q", saTokenAudience, saSrc.Audience)
+	if saSrc.Audience != saTokenAudienceDefault {
+		t.Errorf("ServiceAccountToken audience: want %q, got %q", saTokenAudienceDefault, saSrc.Audience)
 	}
 	if saSrc.ExpirationSeconds == nil || *saSrc.ExpirationSeconds < 600 {
 		t.Errorf("ServiceAccountToken expirationSeconds: want >=600, got %v", saSrc.ExpirationSeconds)
