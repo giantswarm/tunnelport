@@ -26,6 +26,12 @@ import (
 // Teleport using the projected ServiceAccount JWT (no static-token Secret
 // on the consumer MC), and `TokenName` is the name of the Teleport
 // ProvisionToken resource pre-provisioned on Central.
+//
+// The Teleport proxy host:port and cluster name (the `aud` claim Teleport's
+// `static_jwks` validator pins) are operator-level configuration, not CR
+// fields — see ADR 0005 for the rationale. A given consumer MC's RemoteApps
+// all bind to the same Teleport cluster; multi-Teleport-on-one-MC needs a
+// second operator install.
 type RemoteAppSpec struct {
 	// AppName is the Teleport application name to expose. Teleport application
 	// names are RFC 1123 DNS labels, so we constrain to that here.
@@ -45,17 +51,6 @@ type RemoteAppSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self != 3001",message="port 3001 is reserved for tbot's diagnostic endpoint"
 	Port int32 `json:"port"`
 
-	// ProxyAddr is the host:port of the Teleport proxy this RemoteApp connects
-	// to. We use a Pattern (not the CEL format.hostname() library) because the
-	// value is host:port — format.hostname() only validates the hostname part
-	// and would still need a separate split+port check, so a single regex is
-	// simpler. The pattern accepts lowercase RFC 1123 hostnames with at least
-	// one label, optional dotted subdomains, and a numeric port.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$"
-	ProxyAddr string `json:"proxyAddr"`
-
 	// TokenName is the name of the Teleport ProvisionToken on Central that
 	// this RemoteApp's tbot uses to join via the `kubernetes` join method
 	// (per ADR 0004). It is a literal token name, not a Kubernetes Secret
@@ -67,20 +62,6 @@ type RemoteAppSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 	TokenName string `json:"tokenName"`
-
-	// ClusterName is the Teleport cluster name (the value Teleport's auth
-	// server returns for `tctl get cluster`). The rendered tbot pod
-	// projects a ServiceAccount JWT with this audience, and Teleport's
-	// kubernetes-join validator pins the same value on its side. The
-	// cluster name is typically distinct from the proxy host (e.g. proxy
-	// at `teleport.example.com:443` for cluster `prod.teleport.example`).
-	// Teleport cluster names follow DNS-name conventions, so we constrain
-	// to DNS-1123 subdomain shape.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
-	ClusterName string `json:"clusterName"`
 
 	// Replicas is the desired number of tbot pods for this RemoteApp. The
 	// reconciler defaults absence to 1 — the CRD intentionally has no default

@@ -64,6 +64,11 @@ func fixtureConfig() PodDefaults {
 				corev1.ResourceMemory: resource.MustParse("256Mi"),
 			},
 		},
+		// Operator-level Teleport binding (ADR 0005). Values match the
+		// pre-removal CR fixture defaults so existing render assertions
+		// against `proxy_server: teleport.example.com:443` keep passing.
+		TeleportClusterName: "teleport.example.com",
+		TeleportProxyAddr:   "teleport.example.com:443",
 	}
 }
 

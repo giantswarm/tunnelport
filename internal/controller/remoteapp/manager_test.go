@@ -58,6 +58,10 @@ func testConfig() PodDefaults {
 				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 		},
+		// Operator-level Teleport binding (ADR 0005). Fixed strings so
+		// integration tests can assert against deterministic values.
+		TeleportClusterName: "teleport.example.com",
+		TeleportProxyAddr:   "teleport.example.com:443",
 	}
 }
 

@@ -2,6 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
+  "required": ["teleport"],
   "properties": {
     "installNamespace": {
       "type": "string"
@@ -38,6 +39,26 @@
     },
     "imagePullSecret": {
       "type": "string"
+    },
+    "teleport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clusterName", "proxyAddr"],
+      "description": "Teleport binding for this consumer MC (ADR 0005). Both fields required; the operator fails fast at startup if either is empty.",
+      "properties": {
+        "clusterName": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "Teleport cluster name (the `Cluster:` line from `tctl status` on Central). Used as the `aud` claim on every rendered tbot pod's projected SA JWT."
+        },
+        "proxyAddr": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$",
+          "description": "host:port of the Teleport proxy every rendered tbot pod connects to."
+        }
+      }
     },
     "resources": {
       "$ref": "#/definitions/resources"

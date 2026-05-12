@@ -409,4 +409,4 @@ production-targeting differences:
 | Hand-rolled `tctl create -f` for the kubernetes-method token | `TeleportBot` / `TeleportRole` / `TeleportToken` via the Giant Swarm Teleport Operator on Central |
 | `tctl` from a host shell | Same Central-managed pipeline |
 | One bot per smoke test | One bot **per RemoteApp**, with the token's `kubernetes.allow` pinned to that one CR's ServiceAccount (per-app blast-radius isolation, ADR 0004) |
-| `proxyAddr` is a kind-network IP | A stable hostname resolvable from the consumer MC (e.g. `teleport.example.com:443`) |
+| `teleport.proxyAddr` Helm value is a kind-network IP | A stable hostname resolvable from the consumer MC (e.g. `teleport.example.com:443`), ADR 0005 |

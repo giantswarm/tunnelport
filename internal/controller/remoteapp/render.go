@@ -45,7 +45,8 @@ const (
 	LabelRemoteAppInstance = "tunnelport.giantswarm.io/remoteapp"
 
 	// AnnotationConfigHash is stamped on the pod template so that ConfigMap
-	// content changes (spec.appName / spec.proxyAddr / spec.port) cause the
+	// content changes (spec.appName / spec.port / spec.tokenName, or the
+	// operator-level Teleport binding from ADR 0005) cause the
 	// pod-template-hash to change, which makes the Deployment roll. Without
 	// this, ConfigMap-only updates would not propagate until pods restart
 	// for unrelated reasons.
@@ -53,10 +54,11 @@ const (
 )
 
 // PodDefaults carries the operator-level knobs that are NOT on the RemoteApp
-// CR but are needed to render owned objects: the tbot container image and
-// its resource requests/limits, plus the dev-only `insecure` flag. In
-// production these are plumbed from Helm values; the reconciler holds the
-// resolved struct directly so cmd/main.go can wire it without a
+// CR but are needed to render owned objects: the tbot container image, its
+// resource requests/limits, the dev-only `insecure` flag, and the
+// MC-wide Teleport binding (cluster name + proxy host:port — ADR 0005).
+// In production these are plumbed from Helm values; the reconciler holds
+// the resolved struct directly so cmd/main.go can wire it without a
 // controller-shape change.
 type PodDefaults struct {
 	// TbotImage is the container image reference for the tbot sidecar pod.
@@ -72,6 +74,21 @@ type PodDefaults struct {
 	// IP). Adds `insecure: true` to the rendered tbot config. Never
 	// set this in production.
 	Insecure bool
+
+	// TeleportClusterName is the Teleport cluster name (the value
+	// `tctl status` reports as `Cluster:` on Central). Used as the
+	// `aud` claim on every rendered tbot pod's projected SA JWT;
+	// Teleport's `static_jwks` join validator pins JWT `aud` to this
+	// exact value (`a.GetDomainName()` in `lib/auth/join_kubernetes.go`).
+	// Required at chart install time — cmd/main.go fails fast on empty
+	// (ADR 0005).
+	TeleportClusterName string
+
+	// TeleportProxyAddr is the host:port of the Teleport proxy every
+	// rendered tbot pod connects to. Flows into `proxy_server` in the
+	// rendered tbot.yaml. Required at chart install time — cmd/main.go
+	// fails fast on empty (ADR 0005).
+	TeleportProxyAddr string
 }
 
 // renderScheme is a private scheme used by setOwnerRef so unit tests can
@@ -164,7 +181,8 @@ const (
 	volumeNameTbotStorage = "tbot-storage"
 	// volumeNameTbotJoinSAToken backs the projected ServiceAccount JWT
 	// the kubernetes-join model (ADR 0004) requires. The kubelet projects
-	// a fresh JWT whose `aud` claim matches `cr.Spec.ClusterName` and
+	// a fresh JWT whose `aud` claim matches `cfg.TeleportClusterName`
+	// (the operator's `--teleport-cluster-name` flag, ADR 0005) and
 	// whose TTL is below Teleport's 30-minute static_jwks ceiling. The
 	// default automounted SA token at
 	// /var/run/secrets/kubernetes.io/serviceaccount/token carries the
@@ -309,9 +327,10 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 					Labels: labels,
 					Annotations: map[string]string{
 						// Hash of the rendered tbot config so a spec.appName
-						// or spec.proxyAddr change — which only updates the
-						// ConfigMap data, not the pod template directly —
-						// still rolls the Deployment via pod-template-hash.
+						// or operator-level Teleport binding change (ADR
+						// 0005) — which only updates the ConfigMap data,
+						// not the pod template directly — still rolls the
+						// Deployment via pod-template-hash.
 						AnnotationConfigHash: configHash(cr, cfg),
 					},
 				},
@@ -352,7 +371,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 										{
 											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
 												Path:              tbotJoinSATokenFileName,
-												Audience:          cr.Spec.ClusterName,
+												Audience:          cfg.TeleportClusterName,
 												ExpirationSeconds: ptr(joinSATokenExpirationSeconds),
 											},
 										},
@@ -396,7 +415,8 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							Command: []string{"tbot"},
 							// KUBERNETES_TOKEN_PATH tells tbot to read its
 							// join JWT from the projected SA token volume
-							// (audience = cr.Spec.ClusterName). Without
+							// (audience = cfg.TeleportClusterName, the
+							// operator-level flag from ADR 0005). Without
 							// this, tbot falls back to
 							// /var/run/secrets/kubernetes.io/serviceaccount/token,
 							// whose audience is the kube-apiserver's

@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"regexp"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -80,6 +81,9 @@ type flags struct {
 	tbotMemLimit   string
 	tbotInsecure   bool
 
+	teleportClusterName string
+	teleportProxyAddr   string
+
 	zapOpts zap.Options
 }
 
@@ -104,6 +108,20 @@ func parseFlags() flags {
 			"TLS verification. Development-only — never set in production. Useful for "+
 			"kind-based smoke tests where the proxy is reached by IP and the cert SAN "+
 			"does not match.")
+	// ADR 0005: the Teleport cluster name (`aud` claim Teleport's
+	// `static_jwks` validator pins) and proxy host:port are operator-level
+	// constants, NOT per-CR fields. Both are required at startup; an empty
+	// value would silently produce uniformly broken tbot pods, so we
+	// validate here and exit early. The shapes match the regexes the CRD
+	// previously enforced on the per-CR fields (DNS-1123 subdomain for
+	// the cluster name; same with a numeric port suffix for the proxy).
+	flag.StringVar(&f.teleportClusterName, "teleport-cluster-name", "",
+		"Required. The Teleport cluster name (the `Cluster:` line from `tctl status` "+
+			"on Central). Used as the `aud` claim on every rendered tbot pod's projected "+
+			"ServiceAccount JWT. Empty fails fast at startup.")
+	flag.StringVar(&f.teleportProxyAddr, "teleport-proxy-addr", "",
+		"Required. host:port of the Teleport proxy every rendered tbot pod connects to. "+
+			"Flows into `proxy_server` in the rendered tbot.yaml. Empty fails fast at startup.")
 	flag.StringVar(&f.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -160,9 +178,46 @@ func parseQuantityOrExit(name, value string) resource.Quantity {
 	return q
 }
 
+// DNS-1123 subdomain pattern for the Teleport cluster name. Same shape
+// the CRD enforced on `spec.clusterName` before ADR 0005 moved the
+// field to an operator flag.
+var teleportClusterNamePattern = regexp.MustCompile(
+	`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
+)
+
+// host:port pattern for the Teleport proxy address. Same shape the CRD
+// enforced on `spec.proxyAddr` before ADR 0005.
+var teleportProxyAddrPattern = regexp.MustCompile(
+	`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$`,
+)
+
+// requireOrExit returns value when it is non-empty and matches pattern; on
+// any failure it logs a directional error against the flag name and exits
+// 1. ADR 0005: an empty or malformed --teleport-cluster-name /
+// --teleport-proxy-addr would silently produce uniformly broken tbot
+// pods, so we fail at startup rather than after the first reconcile.
+func requireOrExit(name, value string, pattern *regexp.Regexp) string {
+	if value == "" {
+		setupLog.Error(nil, "required flag is empty",
+			"flag", name,
+			"hint", "set --"+name+" on the manager (helm value teleport.* — ADR 0005)")
+		os.Exit(1)
+	}
+	if !pattern.MatchString(value) {
+		setupLog.Error(nil, "required flag has invalid format",
+			"flag", name,
+			"value", value,
+			"pattern", pattern.String())
+		os.Exit(1)
+	}
+	return value
+}
+
 // buildReconcilerConfig translates flag values into the reconciler's
 // PodDefaults struct. Quantity parsing is the failure-prone bit, so it
 // lives here behind parseQuantityOrExit rather than inline in main().
+// The Teleport binding (ADR 0005) is validated via requireOrExit — both
+// values are required and shape-checked at startup.
 func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 	return remoteappctrl.PodDefaults{
 		TbotImage: f.tbotImage,
@@ -177,6 +232,12 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 			},
 		},
 		Insecure: f.tbotInsecure,
+		TeleportClusterName: requireOrExit(
+			"teleport-cluster-name", f.teleportClusterName, teleportClusterNamePattern,
+		),
+		TeleportProxyAddr: requireOrExit(
+			"teleport-proxy-addr", f.teleportProxyAddr, teleportProxyAddrPattern,
+		),
 	}
 }
 

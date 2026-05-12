@@ -82,7 +82,7 @@ type tbotService struct {
 func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	doc := tbotFile{
 		Version:     "v2",
-		ProxyServer: cr.Spec.ProxyAddr,
+		ProxyServer: cfg.TeleportProxyAddr,
 		Insecure:    cfg.Insecure,
 		Onboarding: tbotOnboarding{
 			JoinMethod: "kubernetes",

@@ -41,13 +41,14 @@ This gives **per-app blast-radius isolation**: a compromised tbot pod
 yields a credential reaching only that one app. The cost is one paired
 action on Central per `RemoteApp` (create `TeleportBot` + role +
 `ProvisionToken` with the allowlist entry). The `RemoteApp` references
-the Central-side ProvisionToken by name via `spec.tokenName`, and
-declares the Teleport cluster name via `spec.clusterName` — used as the
-`aud` claim of the projected SA JWT (Teleport's `static_jwks` validator
-pins JWT `aud` to the Teleport cluster name; the kubelet's default
-mounted SA token uses the kube-apiserver's audience and is rejected, so
-the operator renders a projected `serviceAccountToken` volume with the
-right audience).
+the Central-side ProvisionToken by name via `spec.tokenName`. The
+Teleport cluster name — used as the `aud` claim of the projected SA
+JWT — comes from the operator's `--teleport-cluster-name` flag rather
+than the CR (see [ADR 0005](./docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md)).
+Teleport's `static_jwks` validator pins JWT `aud` to the Teleport
+cluster name; the kubelet's default mounted SA token uses the
+kube-apiserver's audience and is rejected, so the operator renders a
+projected `serviceAccountToken` volume with the right audience.
 
 The SA JWT is auto-rotated by the kubelet's projected-token mechanism;
 tbot consumes it transparently. The operator does **not** observe or
@@ -88,10 +89,13 @@ concern.
 The only Deployment-roll trigger the operator stamps onto the pod
 template is `tunnelport.giantswarm.io/config-hash` — a SHA-256 of the
 rendered `tbot.yaml`. Anything that changes the on-disk tbot config
-(`spec.appName`, `spec.proxyAddr`, `spec.port`, `spec.tokenName`) rolls
-the Deployment via its existing `RollingUpdate` strategy. There is no
-per-token-rotation annotation, because nothing on the consumer side
-"rotates" in a way that needs operator-driven roll.
+(`spec.appName`, `spec.port`, `spec.tokenName`, or the operator-level
+proxy / cluster-name flags) rolls the Deployment via its existing
+`RollingUpdate` strategy. There is no per-token-rotation annotation,
+because nothing on the consumer side "rotates" in a way that needs
+operator-driven roll. A change to either operator-level flag rolls
+*every* RemoteApp's tbot pods on the next reconcile pass — accepted
+as the standard blast-radius cost of MC-wide config (ADR 0005).
 
 ### Cert cache
 
@@ -141,12 +145,28 @@ captures failures visible on the consumer side.
 
 ### Operator config posture
 
-The operator chart has no required cluster-wide config. Every per-CR
-parameter — `proxyAddr`, `appName`, `tokenName`, `clusterName` — lives
-on the `RemoteApp` itself. Trade-off accepted: the same `proxyAddr` and
-`clusterName` will be repeated across most CRs in a cluster, and a typo
-affects only that one CR. Goal is "install the chart once, then
-everything is per-CR GitOps."
+Two Teleport-binding values are operator-level, not per-CR: the
+Teleport cluster name (the `aud` claim Teleport's `static_jwks`
+validator pins) and the proxy host:port. Both flow into the chart as
+required values (`teleport.clusterName`, `teleport.proxyAddr`) and
+land on the manager pod as `--teleport-cluster-name` /
+`--teleport-proxy-addr`. The operator fails fast at startup if either
+is empty.
+
+Everything else stays per-CR: `appName`, `port`, `tokenName`, and the
+optional `replicas`. A given consumer MC therefore hosts RemoteApps
+that all target the same Teleport cluster; multi-Teleport on one MC
+is an explicit non-goal — the answer is a second operator install in
+its own namespace. See [ADR 0005](./docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md)
+for the rationale (in particular, why the per-CR forward-compat that
+ADR 0004 reserved was withdrawn after first production deployment).
+
+Trade-off accepted: a typo in either operator-level flag breaks every
+RemoteApp on this MC at once, not just one CR. We accept that because
+the values are static per MC, the failure mode is loud and fast
+(startup error or 100% join failure across every tbot), and the
+upstream chart redeploy that introduces the typo is also the loudest
+signal.
 
 ### Scope of "app"
 

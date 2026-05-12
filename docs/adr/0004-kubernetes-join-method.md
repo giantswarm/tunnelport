@@ -1,5 +1,13 @@
 # `kubernetes` join method per RemoteApp; supersedes ADR 0001
 
+> **Amendment:** ADR 0005 supersedes the `spec.clusterName` / `spec.proxyAddr`
+> portion of this ADR — both have been removed from `RemoteAppSpec` and
+> moved to operator-level chart values (`--teleport-cluster-name` /
+> `--teleport-proxy-addr`). The kubernetes-join mechanism, per-CR
+> `ServiceAccount`, `static_jwks` trust mode, and the projected SA JWT
+> with the Teleport cluster name as audience are unchanged. The body
+> below retains the original per-CR framing for historical context.
+
 Each `RemoteApp`'s tbot Deployment authenticates to Teleport via the
 `kubernetes` join method. The operator renders one consumer-side
 `ServiceAccount` per CR (name = CR name, namespace = CR namespace). Each

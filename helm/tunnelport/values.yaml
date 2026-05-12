@@ -48,6 +48,28 @@ resources:
     cpu: 200m
     memory: 256Mi
 
+# Teleport binding for this consumer MC. Both fields are REQUIRED by
+# the chart's values.schema.json — `helm install` fails with a
+# directional schema error if either is missing (ADR 0005). Every
+# RemoteApp on this MC binds to the cluster and proxy named here;
+# multi-Teleport-cluster on a single consumer MC needs a second
+# operator install in its own namespace.
+#
+# Deliberately omitted from chart-default values so `helm install`
+# without `-f`/`--set` fails with a clear schema error rather than a
+# silently-broken tbot fleet. Uncomment-and-fill in your values
+# overlay or pass via `--set`:
+#
+#   teleport:
+#     # Teleport cluster name (the `Cluster:` line from `tctl status` on
+#     # Central). Used as the `aud` claim on every rendered tbot pod's
+#     # projected ServiceAccount JWT — Teleport's `static_jwks` validator
+#     # pins JWT `aud` to this exact value. DNS-1123 subdomain shape.
+#     clusterName: teleport.example.com
+#     # host:port of the Teleport proxy every rendered tbot pod connects
+#     # to. Flows into `proxy_server` in the rendered tbot.yaml.
+#     proxyAddr: teleport.example.com:443
+
 # Per-tbot-Deployment defaults. These flow into the operator manager's
 # CLI flags (`--tbot-image`, `--tbot-cpu-request`, etc.) which the
 # operator stamps onto every tbot Deployment it renders. They are

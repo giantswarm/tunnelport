@@ -146,7 +146,13 @@ helm repo update >/dev/null
 # a different major from the chart default it tests. We pick the latest
 # patch within that major from the upstream `teleport-cluster` chart.
 if [ -z "${TELEPORT_CHART_VERSION}" ]; then
-  TBOT_MAJOR="$(helm template ./helm/tunnelport |
+  # Placeholder teleport.* values: this template is parsed for the tbot
+  # major only — the resolved value isn't installed anywhere. Schema
+  # (ADR 0005) requires both fields to be non-empty for templating to
+  # succeed, so we pass shape-valid throwaways.
+  TBOT_MAJOR="$(helm template ./helm/tunnelport \
+      --set teleport.clusterName=tbot-major-probe \
+      --set teleport.proxyAddr=tbot-major-probe:443 |
     grep -oE -- '--tbot-image=[^[:space:]]+' | head -1 |
     sed -E 's|.*tbot-distroless:([0-9]+).*|\1|')"
   if ! printf '%s' "${TBOT_MAJOR}" | grep -qE '^[0-9]+$'; then
@@ -234,6 +240,9 @@ fi
 echo "smoke-app present in app_servers."
 
 step "Installing the operator on the consumer cluster"
+# teleport.clusterName matches the Teleport cluster name configured in
+# hack/smoke/teleport/helm-values.yaml; teleport.proxyAddr is the
+# kind-discovered NodePort proxy address (ADR 0005).
 helm --kube-context kind-consumer upgrade --install tunnelport \
   ./helm/tunnelport \
   --create-namespace --namespace tunnelport-system \
@@ -243,6 +252,8 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set image.pullPolicy=IfNotPresent \
   --set imagePullSecret="" \
   --set tbot.insecure=true \
+  --set teleport.clusterName=smoke.tunnelport.local \
+  --set teleport.proxyAddr="${TELEPORT_PROXY_ADDR}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
 step "Exporting consumer cluster JWKS and creating the kubernetes-join bot token"
@@ -285,10 +296,10 @@ kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < "${SMOKE_BOT_TOKEN_FILE}" >/dev/null
 
 step "Applying the RemoteApp CR"
+# RemoteApp no longer carries proxyAddr / clusterName (ADR 0005) — the
+# operator install above passed both as flags. The CR is applied as-is.
 kubectl --context kind-consumer create namespace smoke >/dev/null 2>&1 || true
-sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
-  hack/smoke/consumer/remoteapp.yaml \
-  | kubectl --context kind-consumer apply -f - >/dev/null
+kubectl --context kind-consumer apply -f hack/smoke/consumer/remoteapp.yaml >/dev/null
 
 step "Waiting for status.ready=true on the RemoteApp"
 kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \

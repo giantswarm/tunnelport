@@ -40,11 +40,20 @@ assert() {
   fi
 }
 
+# Teleport binding (ADR 0005). Both values are REQUIRED by values.schema.json
+# and the Deployment template uses `required` to fail fast. The chart_test
+# passes shape-valid placeholders so every `helm template` invocation
+# produces output; chart consumers must supply their own values.
+TELEPORT_FLAGS=(
+  --set teleport.clusterName=teleport.example.com
+  --set teleport.proxyAddr=teleport.example.com:443
+)
+
 echo "==> helm lint"
-helm lint "${CHART}"
+helm lint "${CHART}" "${TELEPORT_FLAGS[@]}"
 
 echo "==> rendering default values"
-RENDERED="$(helm template tunnelport "${CHART}")"
+RENDERED="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}")"
 
 echo "==> RBAC assertions"
 
@@ -94,7 +103,7 @@ assert "tbot.resources.limits.memory flows to --tbot-memory-limit" \
   "printf '%s' \"\${RENDERED}\" | grep -E -- '--tbot-memory-limit=256Mi'"
 
 # 3c. Overridden values flow through too — guards against accidental hardcoding.
-RENDERED_OVERRIDE="$(helm template tunnelport "${CHART}" \
+RENDERED_OVERRIDE="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
   --set tbot.image=ghcr.io/example/tbot:v999 \
   --set tbot.resources.requests.cpu=123m \
   --set tbot.resources.limits.memory=999Mi)"
@@ -104,6 +113,19 @@ assert "overridden tbot.resources.requests.cpu flows" \
   "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-cpu-request=123m'"
 assert "overridden tbot.resources.limits.memory flows" \
   "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-memory-limit=999Mi'"
+
+echo "==> Teleport binding flow assertions (ADR 0005)"
+
+assert "teleport.clusterName flows to --teleport-cluster-name" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--teleport-cluster-name=teleport.example.com'"
+assert "teleport.proxyAddr flows to --teleport-proxy-addr" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--teleport-proxy-addr=teleport.example.com:443'"
+
+# Missing teleport values: schema + the deployment's `required` should
+# both refuse to render. Either error is acceptable — the chart MUST
+# NOT silently render with empty flags that would crashloop every tbot.
+assert "helm template fails without teleport values" \
+  "! helm template tunnelport \"${CHART}\" >/dev/null 2>&1"
 
 echo "==> CRD bundle assertions"
 
@@ -116,7 +138,7 @@ assert "CRD has helm.sh/resource-policy: keep" \
   "printf '%s' \"\${RENDERED}\" | grep -E 'helm.sh/resource-policy:[[:space:]]+keep'"
 
 # 4c. With crds.install=false the CRD disappears.
-RENDERED_NO_CRDS="$(helm template tunnelport "${CHART}" --set crds.install=false)"
+RENDERED_NO_CRDS="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" --set crds.install=false)"
 assert "CRD suppressed with crds.install=false" \
   "! printf '%s' \"\${RENDERED_NO_CRDS}\" | grep -q '^kind: CustomResourceDefinition\$'"
 

@@ -299,11 +299,11 @@ func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
 	})
 }
 
-func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t *testing.T) {
+func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
-	cr := makeRemoteApp(ctx, t, ns, "appname-proxy-change")
+	cr := makeRemoteApp(ctx, t, ns, "appname-change")
 
 	// Initial render.
 	depBefore := &appsv1.Deployment{}
@@ -312,18 +312,18 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cmBefore)
 	bodyBefore := cmBefore.Data["tbot.yaml"]
 
-	// Mutate appName + proxyAddr.
+	// Mutate appName. (The Teleport proxy/cluster name are operator-level
+	// flags now — ADR 0005 — so they have no per-CR mutation surface.)
 	got := &accessv1alpha1.RemoteApp{}
 	if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	got.Spec.AppName = "renamed-app"
-	got.Spec.ProxyAddr = "teleport.new.example.com:443"
 	if err := testClient.Update(ctx, got); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
-	// ConfigMap reflects new app name + proxy addr.
+	// ConfigMap reflects new app name.
 	eventually(t, func() (bool, error) {
 		cm := &corev1.ConfigMap{}
 		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cm); err != nil {
@@ -335,9 +335,6 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 		}
 		if !strings.Contains(body, "app_name: renamed-app") {
 			return false, fmt.Errorf("ConfigMap missing new app_name")
-		}
-		if !strings.Contains(body, "proxy_server: teleport.new.example.com:443") {
-			return false, fmt.Errorf("ConfigMap missing new proxy_server")
 		}
 		return true, nil
 	})
@@ -357,7 +354,7 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 			return false, fmt.Errorf("config-hash annotation missing on initial Deployment")
 		}
 		if hashAfter == hashBefore {
-			return false, fmt.Errorf("config-hash unchanged after appName/proxyAddr update; Deployment would not roll")
+			return false, fmt.Errorf("config-hash unchanged after appName update; Deployment would not roll")
 		}
 		return true, nil
 	})

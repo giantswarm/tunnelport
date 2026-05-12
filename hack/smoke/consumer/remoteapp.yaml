@@ -5,6 +5,11 @@
 # After this is applied, the curl-pod (curl-pod.yaml) hits
 # http://smoke-app.smoke.svc.cluster.local:8080 and the response body
 # should be `hello-from-producer`.
+#
+# Per ADR 0005, the Teleport proxy address and cluster name are passed
+# to the operator at install time (chart values
+# teleport.{clusterName,proxyAddr}, see hack/smoke/run.sh) — not
+# fields on the CR.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -24,20 +29,8 @@ spec:
   # this port via the Service `smoke-app.smoke.svc.cluster.local`.
   port: 8080
 
-  # REPLACE with the same Teleport proxy address used by the
-  # producer's kube-agent — see runbook "Network setup". Format:
-  # "<ip>:443".
-  proxyAddr: REPLACE_WITH_TELEPORT_PROXY_ADDR
-
   # Name of the Teleport ProvisionToken on Central. Under the
   # kubernetes-join model (ADR 0004) tbot authenticates with the
   # projected SA JWT for the per-CR ServiceAccount the operator
   # renders. No static-token Secret on the consumer cluster.
   tokenName: smoke-bot-token
-
-  # The Teleport cluster name on Central. The rendered tbot pod
-  # projects its ServiceAccount JWT with this value as the `aud`
-  # claim, which Teleport's static_jwks validator pins on its
-  # side. Matches the `clusterName:` field in
-  # hack/smoke/teleport/helm-values.yaml.
-  clusterName: smoke.tunnelport.local
