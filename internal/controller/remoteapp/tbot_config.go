@@ -41,10 +41,12 @@ import (
 //
 //   - top-level: `version`, `proxy_server`, `insecure`, `onboarding`,
 //     `storage`, `diag_addr`, `services` (see `lib/tbot/config/config.go`).
-//   - `onboarding.token` accepts either a literal token value OR a file
-//     path; tbot dereferences a path automatically. We point it at the
-//     mounted Secret's key, so the literal token never leaves the Secret
-//     volume — the operator has no need to read `Secret.Data`.
+//   - `onboarding.join_method` is `kubernetes` (ADR 0004). `onboarding.token`
+//     is the literal name of the ProvisionToken on Central — NOT a file
+//     path. tbot reads its own ServiceAccount JWT from the projected
+//     volume the kubelet mounts automatically and presents it to Teleport
+//     auth, which validates the JWT against the ProvisionToken's
+//     `static_jwks` and `allow` rules.
 //   - `services.application-tunnel.listen` (NOT `listener`) — the upstream
 //     YAML tag is `listen` (see `lib/tbot/services/application/tunnel_config.go`).
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
@@ -83,8 +85,8 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 		ProxyServer: cr.Spec.ProxyAddr,
 		Insecure:    cfg.Insecure,
 		Onboarding: tbotOnboarding{
-			JoinMethod: "token",
-			Token:      fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key),
+			JoinMethod: "kubernetes",
+			Token:      cr.Spec.TokenName,
 		},
 		Storage: tbotStorage{
 			Type: "directory",

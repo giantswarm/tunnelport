@@ -254,37 +254,25 @@ func main() {
 	}
 
 	// Cache scoping. The default controller-runtime cache subscribes to
-	// every object of every watched GVK cluster-wide; for Secrets that
-	// pulls every Secret on the consumer MC into the operator's
-	// informer, inflating RSS and exposing data the operator promises
-	// it doesn't read. We pin two label selectors:
+	// every object of every watched GVK cluster-wide; for Pods that
+	// pulls every pod on the consumer MC into the operator's informer.
+	// We pin one label selector:
 	//
-	//   - Secrets carrying `tunnelport.giantswarm.io/role=token-secret`
-	//     — platform engineers MUST stamp this label on the Secrets
-	//     referenced by `RemoteApp.spec.tokenRef`. Documented in the
-	//     helm chart README. The operator never writes this label
-	//     itself: that would be a mutation of a user-managed Secret
-	//     (CONTEXT.md "Token Secret delivery").
 	//   - Pods carrying `tunnelport.giantswarm.io/role=tbot` — the
 	//     reconciler-stamped label on every tbot pod template
 	//     (`renderDeployment`). These are the only pods status
 	//     synthesis ever consults.
 	//
-	// The controller's per-event watch predicate
-	// (`secretIsReferenced`) is the second layer on top of this cache
-	// filter, and the ConfigMap / Service / Deployment caches stay
+	// The ConfigMap / Service / Deployment / ServiceAccount caches stay
 	// unscoped because `Owns(...)` already routes them via
-	// OwnerReferences.
-	tokenSecretLabel := labels.SelectorFromSet(map[string]string{
-		"tunnelport.giantswarm.io/role": "token-secret",
-	})
+	// OwnerReferences. Under the kubernetes join model (ADR 0004) the
+	// operator no longer watches Secrets at all.
 	tbotPodLabel := labels.SelectorFromSet(map[string]string{
 		"tunnelport.giantswarm.io/role": "tbot",
 	})
 	cacheOpts := cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Secret{}: {Label: tokenSecretLabel},
-			&corev1.Pod{}:    {Label: tbotPodLabel},
+			&corev1.Pod{}: {Label: tbotPodLabel},
 		},
 	}
 

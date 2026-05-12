@@ -35,22 +35,21 @@ rules:
   verbs:
   - update
 
-# Token Secrets — `get`/`list`/`watch` only, no `create`/`update`/`patch`/
-# `delete`. The operator code reads ObjectMeta (`name`, `resourceVersion`)
-# only and never the Secret's data; see README "Token delivery and Secret
-# read access" and ADR 0001. Kubernetes RBAC has no verb that distinguishes
-# metadata-only access from data access on Secrets, so this is
-# enforced *by code review*, not by RBAC. Slice 5 adds the watch wiring;
-# the chart RBAC is set up here so slice 5 has nothing to alter on the
-# packaging side.
+# Per-CR ServiceAccount — the operator renders one ServiceAccount per
+# RemoteApp (ADR 0004 kubernetes-join model). The SA's projected JWT is
+# the subject the Teleport ProvisionToken's `allow` rule pins.
 - apiGroups:
   - ""
   resources:
-  - secrets
+  - serviceaccounts
   verbs:
   - get
   - list
   - watch
+  - create
+  - update
+  - patch
+  - delete
 
 # Pod metadata — read-only. Slice 4's status loop derives
 # `status.lastError` from pod Phase / ContainerStatuses / RestartCount /
@@ -122,12 +121,9 @@ rules:
   - create
   - patch
 
-# DELIBERATELY NOT GRANTED, per ADR 0003 / ADR 0001:
+# DELIBERATELY NOT GRANTED, per ADR 0003 / ADR 0004:
 #   * `pods/log`               — the operator never reads container logs;
 #                                status surfaces k8s-visible state only.
-#   * `secrets` create/update  — token Secrets are delivered out-of-band
-#     /patch/delete              (GitOps + sealed/sync). The operator
-#                                neither produces nor mutates them.
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

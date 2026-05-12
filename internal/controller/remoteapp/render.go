@@ -50,15 +50,6 @@ const (
 	// this, ConfigMap-only updates would not propagate until pods restart
 	// for unrelated reasons.
 	AnnotationConfigHash = "tunnelport.giantswarm.io/config-hash"
-
-	// AnnotationTokenSecretVersion holds the tokenRef Secret's
-	// resourceVersion observed at the most recent reconcile. A rotation
-	// of the Secret bumps resourceVersion, which the reconciler stamps
-	// here, which causes the pod-template-hash to change and the
-	// Deployment to roll via its RollingUpdate strategy. The operator
-	// reads only `metadata.resourceVersion` of the Secret — never
-	// `Secret.Data`.
-	AnnotationTokenSecretVersion = "tunnelport.giantswarm.io/token-secret-version"
 )
 
 // PodDefaults carries the operator-level knobs that are NOT on the RemoteApp
@@ -112,9 +103,38 @@ func canonicalLabels(cr *accessv1alpha1.RemoteApp) map[string]string {
 	}
 }
 
+// renderServiceAccount returns the per-CR ServiceAccount the rendered tbot
+// pod runs under. Per ADR 0004 the SA's projected JWT is the subject the
+// Teleport ProvisionToken's kubernetes `allow` rule pins (e.g.
+// `service_account: "<namespace>:<cr.Name>"`), so a leaked tbot pod can
+// only join *that one* CR's join token.
+//
+// The SA itself is intentionally bare: no RoleBinding, no
+// `AutomountServiceAccountToken` field — the pod template's
+// `automountServiceAccountToken: true` is what causes the kubelet to
+// mount the projected JWT.
+//
+// Name = CR name (same convention as the rendered Deployment / Service /
+// ConfigMap, per `canonicalLabels`).
+func renderServiceAccount(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "ServiceAccount",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Name,
+			Namespace: cr.Namespace,
+			Labels:    canonicalLabels(cr),
+		},
+	}
+}
+
 // renderConfigMap returns the ConfigMap holding tbot.yaml — tbot's
-// application-tunnel configuration for this RemoteApp. The token Secret is
-// referenced by name only; its contents are never read by the operator.
+// application-tunnel configuration for this RemoteApp. The token value
+// in tbot.yaml is the Teleport ProvisionToken's *name* (ADR 0004); tbot
+// authenticates with its projected SA JWT, so there is no static-token
+// Secret to mount.
 //
 // TypeMeta is set explicitly because the apply path uses Server-Side Apply
 // (`client.Apply`), which JSON-marshals the object directly and rejects
@@ -141,7 +161,6 @@ func renderConfigMap(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.Conf
 // the public surface of the pod template.
 const (
 	volumeNameTbotConfig  = "tbot-config"
-	volumeNameTbotToken   = "tbot-token"
 	volumeNameTbotStorage = "tbot-storage"
 	// volumeNameTbotTmp backs /tmp because the container runs with
 	// readOnlyRootFilesystem: true. tbot and its transitive deps may write
@@ -151,7 +170,6 @@ const (
 	volumeNameTbotTmp = "tbot-tmp"
 
 	mountPathTbotConfig  = "/etc/tbot"
-	mountPathTbotToken   = "/etc/tbot-token"
 	mountPathTbotStorage = "/var/lib/tbot"
 	mountPathTbotTmp     = "/tmp"
 
@@ -192,21 +210,17 @@ const (
 //
 // The pod template mounts:
 //   - the tbot config ConfigMap (read-only, name reference),
-//   - the token Secret (read-only volume; the operator does NOT read its
-//     contents — only references it by name per ADR equivalent),
 //   - an emptyDir for tbot's renewable-cert destination directory (per
 //     ADR 0002 — no PVC, no StatefulSet).
 //
+// Per ADR 0004 tbot authenticates to Teleport via the projected
+// ServiceAccount JWT (the kubernetes join method). The pod template runs
+// under a per-CR ServiceAccount (renderServiceAccount) and the
+// `automountServiceAccountToken` toggle is left at true so the kubelet
+// mounts the projected JWT at the well-known path tbot looks for.
+//
 // Image and resources come from operator PodDefaults (Helm values via slice 6),
 // not from the CR.
-//
-// tokenSecretVersion is stamped on the pod-template annotation
-// `tunnelport.giantswarm.io/token-secret-version`. The reconciler reads
-// it from `tokenRef`-Secret's `metadata.resourceVersion`; passing "" leaves
-// the annotation present-but-empty so absence and a rotation-to-empty stay
-// distinguishable in the pod-template diff. The argument is a separate
-// parameter rather than a PodDefaults field because it changes per-reconcile,
-// not per-operator-process.
 //
 // The container declares a readiness probe wired to tbot's diag /readyz
 // (port "diag", 3001) so pod-Ready means tunnel-up — that's what
@@ -221,7 +235,7 @@ const (
 // platform teams that need to relax them must fork. Consistent with the
 // project's "no escape hatches yet" stance; revisit when a real use case
 // surfaces.
-func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecretVersion string) *appsv1.Deployment {
+func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Deployment {
 	labels := canonicalLabels(cr)
 	replicas := int32(1)
 	if cr.Spec.Replicas != nil {
@@ -243,12 +257,16 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 	allowPrivilegeEscalation := false
 	readOnlyRootFilesystem := true
 
-	// tbot speaks only to the Teleport proxy and to the kube-apiserver
-	// is irrelevant to its job: it has no need for a ServiceAccount
-	// JWT mounted into the pod. Disabling automount keeps the SA token
-	// off the pod's filesystem, narrowing the blast radius of a tbot
-	// pod compromise to the Teleport credentials it already needs.
-	automountServiceAccountToken := false
+	// Per ADR 0004 tbot authenticates to Teleport via the kubernetes
+	// join method, which requires the projected ServiceAccount JWT to
+	// be mounted into the pod. The kubelet only mounts the projected
+	// token when `automountServiceAccountToken` is true (or unset),
+	// so we explicitly opt in here. The blast-radius cost is bounded:
+	// the dedicated per-CR ServiceAccount (renderServiceAccount) has
+	// no RoleBinding and therefore no in-cluster authority beyond
+	// "exists as an identity"; its only job is to be the subject the
+	// Teleport ProvisionToken's `allow` rule pins.
+	automountServiceAccountToken := true
 
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
@@ -279,16 +297,14 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 						// ConfigMap data, not the pod template directly —
 						// still rolls the Deployment via pod-template-hash.
 						AnnotationConfigHash: configHash(cr, cfg),
-						// resourceVersion of the tokenRef Secret. Stamped
-						// every reconcile; a rotation flips the value, the
-						// pod-template-hash changes, and the Deployment
-						// rolls via its existing RollingUpdate strategy.
-						// Empty when the Secret hasn't been observed yet
-						// — keeps the key present so the diff is unambiguous.
-						AnnotationTokenSecretVersion: tokenSecretVersion,
 					},
 				},
 				Spec: corev1.PodSpec{
+					// Per-CR ServiceAccount (renderServiceAccount). The
+					// projected JWT this SA receives is the subject the
+					// Teleport ProvisionToken's `allow` rule pins to —
+					// ADR 0004.
+					ServiceAccountName:           cr.Name,
 					AutomountServiceAccountToken: &automountServiceAccountToken,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
@@ -305,16 +321,6 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 									LocalObjectReference: corev1.LocalObjectReference{
 										Name: cr.Name,
 									},
-								},
-							},
-						},
-						{
-							Name: volumeNameTbotToken,
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									// Name reference only; the operator
-									// never reads this Secret's contents.
-									SecretName: cr.Spec.TokenRef.Name,
 								},
 							},
 						},
@@ -420,11 +426,6 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults, tokenSecret
 								{
 									Name:      volumeNameTbotConfig,
 									MountPath: mountPathTbotConfig,
-									ReadOnly:  true,
-								},
-								{
-									Name:      volumeNameTbotToken,
-									MountPath: mountPathTbotToken,
 									ReadOnly:  true,
 								},
 								{
