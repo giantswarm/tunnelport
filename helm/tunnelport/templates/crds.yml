@@ -39,9 +39,6 @@ spec:
     - jsonPath: .status.ready
       name: Ready
       type: boolean
-    - jsonPath: .status.conditions[?(@.type=='TokenSecretBound')].status
-      name: Token
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -74,7 +71,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: RemoteAppSpec defines the desired state of a RemoteApp.
+            description: |-
+              RemoteAppSpec defines the desired state of a RemoteApp.
+
+              See ADR 0004 for the kubernetes-join semantics: tbot authenticates to
+              Teleport using the projected ServiceAccount JWT (no static-token Secret
+              on the consumer MC), and `TokenName` is the name of the Teleport
+              ProvisionToken resource pre-provisioned on Central.
             properties:
               appName:
                 description: |-
@@ -115,36 +118,29 @@ spec:
                   so absence remains observable in the API.
                 format: int32
                 type: integer
-              tokenRef:
+              tokenName:
                 description: |-
-                  TokenRef references a Secret in the same namespace holding the static
-                  join token for this RemoteApp's TeleportBot.
-                properties:
-                  key:
-                    description: Key inside the Secret holding the join token value.
-                    minLength: 1
-                    type: string
-                  name:
-                    description: Name of the Secret in the same namespace as the RemoteApp.
-                    minLength: 1
-                    type: string
-                required:
-                - key
-                - name
-                type: object
+                  TokenName is the name of the Teleport ProvisionToken on Central that
+                  this RemoteApp's tbot uses to join via the `kubernetes` join method
+                  (per ADR 0004). It is a literal token name, not a Kubernetes Secret
+                  reference — the operator delivers no static token secret on the
+                  consumer MC.
+                minLength: 1
+                type: string
             required:
             - appName
             - port
             - proxyAddr
-            - tokenRef
+            - tokenName
             type: object
           status:
             description: RemoteAppStatus defines the observed state of a RemoteApp.
             properties:
               conditions:
                 description: |-
-                  Conditions report the current state of the RemoteApp. Standard types
-                  are Ready and TokenSecretBound.
+                  Conditions report the current state of the RemoteApp. The only
+                  standard type is `Ready` — the kubernetes-join model (ADR 0004) has
+                  no consumer-side token-Secret state to report.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

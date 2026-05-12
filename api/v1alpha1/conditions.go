@@ -20,8 +20,4 @@ const (
 	// ConditionTypeReady mirrors pod readiness, which is wired to tbot's diag
 	// endpoint reporting tunnel state.
 	ConditionTypeReady = "Ready"
-
-	// ConditionTypeTokenSecretBound is true when the Secret named in
-	// spec.tokenRef.name and key spec.tokenRef.key both exist.
-	ConditionTypeTokenSecretBound = "TokenSecretBound"
 )
