@@ -36,7 +36,7 @@ const (
 
 // renderFixtureOpts is the renderer-test-specific override of
 // newRemoteApp's defaults: namespace="demo", name="tracer", appName="myapp",
-// tokenRef.Name="myapp-token". These match the strings the assertions in
+// tokenName="myapp-token". These match the strings the assertions in
 // this file pin verbatim. The shared newRemoteApp() defaults match the
 // envtest fixtures (name="demo"), so the renderer tests pass these opts
 // to keep their assertions stable.
@@ -44,7 +44,7 @@ var renderFixtureOpts = []fixtureOpt{
 	withName("demo", "tracer"),
 	withUID("uid-tracer"),
 	withAppName("myapp"),
-	withTokenRefName("myapp-token"),
+	withTokenName("myapp-token"),
 }
 
 func fixtureRemoteApp() *accessv1alpha1.RemoteApp {
@@ -89,10 +89,11 @@ func TestRenderConfigMap_ContainsTbotApplicationTunnelConfig(t *testing.T) {
 		"app_name: myapp",
 		"listen: tcp://0.0.0.0:8080",
 		"type: application-tunnel",
-		"join_method: token",
-		// onboarding.token must be the path to the mounted Secret key,
-		// not a literal value — tbot dereferences a path automatically.
-		"token: /etc/tbot-token/token",
+		// Per ADR 0004 tbot joins via the kubernetes join method using
+		// the projected SA JWT; `token` is the literal ProvisionToken
+		// name on Central, not a file path.
+		"join_method: kubernetes",
+		"token: myapp-token",
 		// diag_addr binds the /readyz HTTP endpoint that the pod's
 		// readiness probe (slice 4) targets.
 		"diag_addr: 0.0.0.0:3001",
@@ -160,7 +161,7 @@ func TestRenderConfigMap_NotInsecureByDefault(t *testing.T) {
 func TestRenderDeployment_DefaultsAndStrategy(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	if dep.Name != cr.Name {
 		t.Fatalf("Deployment name: want %q, got %q", cr.Name, dep.Name)
@@ -193,17 +194,17 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 	r := int32(3)
 	cr.Spec.Replicas = &r
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
 		t.Errorf("Deployment replicas: want 3, got %v", dep.Spec.Replicas)
 	}
 }
 
-func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.T) {
+func TestRenderDeployment_PodTemplateMountsConfigMapAndEmptyDir(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	pod := dep.Spec.Template.Spec
 	if len(pod.Containers) != 1 {
@@ -219,24 +220,18 @@ func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.
 		t.Errorf("container missing volumeMount tbot-config; got: %v", mountNames(c.VolumeMounts))
 	}
 
-	// Token Secret volume mounted by name only — no envFrom or readers.
-	if !hasVolume(pod.Volumes, "tbot-token") {
-		t.Errorf("missing volume tbot-token; got: %v", volumeNames(pod.Volumes))
+	// Per ADR 0004 the kubernetes-join model uses the projected SA JWT —
+	// no static-token Secret volume is mounted into the tbot pod.
+	if hasVolume(pod.Volumes, "tbot-token") {
+		t.Errorf("tbot-token volume must NOT exist under kubernetes-join model; got volumes: %v", volumeNames(pod.Volumes))
 	}
-	tokenVol := volumeByName(pod.Volumes, "tbot-token")
-	if tokenVol == nil || tokenVol.Secret == nil {
-		t.Fatalf("tbot-token volume must be a Secret volume; got %+v", tokenVol)
+	if hasMount(c.VolumeMounts, "tbot-token") {
+		t.Errorf("tbot-token mount must NOT exist under kubernetes-join model; got mounts: %v", mountNames(c.VolumeMounts))
 	}
-	if tokenVol.Secret.SecretName != cr.Spec.TokenRef.Name {
-		t.Errorf("tbot-token volume secretName: want %q, got %q",
-			cr.Spec.TokenRef.Name, tokenVol.Secret.SecretName)
-	}
-	// Reconciler must NOT inject the token via env / envFrom — that would
-	// require reading the Secret's contents (forbidden).
+	// Reconciler must NOT inject anything from a Secret via env / envFrom.
 	for _, e := range c.Env {
-		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
-			e.ValueFrom.SecretKeyRef.Name == cr.Spec.TokenRef.Name {
-			t.Errorf("container env %q references token Secret directly; pod must mount the Secret as a volume only", e.Name)
+		if e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
+			t.Errorf("container env %q references a Secret directly; the kubernetes-join model has no token Secret", e.Name)
 		}
 	}
 	if len(c.EnvFrom) > 0 {
@@ -256,11 +251,52 @@ func TestRenderDeployment_PodTemplateMountsConfigMapTokenAndEmptyDir(t *testing.
 	}
 }
 
+// TestRenderServiceAccount_NameMatchesCR pins the per-CR ServiceAccount
+// the kubernetes-join model (ADR 0004) requires.
+func TestRenderServiceAccount_NameMatchesCR(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	sa := renderServiceAccount(cr, fixtureConfig())
+
+	if sa.Name != cr.Name {
+		t.Errorf("ServiceAccount name: want %q, got %q", cr.Name, sa.Name)
+	}
+	if sa.Namespace != cr.Namespace {
+		t.Errorf("ServiceAccount namespace: want %q, got %q", cr.Namespace, sa.Namespace)
+	}
+	if got, want := sa.Labels[LabelRole], LabelRoleValue; got != want {
+		t.Errorf("ServiceAccount labels[%s]: want %q, got %q", LabelRole, want, got)
+	}
+	if got, want := sa.Labels[LabelRemoteAppInstance], cr.Name; got != want {
+		t.Errorf("ServiceAccount labels[%s]: want %q, got %q", LabelRemoteAppInstance, want, got)
+	}
+	if sa.Kind != "ServiceAccount" || sa.APIVersion != "v1" {
+		t.Errorf("ServiceAccount TypeMeta: want v1/ServiceAccount, got %q/%q", sa.APIVersion, sa.Kind)
+	}
+}
+
+// TestRenderDeployment_PodTemplateUsesPerCRServiceAccount asserts the pod
+// template binds to the rendered ServiceAccount and opts into the
+// projected token mount the kubernetes-join model needs.
+func TestRenderDeployment_PodTemplateUsesPerCRServiceAccount(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig())
+	pod := dep.Spec.Template.Spec
+
+	if pod.ServiceAccountName != cr.Name {
+		t.Errorf("PodSpec.ServiceAccountName: want %q (cr.Name), got %q", cr.Name, pod.ServiceAccountName)
+	}
+	if pod.AutomountServiceAccountToken == nil || !*pod.AutomountServiceAccountToken {
+		t.Errorf("PodSpec.AutomountServiceAccountToken: want true (ADR 0004 needs the projected JWT); got %v", pod.AutomountServiceAccountToken)
+	}
+}
+
 func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 	cr := fixtureRemoteApp()
 	cfg := fixtureConfig()
 
-	dep := renderDeployment(cr, cfg, "")
+	dep := renderDeployment(cr, cfg)
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.Image != cfg.TbotImage {
@@ -281,7 +317,7 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if len(c.Ports) == 0 {
@@ -302,7 +338,7 @@ func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	c := dep.Spec.Template.Spec.Containers[0]
 
@@ -353,7 +389,7 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	// Pod-level securityContext.
 	pc := dep.Spec.Template.Spec.SecurityContext
@@ -398,7 +434,7 @@ func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 	pod := dep.Spec.Template.Spec
 
 	tmp := volumeByName(pod.Volumes, "tbot-tmp")
@@ -433,7 +469,7 @@ func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.
 func TestRenderDeployment_LivenessProbe(t *testing.T) {
 	cr := fixtureRemoteApp()
 
-	dep := renderDeployment(cr, fixtureConfig(), "")
+	dep := renderDeployment(cr, fixtureConfig())
 
 	c := dep.Spec.Template.Spec.Containers[0]
 	if c.LivenessProbe == nil {

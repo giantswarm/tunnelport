@@ -79,19 +79,6 @@ func setPodStatus(ctx context.Context, t *testing.T, pod *corev1.Pod, mut func(s
 	*pod = *got
 }
 
-// makeTokenSecret creates a Secret with the named key so the
-// TokenSecretBound condition can flip to True.
-func makeTokenSecret(ctx context.Context, t *testing.T, ns, name, key string) {
-	t.Helper()
-	s := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Data:       map[string][]byte{key: []byte("test-token-value")},
-	}
-	if err := testClient.Create(ctx, s); err != nil {
-		t.Fatalf("create token Secret: %v", err)
-	}
-}
-
 func getRemoteApp(ctx context.Context, t *testing.T, key types.NamespacedName) *accessv1alpha1.RemoteApp {
 	t.Helper()
 	got := &accessv1alpha1.RemoteApp{}
@@ -143,75 +130,6 @@ func TestStatus_ObservedGenerationTracksSpecChanges(t *testing.T) {
 	})
 }
 
-// TestStatus_TokenSecretBoundFalseWhenSecretMissing exercises the
-// pre-Secret state: CR exists, Secret doesn't, condition reflects it.
-func TestStatus_TokenSecretBoundFalseWhenSecretMissing(t *testing.T) {
-	ctx := context.Background()
-	ns := uniqueNS(t, ctx)
-
-	cr := makeRemoteApp(ctx, t, ns, "no-secret")
-	key := client.ObjectKeyFromObject(cr)
-
-	eventually(t, func() (bool, error) {
-		got := getRemoteApp(ctx, t, key)
-		c := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-		if c == nil {
-			return false, fmt.Errorf("TokenSecretBound condition not yet set")
-		}
-		if c.Status != metav1.ConditionFalse {
-			return false, fmt.Errorf("TokenSecretBound: want False, got %q (reason=%q)", c.Status, c.Reason)
-		}
-		return true, nil
-	})
-}
-
-// TestStatus_TokenSecretBoundTrueWhenSecretAndKeyExist exercises the
-// happy-path bind: Secret exists *and* the named key is present.
-func TestStatus_TokenSecretBoundTrueWhenSecretAndKeyExist(t *testing.T) {
-	ctx := context.Background()
-	ns := uniqueNS(t, ctx)
-
-	cr := makeRemoteApp(ctx, t, ns, "with-secret")
-	makeTokenSecret(ctx, t, ns, cr.Spec.TokenRef.Name, cr.Spec.TokenRef.Key)
-	key := client.ObjectKeyFromObject(cr)
-
-	eventually(t, func() (bool, error) {
-		got := getRemoteApp(ctx, t, key)
-		c := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-		if c == nil {
-			return false, fmt.Errorf("TokenSecretBound condition not yet set")
-		}
-		if c.Status != metav1.ConditionTrue {
-			return false, fmt.Errorf("TokenSecretBound: want True, got %q (reason=%q)", c.Status, c.Reason)
-		}
-		return true, nil
-	})
-}
-
-// TestStatus_TokenSecretBoundFalseWhenKeyMissing covers the case where
-// the Secret exists but the operator-named key isn't present.
-func TestStatus_TokenSecretBoundFalseWhenKeyMissing(t *testing.T) {
-	ctx := context.Background()
-	ns := uniqueNS(t, ctx)
-
-	cr := makeRemoteApp(ctx, t, ns, "wrong-key")
-	// Secret exists with a different key name.
-	makeTokenSecret(ctx, t, ns, cr.Spec.TokenRef.Name, "not-the-right-key")
-	key := client.ObjectKeyFromObject(cr)
-
-	eventually(t, func() (bool, error) {
-		got := getRemoteApp(ctx, t, key)
-		c := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-		if c == nil {
-			return false, fmt.Errorf("TokenSecretBound condition not yet set")
-		}
-		if c.Status != metav1.ConditionFalse {
-			return false, fmt.Errorf("TokenSecretBound: want False, got %q (reason=%q)", c.Status, c.Reason)
-		}
-		return true, nil
-	})
-}
-
 // TestStatus_HealthyPodFlipsReadyTrue creates a pod, marks it Ready, and
 // verifies the RemoteApp status flips Ready=true and lastError=empty.
 // envtest has no kubelet, so the test owns the Pod's Status subresource.
@@ -251,9 +169,12 @@ func TestStatus_HealthyPodFlipsReadyTrue(t *testing.T) {
 	})
 }
 
-// TestStatus_PendingPodSurfacesVolumeMountFailure mirrors the GitOps-race
-// case: the CR exists, the Secret doesn't, the pod sits in
-// ContainerCreating with the kubelet's mount-failure message.
+// TestStatus_PendingPodSurfacesVolumeMountFailure pins that the operator
+// surfaces a kubelet-visible mount-failure message verbatim, regardless
+// of which volume is failing. The exact message used here is synthetic
+// (a ConfigMap-not-found stand-in) — under the kubernetes-join model
+// the tbot pod no longer mounts a token Secret, so this test asserts
+// the propagation path, not a specific failure cause.
 func TestStatus_PendingPodSurfacesVolumeMountFailure(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
@@ -272,7 +193,7 @@ func TestStatus_PendingPodSurfacesVolumeMountFailure(t *testing.T) {
 				State: corev1.ContainerState{
 					Waiting: &corev1.ContainerStateWaiting{
 						Reason:  "ContainerCreating",
-						Message: `MountVolume.SetUp failed for volume "tbot-token" : secret "demo-token" not found`,
+						Message: `MountVolume.SetUp failed for volume "tbot-config" : configmap "demo" not found`,
 					},
 				},
 			},
@@ -287,7 +208,7 @@ func TestStatus_PendingPodSurfacesVolumeMountFailure(t *testing.T) {
 		if !strings.Contains(got.Status.LastError, "ContainerCreating") {
 			return false, fmt.Errorf("lastError missing ContainerCreating: %q", got.Status.LastError)
 		}
-		if !strings.Contains(got.Status.LastError, `secret "demo-token" not found`) {
+		if !strings.Contains(got.Status.LastError, `configmap "demo" not found`) {
 			return false, fmt.Errorf("lastError missing mount message: %q", got.Status.LastError)
 		}
 		return true, nil

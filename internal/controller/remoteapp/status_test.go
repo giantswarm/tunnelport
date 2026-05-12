@@ -345,21 +345,18 @@ func TestSummarizeStatus_PicksHighestSeverityRegardlessOfOrder(t *testing.T) {
 	}
 }
 
-// computeStatus is the pure end-to-end synthesis: pods + token Secret view
-// → full RemoteAppStatus. Driven from a table; pins the exact Reason
-// strings that automation pattern-matches on.
+// computeStatus is the pure end-to-end synthesis: pods → full
+// RemoteAppStatus. Driven from a table; pins the exact Reason strings
+// automation pattern-matches on. Per ADR 0004 the only condition
+// computeStatus emits is `Ready`.
 
 func TestComputeStatus(t *testing.T) {
-	// computeStatus consumes only ObjectMeta + spec.TokenRef from the CR;
-	// the rest of the fixture's defaults are inert here. Bumping Generation
-	// to 7 inline rather than carrying a named option for it — only this
+	// computeStatus consumes only ObjectMeta from the CR; the rest of
+	// the fixture's defaults are inert here. Bumping Generation to 7
+	// inline rather than carrying a named option for it — only this
 	// one test needs that knob.
-	cr := newRemoteApp(withName("demo", "ra"), withTokenRefName("tok"))
+	cr := newRemoteApp(withName("demo", "ra"), withTokenName("tok"))
 	cr.Generation = 7
-	bound := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: true}
-	missing := TokenSecretView{Name: "tok", Key: "token"}
-	keyAbsent := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: false}
-	fetchErr := TokenSecretView{Name: "tok", Key: "token", FetchErr: stubErr("api unavailable")}
 
 	readyPod := corev1.Pod{Status: corev1.PodStatus{
 		Phase:      corev1.PodRunning,
@@ -378,36 +375,21 @@ func TestComputeStatus(t *testing.T) {
 	cases := []struct {
 		name          string
 		pods          []corev1.Pod
-		view          TokenSecretView
 		wantReady     bool
 		wantLastError string // substring match
 		wantReadyRsn  string
-		wantTokenRsn  string
-		wantTokenStat metav1.ConditionStatus
 	}{
-		{name: "no pods, secret bound", pods: nil, view: bound,
-			wantReady: false, wantLastError: "no tbot pods",
-			wantReadyRsn: "NoPods", wantTokenRsn: "Bound", wantTokenStat: metav1.ConditionTrue},
-		{name: "ready pod, secret bound", pods: []corev1.Pod{readyPod}, view: bound,
-			wantReady: true, wantLastError: "",
-			wantReadyRsn: "TunnelReady", wantTokenRsn: "Bound", wantTokenStat: metav1.ConditionTrue},
-		{name: "crashloop pod, secret bound", pods: []corev1.Pod{crashPod}, view: bound,
-			wantReady: false, wantLastError: "CrashLoopBackOff",
-			wantReadyRsn: "PodNotReady", wantTokenRsn: "Bound", wantTokenStat: metav1.ConditionTrue},
-		{name: "ready pod, secret missing", pods: []corev1.Pod{readyPod}, view: missing,
-			wantReady: true, wantLastError: "",
-			wantReadyRsn: "TunnelReady", wantTokenRsn: "SecretNotFound", wantTokenStat: metav1.ConditionFalse},
-		{name: "ready pod, key absent", pods: []corev1.Pod{readyPod}, view: keyAbsent,
-			wantReady: true, wantLastError: "",
-			wantReadyRsn: "TunnelReady", wantTokenRsn: "KeyNotFound", wantTokenStat: metav1.ConditionFalse},
-		{name: "no pods, secret fetch error", pods: nil, view: fetchErr,
-			wantReady: false, wantLastError: "no tbot pods",
-			wantReadyRsn: "NoPods", wantTokenRsn: "SecretGetError", wantTokenStat: metav1.ConditionFalse},
+		{name: "no pods", pods: nil,
+			wantReady: false, wantLastError: "no tbot pods", wantReadyRsn: "NoPods"},
+		{name: "ready pod", pods: []corev1.Pod{readyPod},
+			wantReady: true, wantLastError: "", wantReadyRsn: "TunnelReady"},
+		{name: "crashloop pod", pods: []corev1.Pod{crashPod},
+			wantReady: false, wantLastError: "CrashLoopBackOff", wantReadyRsn: "PodNotReady"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeStatus(cr, tc.pods, tc.view, nil)
+			got := computeStatus(cr, tc.pods, nil)
 			if got.Ready != tc.wantReady {
 				t.Errorf("Ready: want %v, got %v", tc.wantReady, got.Ready)
 			}
@@ -421,11 +403,6 @@ func TestComputeStatus(t *testing.T) {
 			if rc == nil || rc.Reason != tc.wantReadyRsn {
 				t.Errorf("Ready condition reason: want %q, got %v", tc.wantReadyRsn, rc)
 			}
-			tc2 := findCond(got.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-			if tc2 == nil || tc2.Reason != tc.wantTokenRsn || tc2.Status != tc.wantTokenStat {
-				t.Errorf("TokenSecretBound condition: want reason=%q status=%q, got %+v",
-					tc.wantTokenRsn, tc.wantTokenStat, tc2)
-			}
 		})
 	}
 }
@@ -438,7 +415,3 @@ func findCond(cs []metav1.Condition, t string) *metav1.Condition {
 	}
 	return nil
 }
-
-type stubErr string
-
-func (e stubErr) Error() string { return string(e) }
