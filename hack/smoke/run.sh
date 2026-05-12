@@ -52,9 +52,9 @@ CURL_WAIT="${CURL_WAIT:-120}"
 
 TMP=/tmp
 PRODUCER_TOKEN_FILE="${TMP}/smoke-producer-agent-token"
-BOT_TOKEN_FILE="${TMP}/smoke-bot-token"
 TELEPORT_VALUES_FILE="${TMP}/smoke-teleport-values.yaml"
 KUBE_AGENT_VALUES_FILE="${TMP}/smoke-kube-agent-values.yaml"
+SMOKE_BOT_TOKEN_FILE="${TMP}/smoke-bot-token.yaml"
 
 # ---------------------------------------------------------------------
 # Logging + lifecycle.
@@ -72,8 +72,8 @@ teardown() {
   for c in consumer producer teleport; do
     kind delete cluster --name "$c" >/dev/null 2>&1 || true
   done
-  rm -f "$PRODUCER_TOKEN_FILE" "$BOT_TOKEN_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE"
-  rm -f "${TMP}/smoke-bot-token.json" "${TMP}/smoke-producer-agent-token.json"
+  rm -f "$PRODUCER_TOKEN_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE" "$SMOKE_BOT_TOKEN_FILE"
+  rm -f "${TMP}/smoke-producer-agent-token.json"
 }
 
 dump_diag() {
@@ -169,7 +169,7 @@ helm --kube-context kind-teleport upgrade teleport-cluster \
   --namespace teleport --values "${TELEPORT_VALUES_FILE}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
-step "Provisioning Teleport role, bot, and tokens via tctl"
+step "Provisioning Teleport role, bot, and producer agent token via tctl"
 AUTH_POD="$(kubectl --context kind-teleport -n teleport get pods \
   -l app.kubernetes.io/component=auth -o jsonpath='{.items[0].metadata.name}')"
 
@@ -177,18 +177,20 @@ AUTH_POD="$(kubectl --context kind-teleport -n teleport get pods \
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/role.yaml >/dev/null
 
-# Producer agent (Node+App) join token.
+# Producer agent (Node+App) join token — still a static token; the
+# producer side of the smoke is out of scope for the kubernetes-join
+# migration (ADR 0004 is about the consumer-side tbot only).
 kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
   tctl tokens add --type=node,app --format=json \
   > "${TMP}/smoke-producer-agent-token.json"
 jq -r .token "${TMP}/smoke-producer-agent-token.json" > "${PRODUCER_TOKEN_FILE}"
 
-# Bot identity + bot token in one call. `tctl bots add` is the v18 idiom;
-# the token comes back as `token_id` in the JSON.
-kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-  tctl bots add smoke-bot --roles=smoke-app-tunnel --format=json \
-  > "${TMP}/smoke-bot-token.json"
-jq -r .token_id "${TMP}/smoke-bot-token.json" > "${BOT_TOKEN_FILE}"
+# Bot identity. Under ADR 0004 the bot's join token is created
+# separately (kubernetes join method + static_jwks pinned to the
+# consumer cluster) — we cannot create it yet because we need the
+# consumer kind cluster's JWKS first.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/bot.yaml >/dev/null
 
 step "Bringing up the producer (http-echo + teleport-kube-agent)"
 kubectl --context kind-producer apply -f hack/smoke/producer/http-echo.yaml >/dev/null
@@ -231,20 +233,41 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set tbot.insecure=true \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
-step "Delivering the bot token Secret to the consumer cluster"
-kubectl --context kind-consumer create namespace smoke >/dev/null 2>&1 || true
-# The operator's informer cache is scoped to Secrets carrying
-# `tunnelport.giantswarm.io/role=token-secret`. Without this label the
-# Secret is invisible to the operator and TokenSecretBound stays False,
-# so the smoke would never reach status.ready=true.
-kubectl --context kind-consumer -n smoke create secret generic smoke-bot-token \
-  --from-literal=token="$(cat "${BOT_TOKEN_FILE}")" \
-  --dry-run=client -o yaml \
-  | kubectl --context kind-consumer apply -f - >/dev/null
-kubectl --context kind-consumer -n smoke label secret smoke-bot-token \
-  tunnelport.giantswarm.io/role=token-secret --overwrite >/dev/null
+step "Exporting consumer cluster JWKS and creating the kubernetes-join bot token"
+# ADR 0004: the bot token's `static_jwks` block is the consumer kind
+# cluster's `/openid/v1/jwks` document. Teleport auth validates the
+# tbot pod's projected SA JWT against that JWKS at join time.
+JWKS_JSON="$(kubectl --context kind-consumer get --raw /openid/v1/jwks | jq -c .)"
+if [[ -z "${JWKS_JSON}" || "${JWKS_JSON}" == "null" ]]; then
+  warn "consumer cluster's /openid/v1/jwks returned no document"
+  exit 1
+fi
+export JWKS_JSON
+
+# Render the kubernetes-join token from tokens.yaml with the JWKS
+# substituted, then create it on Central. We take only the smoke-bot-
+# token document — the producer-agent-token in the same file is the
+# reference shape for that side of the smoke; the actual producer
+# token was generated server-side via `tctl tokens add` above (with a
+# random name) and is unrelated to this apply. The `allow` rule pins
+# the per-CR ServiceAccount the operator renders for this RemoteApp
+# ("smoke:smoke-app").
+python3 - <<'PYEOF' > "${SMOKE_BOT_TOKEN_FILE}"
+import json, os, pathlib
+src = pathlib.Path('hack/smoke/teleport/tokens.yaml').read_text()
+docs = src.split('\n---\n', 1)
+bot_doc = docs[1] if len(docs) == 2 else docs[0]
+# JSON-encode the JWKS string so embedded quotes survive the YAML
+# round-trip safely.
+bot_doc = bot_doc.replace('REPLACE_WITH_CONSUMER_JWKS', json.dumps(os.environ['JWKS_JSON']))
+print(bot_doc)
+PYEOF
+
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < "${SMOKE_BOT_TOKEN_FILE}" >/dev/null
 
 step "Applying the RemoteApp CR"
+kubectl --context kind-consumer create namespace smoke >/dev/null 2>&1 || true
 sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
   hack/smoke/consumer/remoteapp.yaml \
   | kubectl --context kind-consumer apply -f - >/dev/null

@@ -1,20 +1,25 @@
-# Two static join tokens for the smoke environment.
+# Two join tokens for the smoke environment.
 #
-#  1) producer-agent-token    — used by the producer cluster's
+#  1) producer-agent-token  — used by the producer cluster's
 #     teleport-kube-agent to register the smoke app with Teleport.
-#     Roles: [Node, App].
+#     Roles: [Node, App]. Static token (the producer-side agent is
+#     not the migration target).
 #
-#  2) smoke-bot-token         — used by the consumer cluster's tbot
+#  2) smoke-bot-token       — used by the consumer cluster's tbot
 #     (rendered by the operator) to join as the smoke-bot identity.
-#     Role: [Bot]. The `bot_name` field MUST match the bot's metadata
-#     name in bot.yaml.
+#     Role: [Bot]. Join method `kubernetes` with `static_jwks` trust
+#     per ADR 0004. The placeholder `static_jwks.jwks` value is
+#     replaced at smoke-time with the consumer kind cluster's
+#     `/openid/v1/jwks` document (see hack/smoke/run.sh).
 #
 # Apply with:
 #   tctl create -f hack/smoke/teleport/tokens.yaml
 #
-# The runbook captures the literal token strings — these YAML values
-# are placeholders. Replace before applying, or generate via
-# `tctl tokens add` and skip this file entirely.
+# The runbook captures the literal producer-agent-token string —
+# that's still a static token. The kubernetes-method bot token has
+# no value to capture: tbot proves its identity with the consumer
+# cluster's projected SA JWT, and Teleport validates it against the
+# JWKS pinned on this token.
 kind: token
 version: v2
 metadata:
@@ -36,7 +41,15 @@ spec:
   roles:
     - Bot
   bot_name: smoke-bot
-  join_method: token
-  # Replace before applying. The same value goes into the consumer
-  # cluster's token Secret (token-secret.yaml.template).
-  token: REPLACE_WITH_SMOKE_BOT_TOKEN
+  join_method: kubernetes
+  kubernetes:
+    type: static_jwks
+    static_jwks:
+      # Replaced at smoke-time with the consumer kind cluster's
+      # `/openid/v1/jwks` document (single line, JSON).
+      jwks: REPLACE_WITH_CONSUMER_JWKS
+    allow:
+      # The ServiceAccount projected JWT the rendered tbot pod
+      # presents. The operator renders one SA per RemoteApp; the
+      # name matches the CR name (CONTEXT.md "canonicalLabels").
+      - service_account: "smoke:smoke-app"

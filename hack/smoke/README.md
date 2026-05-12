@@ -151,29 +151,24 @@ declarative path, replace `REPLACE_WITH_PRODUCER_AGENT_TOKEN` in
 `tokens.yaml` with a value of your own and `tctl create -f` it
 instead.
 
-## 4. Provision the role, bot, and bot token
+## 4. Provision the role and bot identity
+
+Under ADR 0004 the bot token uses the **kubernetes** join method,
+which means it's bound to the consumer cluster's JWKS — and we don't
+have the consumer cluster yet. So this step only creates the role and
+the bot identity; the kubernetes-method token is created in step 6c
+after the consumer cluster is up and we can read its JWKS.
 
 ```bash
 # 4a. Role (allows the bot to tunnel to apps labelled app-name=smoke-app):
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/role.yaml
 
-# 4b. Bot identity AND its static join token in a single call.
-#     `tctl bots add` returns the token in the JSON output as `token_id`.
-#     This is the v18 idiom — there is no `tctl bots tokens add`
-#     subcommand, and `tctl tokens add --type=bot` does not accept a
-#     `--bot-name` flag.
-kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-  tctl bots add smoke-bot --roles=smoke-app-tunnel --format=json \
-  > /tmp/smoke-bot-token.json
-jq -r .token_id /tmp/smoke-bot-token.json > /tmp/smoke-bot-token
-
-cat /tmp/smoke-bot-token   # sanity: a hex string
+# 4b. Bot identity (no token yet — the kubernetes-method token is
+#     created in step 6c).
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/bot.yaml
 ```
-
-`tctl bots add` produces a token whose `roles: [Bot]` and
-`bot_name: smoke-bot` are wired correctly without you authoring the
-YAML.
 
 ## 5. Bring up the producer cluster
 
@@ -251,21 +246,33 @@ This is what catches major-version skew between the chart-default
 tbot and the Teleport server tested above. The default flows through
 to the rendered tbot Deployment in step 6d.
 
-### 6c. Deliver the bot token Secret
+### 6c. Export the consumer cluster's JWKS and create the kubernetes-method bot token
 
-For the smoke environment we use plain `kubectl create secret`. In
-production this is replaced by sealed-secrets / external-secrets-
-operator / your team's chosen pattern.
+Under ADR 0004 the bot token has no static value — Teleport
+authenticates the joining tbot pod by validating its projected
+ServiceAccount JWT against a JWKS pinned on the token. The JWKS is
+the consumer kind cluster's `/openid/v1/jwks` document.
 
 ```bash
-kubectl --context kind-consumer create namespace smoke || true
-kubectl --context kind-consumer -n smoke create secret generic smoke-bot-token \
-  --from-literal=token=$(cat /tmp/smoke-bot-token)
+# Read the consumer cluster's JWKS (single JSON line).
+JWKS_JSON=$(kubectl --context kind-consumer get --raw /openid/v1/jwks | jq -c .)
+
+# Render the kubernetes-method token from the reference YAML, substituting
+# the JWKS into the static_jwks block, then create it on Central.
+python3 - <<PYEOF | kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- tctl create -f -
+import json, os, pathlib
+src = pathlib.Path('hack/smoke/teleport/tokens.yaml').read_text()
+bot_doc = src.split('\n---\n', 1)[1]
+bot_doc = bot_doc.replace('REPLACE_WITH_CONSUMER_JWKS', json.dumps(os.environ['JWKS_JSON']))
+print(bot_doc)
+PYEOF
 ```
 
-Alternative: edit `hack/smoke/consumer/token-secret.yaml.template`,
-replacing `REPLACE_WITH_SMOKE_BOT_TOKEN` with the literal token, and
-`kubectl apply -f` it.
+There is no consumer-side Secret to deliver — the operator no longer
+needs one. The rendered tbot pod runs under a per-CR ServiceAccount
+(named after the RemoteApp), and the kubelet projects the SA's JWT
+into the pod automatically. The token's `allow` rule
+(`service_account: "smoke:smoke-app"`) pins exactly that SA.
 
 ### 6d. Apply the RemoteApp CR
 
@@ -313,7 +320,7 @@ from the consumer cluster proves the data path works: curl → Service
 kind delete cluster --name consumer
 kind delete cluster --name producer
 kind delete cluster --name teleport
-rm /tmp/producer-agent-token /tmp/smoke-bot-token /tmp/*.json /tmp/producer-kube-agent-values.yaml
+rm /tmp/producer-agent-token /tmp/*.json /tmp/producer-kube-agent-values.yaml /tmp/smoke-bot-token.yaml
 ```
 
 ## Troubleshooting
@@ -350,23 +357,21 @@ The most common smoke-test failures:
   installed before the chart's `pods` rule was committed. `helm
   upgrade` from the current chart in this repo and the error clears.
 
-**`status.conditions[TokenSecretBound]: false`.**
-The operator can't find the Secret or the named key. Confirm:
-
-```bash
-kubectl --context kind-consumer -n smoke get secret smoke-bot-token \
-  -o jsonpath='{.data.token}' | base64 -d | head -c 8
-```
-
-You should see the first 8 hex chars of the token. If the field is
-empty, redo step 6c.
-
 **The curl Job fails with `Connection refused`.**
 The tbot pod is up but the tunnel isn't established. The Job's
 `--retry-connrefused` should ride this out; if it doesn't, the bot
-token in the Secret doesn't match the one Teleport issued. The
-`smoke-bot-token` files written in step 4 and the Secret in step 6c
-must be the same string.
+token's kubernetes `allow` rule is mismatched against the rendered
+ServiceAccount. Check that the token's
+`spec.kubernetes.allow[0].service_account` is exactly
+`<RemoteApp.namespace>:<RemoteApp.name>` (here `smoke:smoke-app`) —
+that's the canonical name the operator stamps on every owned object,
+including the per-CR ServiceAccount.
+
+**`status.lastError` shows `invalid bearer token` / `kubernetes join
+failed`.**
+The consumer cluster's JWKS has rotated since the token was created,
+or the JWKS substituted into the token in step 6c was for a different
+cluster. Re-run step 6c to refresh the token's JWKS block.
 
 ## Production differences
 
@@ -376,7 +381,7 @@ production-targeting differences:
 | Smoke (this runbook) | Production |
 |---|---|
 | Self-signed CA, `--insecure` everywhere | A real Teleport cluster with a CA bundle the agents trust |
-| `kubectl create secret` for the bot token | sealed-secrets / external-secrets-operator / GitOps secret-sync |
-| `tctl` from a host shell | `TeleportBot` / `TeleportRole` / `TeleportToken` via the Giant Swarm Teleport Operator on Central |
-| One bot per smoke test | One bot **per RemoteApp**, scoped to a single app via `app_labels`. The operator does not enforce this — it's a Central-side policy decision per ADR 0001 |
+| Hand-rolled `tctl create -f` for the kubernetes-method token | `TeleportBot` / `TeleportRole` / `TeleportToken` via the Giant Swarm Teleport Operator on Central |
+| `tctl` from a host shell | Same Central-managed pipeline |
+| One bot per smoke test | One bot **per RemoteApp**, with the token's `kubernetes.allow` pinned to that one CR's ServiceAccount (per-app blast-radius isolation, ADR 0004) |
 | `proxyAddr` is a kind-network IP | A stable hostname resolvable from the consumer MC (e.g. `teleport.example.com:443`) |
