@@ -162,6 +162,14 @@ func renderConfigMap(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.Conf
 const (
 	volumeNameTbotConfig  = "tbot-config"
 	volumeNameTbotStorage = "tbot-storage"
+	// volumeNameTbotJoinSAToken backs the projected ServiceAccount JWT
+	// the kubernetes-join model (ADR 0004) requires. The kubelet projects
+	// a fresh JWT whose `aud` claim matches `cr.Spec.ClusterName` and
+	// whose TTL is below Teleport's 30-minute static_jwks ceiling. The
+	// default automounted SA token at
+	// /var/run/secrets/kubernetes.io/serviceaccount/token carries the
+	// kube-apiserver's default audience, which Teleport rejects.
+	volumeNameTbotJoinSAToken = "join-sa-token"
 	// volumeNameTbotTmp backs /tmp because the container runs with
 	// readOnlyRootFilesystem: true. tbot and its transitive deps may write
 	// scratch files (Go runtime, glibc resolver caches, etc.); keeping /tmp
@@ -169,9 +177,17 @@ const (
 	// root-fs hardening.
 	volumeNameTbotTmp = "tbot-tmp"
 
-	mountPathTbotConfig  = "/etc/tbot"
-	mountPathTbotStorage = "/var/lib/tbot"
-	mountPathTbotTmp     = "/tmp"
+	mountPathTbotConfig      = "/etc/tbot"
+	mountPathTbotStorage     = "/var/lib/tbot"
+	mountPathTbotJoinSAToken = "/var/run/secrets/tokens"
+	tbotJoinSATokenFileName  = "join-sa-token"
+	mountPathTbotTmp         = "/tmp"
+
+	// joinSATokenExpirationSeconds is the kubelet's projected SA token
+	// TTL. 600 is the kubelet minimum (lower values are silently raised)
+	// and well under Teleport's 30-minute static_jwks ceiling; the
+	// upstream tbot Helm chart uses the same value.
+	joinSATokenExpirationSeconds int64 = 600
 
 	// tbotDiagPort is tbot's diagnostics HTTP listener. We render
 	// `diag_addr: 0.0.0.0:tbotDiagPort` in tbot.yaml (see
@@ -325,6 +341,26 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							},
 						},
 						{
+							// Projected ServiceAccount JWT with the
+							// Teleport cluster name as audience and a
+							// short TTL — the shape `static_jwks`
+							// validation requires (ADR 0004).
+							Name: volumeNameTbotJoinSAToken,
+							VolumeSource: corev1.VolumeSource{
+								Projected: &corev1.ProjectedVolumeSource{
+									Sources: []corev1.VolumeProjection{
+										{
+											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+												Path:              tbotJoinSATokenFileName,
+												Audience:          cr.Spec.ClusterName,
+												ExpirationSeconds: ptr(joinSATokenExpirationSeconds),
+											},
+										},
+									},
+								},
+							},
+						},
+						{
 							Name: volumeNameTbotStorage,
 							VolumeSource: corev1.VolumeSource{
 								EmptyDir: &corev1.EmptyDirVolumeSource{},
@@ -358,6 +394,20 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							// has `teleport` as its entrypoint, which would
 							// reject `start -c …` with "unexpected start".
 							Command: []string{"tbot"},
+							// KUBERNETES_TOKEN_PATH tells tbot to read its
+							// join JWT from the projected SA token volume
+							// (audience = cr.Spec.ClusterName). Without
+							// this, tbot falls back to
+							// /var/run/secrets/kubernetes.io/serviceaccount/token,
+							// whose audience is the kube-apiserver's
+							// default — Teleport rejects that as
+							// "invalid audience claim".
+							Env: []corev1.EnvVar{
+								{
+									Name:  "KUBERNETES_TOKEN_PATH",
+									Value: mountPathTbotJoinSAToken + "/" + tbotJoinSATokenFileName,
+								},
+							},
 							Args: []string{
 								"start",
 								"-c", mountPathTbotConfig + "/tbot.yaml",
@@ -429,6 +479,11 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 									ReadOnly:  true,
 								},
 								{
+									Name:      volumeNameTbotJoinSAToken,
+									MountPath: mountPathTbotJoinSAToken,
+									ReadOnly:  true,
+								},
+								{
 									Name:      volumeNameTbotStorage,
 									MountPath: mountPathTbotStorage,
 								},
@@ -490,4 +545,11 @@ func renderService(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.Service 
 func configHash(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	sum := sha256.Sum256([]byte(tbotConfig(cr, cfg)))
 	return hex.EncodeToString(sum[:])
+}
+
+// ptr returns a pointer to v. The Kubernetes core types still use pointer
+// fields for optional scalars, and the local helper keeps the call sites
+// in renderDeployment readable without importing a third-party helper.
+func ptr[T any](v T) *T {
+	return &v
 }

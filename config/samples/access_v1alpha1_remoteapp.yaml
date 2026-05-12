@@ -13,3 +13,7 @@ spec:
   # kubernetes-join model (ADR 0004) does not deliver a static-token
   # Secret on the consumer cluster.
   tokenName: my-app-bot
+  # The Teleport cluster name. The rendered tbot pod projects its
+  # ServiceAccount JWT with this value as the `aud` claim, which
+  # Teleport's `static_jwks` validator pins on its side.
+  clusterName: teleport.example.com

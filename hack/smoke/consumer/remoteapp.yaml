@@ -34,3 +34,10 @@ spec:
   # projected SA JWT for the per-CR ServiceAccount the operator
   # renders. No static-token Secret on the consumer cluster.
   tokenName: smoke-bot-token
+
+  # The Teleport cluster name on Central. The rendered tbot pod
+  # projects its ServiceAccount JWT with this value as the `aud`
+  # claim, which Teleport's static_jwks validator pins on its
+  # side. Matches the `clusterName:` field in
+  # hack/smoke/teleport/helm-values.yaml.
+  clusterName: smoke.tunnelport.local

@@ -105,10 +105,22 @@ make docker-build IMG="${OPERATOR_IMAGE}" >/dev/null
 # and local-path-provisioner then crashloop on the 2nd/3rd cluster. The
 # kind project documents these as the recommended values:
 # https://kind.sigs.k8s.io/docs/user/known-issues/
-if command -v sudo >/dev/null 2>&1; then
-  step "Raising inotify limits (kind multi-cluster requirement)"
-  sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null
-  sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null
+#
+# macOS doesn't expose `fs.inotify.*` (it's a Linux-only feature), so we
+# only attempt the bump where the sysctl exists. We also use `sudo -n`
+# to avoid blocking on a password prompt in non-interactive runs; if
+# passwordless sudo is unavailable we just warn and continue. On CI hosts
+# the sysctl is typically already raised system-wide via cloud-init.
+if [[ "$(uname -s)" == "Linux" ]] && command -v sudo >/dev/null 2>&1; then
+  if sysctl -n fs.inotify.max_user_watches >/dev/null 2>&1; then
+    step "Raising inotify limits (kind multi-cluster requirement)"
+    if ! sudo -n sysctl -w fs.inotify.max_user_watches=524288 >/dev/null 2>&1; then
+      warn "could not raise fs.inotify.max_user_watches (sudo unavailable); continuing"
+    fi
+    if ! sudo -n sysctl -w fs.inotify.max_user_instances=512 >/dev/null 2>&1; then
+      warn "could not raise fs.inotify.max_user_instances (sudo unavailable); continuing"
+    fi
+  fi
 fi
 
 step "Creating kind clusters in parallel"

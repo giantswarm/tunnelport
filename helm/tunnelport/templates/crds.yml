@@ -87,6 +87,16 @@ spec:
                 minLength: 1
                 pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                 type: string
+              clusterName:
+                description: |-
+                  ClusterName is the Teleport cluster name (the value Teleport's auth
+                  server returns for `tctl get cluster`). The rendered tbot pod
+                  projects a ServiceAccount JWT with this audience, and Teleport's
+                  kubernetes-join validator pins the same value on its side. The
+                  cluster name is typically distinct from the proxy host (e.g. proxy
+                  at `teleport.example.com:443` for cluster `prod.teleport.example`).
+                minLength: 1
+                type: string
               port:
                 description: |-
                   Port is the local ClusterIP Service port the rendered tunnel listens on.
@@ -129,6 +139,7 @@ spec:
                 type: string
             required:
             - appName
+            - clusterName
             - port
             - proxyAddr
             - tokenName

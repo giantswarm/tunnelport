@@ -41,10 +41,11 @@ func newRemoteApp(opts ...fixtureOpt) *accessv1alpha1.RemoteApp {
 			UID:       types.UID("uid-demo"),
 		},
 		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "demo-app",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenName: "demo-token",
+			AppName:     "demo-app",
+			Port:        8080,
+			ProxyAddr:   "teleport.example.com:443",
+			TokenName:   "demo-token",
+			ClusterName: "teleport.example.com",
 		},
 	}
 	for _, o := range opts {

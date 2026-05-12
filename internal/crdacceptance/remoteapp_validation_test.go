@@ -41,10 +41,11 @@ func TestRemoteApp_AcceptsValidCR(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenName: "myapp-token",
+			AppName:     "myapp",
+			Port:        8080,
+			ProxyAddr:   "teleport.example.com:443",
+			TokenName:   "myapp-token",
+			ClusterName: "teleport.example.com",
 		},
 	}
 
@@ -60,10 +61,11 @@ func TestRemoteApp_ReplicasIsOptionalAndNotDefaultedByCRD(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenName: "myapp-token",
+			AppName:     "myapp",
+			Port:        8080,
+			ProxyAddr:   "teleport.example.com:443",
+			TokenName:   "myapp-token",
+			ClusterName: "teleport.example.com",
 		},
 	}
 
@@ -91,10 +93,11 @@ func TestRemoteApp_StatusSubresourceDoesNotBumpGeneration(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenName: "myapp-token",
+			AppName:     "myapp",
+			Port:        8080,
+			ProxyAddr:   "teleport.example.com:443",
+			TokenName:   "myapp-token",
+			ClusterName: "teleport.example.com",
 		},
 	}
 	if err := k8sClient.Create(ctx, cr); err != nil {
@@ -143,10 +146,11 @@ func TestRemoteApp_RejectsMissingTokenName(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenName: "",
+			AppName:     "myapp",
+			Port:        8080,
+			ProxyAddr:   "teleport.example.com:443",
+			TokenName:   "",
+			ClusterName: "teleport.example.com",
 		},
 	}
 
@@ -162,10 +166,11 @@ func TestRemoteApp_RejectsEmptyProxyAddr(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "",
-			TokenName: "myapp-token",
+			AppName:     "myapp",
+			Port:        8080,
+			ProxyAddr:   "",
+			TokenName:   "myapp-token",
+			ClusterName: "teleport.example.com",
 		},
 	}
 
@@ -191,10 +196,11 @@ func TestRemoteApp_RejectsInvalidPort(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: accessv1alpha1.RemoteAppSpec{
-					AppName:   "myapp",
-					Port:      tc.port,
-					ProxyAddr: "teleport.example.com:443",
-					TokenName: "myapp-token",
+					AppName:     "myapp",
+					Port:        tc.port,
+					ProxyAddr:   "teleport.example.com:443",
+					TokenName:   "myapp-token",
+					ClusterName: "teleport.example.com",
 				},
 			}
 
