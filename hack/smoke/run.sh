@@ -94,7 +94,9 @@ make docker-build IMG="${OPERATOR_IMAGE}" >/dev/null
 # and local-path-provisioner then crashloop on the 2nd/3rd cluster. The
 # kind project documents these as the recommended values:
 # https://kind.sigs.k8s.io/docs/user/known-issues/
-if command -v sudo >/dev/null 2>&1; then
+# Linux-only: `fs.inotify.*` does not exist on Darwin, and unconditional
+# sudo there prompts for a password the script can't satisfy in CI/local.
+if [[ "$(uname -s)" == "Linux" ]] && command -v sudo >/dev/null 2>&1; then
   step "Raising inotify limits (kind multi-cluster requirement)"
   sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null
   sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null
