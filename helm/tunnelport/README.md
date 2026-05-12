@@ -35,79 +35,45 @@ documented below. The full grant table is under
 
 | Resource | Verbs | Why cluster-scoped |
 |---|---|---|
-| `secrets` | `get;list;watch` | The operator must watch the user-named `tokenRef` Secret in **whatever namespace** the platform team places the `RemoteApp` CR. Per-namespace `RoleBinding`s would force chart consumers to re-grant on every new `RemoteApp` namespace. |
-| `pods` | `get;list;watch` | Status synthesis reads pod-level state (readiness, last termination, restart count) of the rendered tbot Deployments to populate `RemoteApp.status.lastError` and the `Ready` condition — also in the CR's namespace, which can be anywhere in the cluster. |
+| `pods` | `get;list;watch` | Status synthesis reads pod-level state (readiness, last termination, restart count) of the rendered tbot Deployments to populate `RemoteApp.status.lastError` and the `Ready` condition — in the CR's namespace, which can be anywhere in the cluster. |
+| `serviceaccounts` | `get;list;watch;create;update;patch;delete` | The operator renders one `ServiceAccount` per `RemoteApp` (ADR 0004 kubernetes-join model). The SA's projected JWT is the subject the Teleport `ProvisionToken`'s `allow` rule pins. |
 | `access.giantswarm.io/remoteapps` | `get;list;watch` | The CR is cluster-scoped-watched by design (one operator, many consumer namespaces). |
 
-The operator **never** writes to `secrets` (no `create`/`update`/
-`patch`/`delete`), and **never** reads `pods/log` (ADR 0003). Owned-
-object writes (`deployments`, `services`, `configmaps`) are the only
-mutations it performs, all scoped to the CR's own namespace.
-
-### The operator never reads `Secret.Data`
-
-`get;list;watch` on Secrets is a Kubernetes-API blunt instrument — there
-is no verb that distinguishes metadata-only access from data access on
-Secrets. The "never read data" property is therefore enforced **in
-code**, not in RBAC:
-
-* The operator references each token Secret by `(name, key,
-  resourceVersion)` only. The Secret's contents are mounted into the
-  tbot pod by the kubelet; the operator process never sees them.
-* This is verified by an AST-level test:
-  [`internal/controller/remoteapp/secret_watch_test.go`](../../internal/controller/remoteapp/secret_watch_test.go)
-  parses every Go file in the controller package and fails the build
-  if it spots a `Secret.Data` selector expression. Anyone who tries to
-  add `secret.Data[...]` to the reconciler gets a red CI signal.
-
-If you are concerned about the breadth of the Secret read grant, your
-defence-in-depth options are: (a) audit-logging on `secrets`
-`get`/`list` from the operator's ServiceAccount, (b) a Kyverno /
-ValidatingAdmissionPolicy guard, or (c) running the operator in a
-dedicated MC where the only Secrets in scope are the token Secrets you
-already trust the operator with.
+The operator **never** reads `pods/log` (ADR 0003). It does not need
+`secrets` at all (ADR 0004 — there is no static-token Secret to read).
+Owned-object writes (`serviceaccounts`, `deployments`, `services`,
+`configmaps`) are the only mutations it performs, all scoped to the
+CR's own namespace.
 
 ### Pod-read scope is filtered at runtime by label selector
 
-The pod read grant is also cluster-scoped, but the controller-runtime
-informer cache the operator builds **will be** scoped to a label
-selector — the cache subscribes only to pods carrying
+The pod read grant is cluster-scoped, but the controller-runtime
+informer cache the operator builds is scoped to a label selector —
+the cache subscribes only to pods carrying
 `tunnelport.giantswarm.io/role=tbot` (the label the reconciler stamps
-onto every tbot pod it renders). In effect the operator process holds
-metadata for *its own* tbot pods only, even though the API grant is
-broader. (At time of writing this label-selector cache scoping is being
-added in a separate bundle; until that lands the cache holds the full
-cluster pod set in memory but the *behaviour* is unchanged — status
-synthesis still only consults pods owned by `RemoteApp` CRs.)
+onto every tbot pod it renders). The operator process holds metadata
+for *its own* tbot pods only, even though the API grant is broader.
 
-### Static-token rotation: a GitOps responsibility you inherit
+### Token lifecycle: Central-side, no consumer rotation burden
 
-Each `RemoteApp` references a static join token via `tokenRef`. Static
-tokens **do not auto-rotate** — they are values you produced on Central
-(via `tctl tokens add` or a `TeleportBot` + token CR) and synced into
-the consumer MC out-of-band.
+Each `RemoteApp` names a Teleport `ProvisionToken` (`spec.tokenName`).
+The token is configured with `join_method: kubernetes` and
+`static_jwks` trust pinned to the consumer MC's `/openid/v1/jwks`
+document. tbot authenticates with the projected SA JWT — there is no
+static token value on the consumer cluster to rotate, leak, or sync.
 
-Operational consequences for the platform team's GitOps pipeline:
+Operational consequences:
 
-* You own the rotation cadence. There is no operator-driven rotation
-  loop. If a token is leaked, you revoke it on Central and re-deliver
-  a new value via the same sealed-secret / sops / ESO path.
-* You own the *renewal* schedule for the underlying `TeleportBot`'s
-  `token_ttl` on Central; the consumer-MC Secret value must be
-  re-synced before that TTL elapses or new tbot pod starts will fail
-  to join (ADR 0001 explains why the alternative — the `kubernetes`
-  join method — was rejected; the trade-off is exactly this rotation
-  burden).
-* When the `tokenRef` Secret content changes, the operator auto-rolls
-  the tbot Deployment by stamping the Secret's `resourceVersion` onto
-  the pod-template annotation — but it cannot help you if the new
-  token is invalid. tbot pods will `CrashLoopBackOff` and
-  `status.lastError` will surface the kubelet-visible failure; a human
-  has to pick that up.
-
-If your GitOps pipeline cannot guarantee a rotation cadence shorter
-than your token-leak detection window, the operator is not the layer
-that fixes that — it is the layer that magnifies the consequence.
+* Token rotation happens at the JWKS level on Central. If the consumer
+  cluster's signing key rotates, the platform team re-exports the new
+  JWKS and patches the `ProvisionToken` on Central (ADR 0004).
+* The bot's role/scope is defined on Central (`TeleportBot` +
+  `TeleportRole`), same as before.
+* If the `static_jwks.allow` rule mismatches the per-CR
+  `ServiceAccount`, the tbot pod will `CrashLoopBackOff` and
+  `status.lastError` will surface the kubelet-visible failure. The
+  fix is to align the token's `allow.service_account` with the
+  rendered SA's `<namespace>:<cr.name>`.
 
 ---
 
@@ -174,51 +140,11 @@ A typical policy allows:
   `RemoteApp.spec.port`. This is the "who is allowed to use this
   tunnel" decision, made per-app by the platform team.
 
-### 3. Token Secret delivery
+### 3. Central-side preconditions per `RemoteApp`
 
-`RemoteApp.spec.tokenRef` references a `Secret` carrying the static
-join token bound to that `RemoteApp`'s `TeleportBot`. The chart **does
-not create, copy, or template** that Secret.
-
-> **Required label:** every token Secret you deliver MUST carry the
-> label `tunnelport.giantswarm.io/role=token-secret`. The operator's
-> informer cache subscribes to that label selector only — Secrets
-> without it are invisible to the operator (no watch events, no `Get`
-> via the cache, `status.TokenSecretBound` will stay `False`). This is
-> a deliberate cache-scoping measure: it keeps the operator's
-> in-memory Secret set narrow, and it keeps unrelated Secrets in the
-> namespace out of its blast radius. The operator never writes this
-> label itself (it never mutates user-managed Secrets), so your GitOps
-> templating, sealing tool, or ExternalSecret manifest must include
-> it.
-
-The expected flow on the consumer MC:
-
-1. The platform team produces the join-token value out of band (e.g.
-   `tctl tokens add ...` against Central, or a Teleport-Operator-
-   managed `TeleportBot` + `tctl bots tokens` step).
-2. The token value is stored encrypted in Git via a sealing/sync
-   mechanism (sealed-secrets, sops, External Secrets Operator) and
-   delivered into the same namespace as the `RemoteApp` CR, **with
-   `metadata.labels.tunnelport.giantswarm.io/role` set to
-   `token-secret`** so the operator's cache subscribes to it.
-3. The `RemoteApp.spec.tokenRef.{name,key}` references the resulting
-   `Secret`; the operator mounts it into the tbot pod by **name only**.
-
-The operator never reads the Secret's contents — it only sees
-`(name, key, resourceVersion)`. RBAC grants `get;list;watch` on
-`secrets` cluster-wide because there is no Kubernetes verb that
-distinguishes metadata-only access from data access on Secrets; the
-"never read data" property is enforced by code review and maintained by
-the operator's reconciler test suite, not by RBAC. ADR 0001 records
-this trade-off.
-
-If the Secret is missing when the CR is created, the rendered tbot
-pod stays `Pending` (volume mount fails) and
-`status.TokenSecretBound = false` — handling the GitOps-race case
-where the CR arrives before the Secret.
-
-### 4. Central-side preconditions per `RemoteApp`
+`RemoteApp.spec.tokenName` references a Teleport `ProvisionToken` on
+Central (ADR 0004). The chart **does not create or template** any
+consumer-side Secret — there is no static-token Secret to deliver.
 
 For each `RemoteApp` you deploy on the consumer MC, the platform team
 must produce on **Central** (typically via the upstream Teleport
@@ -226,18 +152,20 @@ Operator, `TeleportBot` + `TeleportRole` + `TeleportToken` CRs):
 
 * a **`TeleportBot`** dedicated to this one app — one bot per
   `RemoteApp`, so a leaked tbot identity reaches only that one app
-  (per-app blast-radius isolation, ADR 0001);
+  (per-app blast-radius isolation);
 * a **role** assigned to that bot whose `app_labels` selector matches
   exactly the one Teleport `App` `RemoteApp.spec.appName` refers to,
   and nothing else;
-* a **static join token** bound to that bot, whose value is what ends
-  up in the `tokenRef` Secret on the consumer MC.
+* a **`ProvisionToken`** of kind `kubernetes` whose
+  `spec.kubernetes.static_jwks` is pinned to the consumer MC's
+  `/openid/v1/jwks` document, and whose `spec.kubernetes.allow` rule
+  names exactly the per-CR ServiceAccount the operator will render
+  (`<namespace>:<cr.name>`).
 
 If any of those is missing or mis-scoped, the tbot pod will fail to
-join Central; the operator surfaces this via
-`status.lastError` (k8s-visible state only — see ADR 0003), and the
-platform engineer runs `kubectl logs` on the tbot pod themselves to see
-the join error.
+join Central; the operator surfaces this via `status.lastError`
+(k8s-visible state only — see ADR 0003), and the platform engineer
+runs `kubectl logs` on the tbot pod themselves to see the join error.
 
 ---
 
@@ -279,17 +207,16 @@ Generated from `templates/rbac.yaml`:
 |---|---|---|
 | `access.giantswarm.io/remoteapps` | `get;list;watch` | Spec is read-only. |
 | `access.giantswarm.io/remoteapps/status` | `get;update;patch` | Slice 4 populates this. |
-| `secrets` | `get;list;watch` | **Metadata-only by code** — see "Token Secret delivery". No `create`/`update`/`patch`/`delete`. |
 | `apps/deployments` | `get;list;watch;create;update;patch;delete` | Owned objects. |
-| `services`, `configmaps` | `get;list;watch;create;update;patch;delete` | Owned objects. |
+| `services`, `configmaps`, `serviceaccounts` | `get;list;watch;create;update;patch;delete` | Owned objects (one SA per RemoteApp, ADR 0004). |
+| `pods` | `get;list;watch` | Status synthesis only — never `pods/log`. |
 | `coordination.k8s.io/leases` | full | Leader election. |
 | `events` | `create;patch` | Status companion. |
 
 **Deliberately not granted:**
 
 * `pods/log` — ADR 0003. The operator never reads tbot container logs.
-* `secrets` write verbs — ADR 0001. Token Secrets are delivered
-  out-of-band; the operator neither produces nor mutates them.
+* `secrets` — ADR 0004. There is no consumer-side token Secret to read.
 
 ---
 

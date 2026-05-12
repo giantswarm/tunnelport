@@ -20,7 +20,7 @@ Teleport App Egress Operator
     bot:                           # how tbot joins
       name: egress-bot             # TeleportBot name on Central
       joinMethod: kubernetes
-      tokenRef: { name: ..., key: ... }   # optional, for token method
+      tokenName: egress-bot-token  # Teleport ProvisionToken name on Central (ADR 0004)
     service:
       name: payments               # defaults to .metadata.name
       type: ClusterIP
