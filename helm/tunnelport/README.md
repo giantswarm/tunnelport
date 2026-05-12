@@ -80,40 +80,33 @@ added in a separate bundle; until that lands the cache holds the full
 cluster pod set in memory but the *behaviour* is unchanged — status
 synthesis still only consults pods owned by `RemoteApp` CRs.)
 
-### Registration-secret rotation: a GitOps responsibility you inherit
+### Static-token rotation: a GitOps responsibility you inherit
 
-Per ADR 0005, every `RemoteApp` joins via `bound_keypair` with
-`recovery.mode: relaxed` on the Central-side token resource. The
-`tokenRef` Secret carries the **registration secret** Teleport generates
-when the token is created (`tctl get token/<name> --format=json |
-jq -r '.[0].status.bound_keypair.registration_secret'`), delivered
-into the consumer MC out-of-band via your team's chosen pattern
-(sealed-secrets, sops, ESO, …).
+Each `RemoteApp` references a static join token via `tokenRef`. Static
+tokens **do not auto-rotate** — they are values you produced on Central
+(via `tctl tokens add` or a `TeleportBot` + token CR) and synced into
+the consumer MC out-of-band.
 
 Operational consequences for the platform team's GitOps pipeline:
 
-* The registration secret is **long-lived** under `relaxed` recovery
-  — it remains usable for re-registration indefinitely (ADR 0005
-  accepted this trade-off explicitly: it's what enables fleet
-  self-recovery without per-bot SRE intervention). Treat the
-  consumer-MC Secret as a persistent credential, not a one-shot.
-* You own the rotation cadence. If the secret leaks, rotate the bot's
-  keypair on Central (which forces the next join to re-bind) and
-  re-deliver a fresh registration secret value via the same pipeline.
+* You own the rotation cadence. There is no operator-driven rotation
+  loop. If a token is leaked, you revoke it on Central and re-deliver
+  a new value via the same sealed-secret / sops / ESO path.
+* You own the *renewal* schedule for the underlying `TeleportBot`'s
+  `token_ttl` on Central; the consumer-MC Secret value must be
+  re-synced before that TTL elapses or new tbot pod starts will fail
+  to join (ADR 0001 explains why the alternative — the `kubernetes`
+  join method — was rejected; the trade-off is exactly this rotation
+  burden).
 * When the `tokenRef` Secret content changes, the operator auto-rolls
   the tbot Deployment by stamping the Secret's `resourceVersion` onto
   the pod-template annotation — but it cannot help you if the new
-  value is invalid. tbot pods will `CrashLoopBackOff` and
+  token is invalid. tbot pods will `CrashLoopBackOff` and
   `status.lastError` will surface the kubelet-visible failure; a human
   has to pick that up.
-* The `RemoteApp.spec.tokenRef.name` MUST match the Central-side
-  Teleport `kind: token` resource's `metadata.name`. The operator
-  renders this string into `onboarding.token` in tbot.yaml as the
-  *name of the token resource*, not a value or a path; a name skew
-  surfaces as `name "<…>" not found` in tbot logs.
 
 If your GitOps pipeline cannot guarantee a rotation cadence shorter
-than your secret-leak detection window, the operator is not the layer
+than your token-leak detection window, the operator is not the layer
 that fixes that — it is the layer that magnifies the consequence.
 
 ---
@@ -237,14 +230,8 @@ Operator, `TeleportBot` + `TeleportRole` + `TeleportToken` CRs):
 * a **role** assigned to that bot whose `app_labels` selector matches
   exactly the one Teleport `App` `RemoteApp.spec.appName` refers to,
   and nothing else;
-* a **`bound_keypair` token** (Teleport `kind: token`) bound to that
-  bot, with `spec.bound_keypair.recovery.mode: relaxed` per ADR 0005.
-  The token resource's `metadata.name` MUST equal
-  `RemoteApp.spec.tokenRef.name` — the operator renders that string
-  into `onboarding.token` in tbot.yaml as the *name of the token
-  resource* on Central. The auto-generated registration secret
-  (`status.bound_keypair.registration_secret`) is what ends up in the
-  `tokenRef` Secret on the consumer MC.
+* a **static join token** bound to that bot, whose value is what ends
+  up in the `tokenRef` Secret on the consumer MC.
 
 If any of those is missing or mis-scoped, the tbot pod will fail to
 join Central; the operator surfaces this via
@@ -267,29 +254,20 @@ The chart's NetworkPolicy is *operator hygiene*, not tenant policy.
 
 ---
 
-## Pod-churn caveat (per ADR 0004 + 0005)
+## Pod-churn caveat (per ADR 0002)
 
-tbot's destination directory is an `emptyDir`, not a PVC. Per ADR 0005
-the operator joins via `bound_keypair` with `recovery.mode: relaxed`,
-so every tbot pod restart triggers a fresh **re-registration** against
-the registration secret — tbot generates a new keypair, binds it to
-the bot on Central, and resumes the tunnel. No SRE intervention is
-required (this was the entire point of ADR 0005, replacing the
-single-use bot-token model documented in ADR 0004).
-
-The cost is paid against Central, not the consumer MC: **rolling many
+tbot's destination directory is an `emptyDir`, not a PVC. Every tbot
+pod restart triggers a fresh join with the static token. **Rolling many
 `RemoteApp` Deployments simultaneously** — chart upgrades that bump
-`tbot.image`, MC-wide node rolls, large-fleet redeploys — **drives
-re-registration churn** through the Teleport auth pod. tbot retries
-join with backoff and the disturbance is bounded, but at fleet scale
-this becomes the dominant join-rate term.
+`tbot.image`, MC-wide node rolls, large-fleet redeploys — **may briefly
+hit Central's join-rate limits** while the new pods establish their
+identities. tbot retries join with backoff; the disturbance is bounded
+but visible.
 
-If re-registration churn becomes a recurring problem, the operator
-can switch to `StatefulSet` + `volumeClaimTemplates` to persist the
-keypair across restarts (ADR 0004 names this as the rendered-object
-shape; tracked separately as the perf follow-up). `RemoteApp.spec`
-exposes none of this, so the migration is an internal operator
-change.
+If join-rate pressure becomes a recurring problem, the operator can
+switch to `StatefulSet` + `volumeClaimTemplates` to persist the
+renewable cert across restarts. `RemoteApp.spec` exposes none of this,
+so the migration is an internal operator change.
 
 ---
 

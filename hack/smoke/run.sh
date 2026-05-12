@@ -52,10 +52,7 @@ CURL_WAIT="${CURL_WAIT:-120}"
 
 TMP=/tmp
 PRODUCER_TOKEN_FILE="${TMP}/smoke-producer-agent-token"
-# Per ADR 0005 the bot joins via bound_keypair; the file holds the
-# auto-generated registration_secret retrieved from the token's
-# .status, not a static-token value.
-BOT_TOKEN_FILE="${TMP}/smoke-bot-registration-secret"
+BOT_TOKEN_FILE="${TMP}/smoke-bot-token"
 TELEPORT_VALUES_FILE="${TMP}/smoke-teleport-values.yaml"
 KUBE_AGENT_VALUES_FILE="${TMP}/smoke-kube-agent-values.yaml"
 
@@ -76,7 +73,7 @@ teardown() {
     kind delete cluster --name "$c" >/dev/null 2>&1 || true
   done
   rm -f "$PRODUCER_TOKEN_FILE" "$BOT_TOKEN_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE"
-  rm -f "${TMP}/smoke-producer-agent-token.json"
+  rm -f "${TMP}/smoke-bot-token.json" "${TMP}/smoke-producer-agent-token.json"
 }
 
 dump_diag() {
@@ -186,34 +183,12 @@ kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
   > "${TMP}/smoke-producer-agent-token.json"
 jq -r .token "${TMP}/smoke-producer-agent-token.json" > "${PRODUCER_TOKEN_FILE}"
 
-# Bot identity + bound_keypair token, declarative.
-# Per ADR 0005, the bot joins via bound_keypair with recovery.mode:
-# relaxed; the token resource carries the policy and Teleport
-# auto-generates the registration_secret on creation. We read it back
-# out of `tctl get token/<name>`.
-#
-# `tctl create -f` accepts a stream containing multiple documents.
-# tokens.yaml carries both the producer-agent-token (which is just a
-# placeholder shape — not used here; we use the dynamically-generated
-# producer agent token from a few lines up) and the smoke-bot-token
-# entry. We feed only bot.yaml and tokens.yaml that matter — the
-# producer-agent-token literal isn't consumed by anyone here, so its
-# placeholder is harmless on creation but we route it via `|| true`
-# in case Teleport rejects the placeholder string at validation.
-kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
-  tctl create -f - < hack/smoke/teleport/bot.yaml >/dev/null
-kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
-  tctl create -f - < hack/smoke/teleport/tokens.yaml >/dev/null || true
-
+# Bot identity + bot token in one call. `tctl bots add` is the v18 idiom;
+# the token comes back as `token_id` in the JSON.
 kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-  tctl get token/smoke-bot-token --format=json \
-  | jq -r '.[0].status.bound_keypair.registration_secret' \
-  > "${BOT_TOKEN_FILE}"
-
-if [[ ! -s "${BOT_TOKEN_FILE}" ]]; then
-  warn "Failed to read bound_keypair.registration_secret from token/smoke-bot-token"
-  exit 1
-fi
+  tctl bots add smoke-bot --roles=smoke-app-tunnel --format=json \
+  > "${TMP}/smoke-bot-token.json"
+jq -r .token_id "${TMP}/smoke-bot-token.json" > "${BOT_TOKEN_FILE}"
 
 step "Bringing up the producer (http-echo + teleport-kube-agent)"
 kubectl --context kind-producer apply -f hack/smoke/producer/http-echo.yaml >/dev/null

@@ -89,17 +89,10 @@ func TestRenderConfigMap_ContainsTbotApplicationTunnelConfig(t *testing.T) {
 		"app_name: myapp",
 		"listen: tcp://0.0.0.0:8080",
 		"type: application-tunnel",
-		// ADR 0005: bound_keypair join with relaxed recovery (recovery
-		// mode lives on the Central-side token resource, not in tbot.yaml).
-		"join_method: bound_keypair",
-		// onboarding.token under bound_keypair is the *name* of the
-		// Teleport token resource on Central, not a literal secret or a
-		// file path. Convention: matches cr.Spec.TokenRef.Name.
-		"token: myapp-token",
-		// onboarding.bound_keypair.registration_secret_path points at the
-		// mounted Secret key. tbot reads the registration secret from
-		// disk on first join — the operator never reads Secret.Data.
-		"registration_secret_path: /etc/tbot-token/token",
+		"join_method: token",
+		// onboarding.token must be the path to the mounted Secret key,
+		// not a literal value — tbot dereferences a path automatically.
+		"token: /etc/tbot-token/token",
 		// diag_addr binds the /readyz HTTP endpoint that the pod's
 		// readiness probe (slice 4) targets.
 		"diag_addr: 0.0.0.0:3001",
