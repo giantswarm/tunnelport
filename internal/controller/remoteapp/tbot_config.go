@@ -41,23 +41,10 @@ import (
 //
 //   - top-level: `version`, `proxy_server`, `insecure`, `onboarding`,
 //     `storage`, `diag_addr`, `services` (see `lib/tbot/config/config.go`).
-//   - `onboarding.join_method` is hardcoded to `bound_keypair` per ADR 0005.
-//     Token-method joining was rejected because bot tokens are single-use
-//     and emptyDir cannot persist the renewable cert across restarts (ADR
-//     0004). `bound_keypair` with `recovery.mode: relaxed` (set on the
-//     Central-side token resource) lets tbot self-recover by re-registering
-//     a fresh keypair against the registration secret on every restart.
-//   - `onboarding.token` is the *name of the Teleport token resource on
-//     Central* (NOT a file path or literal secret). Convention: the token
-//     resource is named identically to the consumer-side `tokenRef` Secret
-//     (`cr.Spec.TokenRef.Name`). Platform teams provisioning RemoteApps
-//     must keep these names in lockstep.
-//   - `onboarding.bound_keypair.registration_secret_path` points at the
-//     mounted Secret key — tbot reads the registration secret from disk on
-//     first join. The operator never reads `Secret.Data`. (See
-//     `lib/tbot/bot/onboarding/config.go` `BoundKeypairOnboardingConfig`
-//     for the schema; `_path` and the literal `registration_secret` are
-//     mutually exclusive.)
+//   - `onboarding.token` accepts either a literal token value OR a file
+//     path; tbot dereferences a path automatically. We point it at the
+//     mounted Secret's key, so the literal token never leaves the Secret
+//     volume — the operator has no need to read `Secret.Data`.
 //   - `services.application-tunnel.listen` (NOT `listener`) — the upstream
 //     YAML tag is `listen` (see `lib/tbot/services/application/tunnel_config.go`).
 //   - `diag_addr` enables tbot's diag HTTP listener that serves `/readyz`,
@@ -75,13 +62,8 @@ type tbotFile struct {
 }
 
 type tbotOnboarding struct {
-	JoinMethod   string                     `json:"join_method"`
-	Token        string                     `json:"token"`
-	BoundKeypair tbotBoundKeypairOnboarding `json:"bound_keypair"`
-}
-
-type tbotBoundKeypairOnboarding struct {
-	RegistrationSecretPath string `json:"registration_secret_path"`
+	JoinMethod string `json:"join_method"`
+	Token      string `json:"token"`
 }
 
 type tbotStorage struct {
@@ -101,14 +83,8 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 		ProxyServer: cr.Spec.ProxyAddr,
 		Insecure:    cfg.Insecure,
 		Onboarding: tbotOnboarding{
-			JoinMethod: "bound_keypair",
-			// Token resource name on Central. Convention: matches the
-			// consumer-side Secret name (cr.Spec.TokenRef.Name). See the
-			// type comment above for why this isn't a file path.
-			Token: cr.Spec.TokenRef.Name,
-			BoundKeypair: tbotBoundKeypairOnboarding{
-				RegistrationSecretPath: fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key),
-			},
+			JoinMethod: "token",
+			Token:      fmt.Sprintf("/etc/tbot-token/%s", cr.Spec.TokenRef.Key),
 		},
 		Storage: tbotStorage{
 			Type: "directory",
