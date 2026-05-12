@@ -60,9 +60,12 @@ type RemoteAppSpec struct {
 	// this RemoteApp's tbot uses to join via the `kubernetes` join method
 	// (per ADR 0004). It is a literal token name, not a Kubernetes Secret
 	// reference — the operator delivers no static token secret on the
-	// consumer MC.
+	// consumer MC. Constrained to DNS-1123 subdomain shape because Teleport
+	// resource names are validated against the same conventions.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 	TokenName string `json:"tokenName"`
 
 	// ClusterName is the Teleport cluster name (the value Teleport's auth
@@ -71,8 +74,12 @@ type RemoteAppSpec struct {
 	// kubernetes-join validator pins the same value on its side. The
 	// cluster name is typically distinct from the proxy host (e.g. proxy
 	// at `teleport.example.com:443` for cluster `prod.teleport.example`).
+	// Teleport cluster names follow DNS-name conventions, so we constrain
+	// to DNS-1123 subdomain shape.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
 	ClusterName string `json:"clusterName"`
 
 	// Replicas is the desired number of tbot pods for this RemoteApp. The
@@ -116,6 +123,7 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="LastError",type=string,JSONPath=`.status.lastError`,priority=1
+// +kubebuilder:printcolumn:name="Reconciled",type=string,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`,priority=1
 
 // RemoteApp declares that a Teleport-exposed app should be reachable on this
 // management cluster as a local Service. See CONTEXT.md for field semantics.

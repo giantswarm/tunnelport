@@ -266,10 +266,21 @@ func containerTerminatedSummary(cs *corev1.ContainerStatus) string {
 // Pure: no I/O, no logging. meta.SetStatusCondition uses metav1.Now() for
 // LastTransitionTime — that's library-imposed and stripped by statusEqual.
 //
-// Per ADR 0004 the operator emits only the `Ready` condition; the
-// consumer-side token-Secret state that `TokenSecretBound` used to surface
-// is gone with the kubernetes join migration.
-func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition) accessv1alpha1.RemoteAppStatus {
+// Per ADR 0004 the operator emits two conditions:
+//
+//   - `Ready` — join-level state, derived from tbot pod readiness against
+//     the tunnel diag endpoint.
+//   - `Reconciled` — operator-internal state: True if every owned-object
+//     apply in the most recent reconcile pass succeeded; False with
+//     Reason=ReconcileError if any failed. Distinct from `Ready`: a
+//     successful reconcile doesn't imply the tunnel is up (tbot may still
+//     be starting), and a failed reconcile doesn't imply the tunnel is
+//     down (a prior successful apply may still be serving traffic).
+//
+// applyErrSummary is the operator-internal summary of the most recent
+// reconcile pass's apply errors (empty string means all applies
+// succeeded). The caller — reconcileStatus — collects it before calling.
+func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition, applyErrSummary string) accessv1alpha1.RemoteAppStatus {
 	ready, lastError := summarizeStatus(pods)
 
 	conditions := append([]metav1.Condition(nil), prevConditions...)
@@ -285,6 +296,21 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditio
 		readyCond.Message = "tbot tunnel ready"
 	}
 	meta.SetStatusCondition(&conditions, readyCond)
+
+	reconciledCond := metav1.Condition{
+		Type:               accessv1alpha1.ConditionTypeReconciled,
+		ObservedGeneration: cr.Generation,
+	}
+	if applyErrSummary == "" {
+		reconciledCond.Status = metav1.ConditionTrue
+		reconciledCond.Reason = "ReconcileSucceeded"
+		reconciledCond.Message = "all owned objects applied"
+	} else {
+		reconciledCond.Status = metav1.ConditionFalse
+		reconciledCond.Reason = "ReconcileError"
+		reconciledCond.Message = applyErrSummary
+	}
+	meta.SetStatusCondition(&conditions, reconciledCond)
 
 	return accessv1alpha1.RemoteAppStatus{
 		Ready:              ready,

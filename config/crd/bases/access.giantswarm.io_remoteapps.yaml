@@ -31,6 +31,10 @@ spec:
       name: LastError
       priority: 1
       type: string
+    - jsonPath: .status.conditions[?(@.type=="Reconciled")].status
+      name: Reconciled
+      priority: 1
+      type: string
     name: v1alpha1
     schema:
       openAPIV3Schema:
@@ -80,7 +84,11 @@ spec:
                   kubernetes-join validator pins the same value on its side. The
                   cluster name is typically distinct from the proxy host (e.g. proxy
                   at `teleport.example.com:443` for cluster `prod.teleport.example`).
+                  Teleport cluster names follow DNS-name conventions, so we constrain
+                  to DNS-1123 subdomain shape.
+                maxLength: 253
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
               port:
                 description: |-
@@ -119,8 +127,11 @@ spec:
                   this RemoteApp's tbot uses to join via the `kubernetes` join method
                   (per ADR 0004). It is a literal token name, not a Kubernetes Secret
                   reference — the operator delivers no static token secret on the
-                  consumer MC.
+                  consumer MC. Constrained to DNS-1123 subdomain shape because Teleport
+                  resource names are validated against the same conventions.
+                maxLength: 253
                 minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
             required:
             - appName

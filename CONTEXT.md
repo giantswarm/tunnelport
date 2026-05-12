@@ -117,9 +117,19 @@ classification to tbot's log format (which isn't a stable API). The operator
 performs no retries or auto-recovery beyond what the kubelet's restart policy
 already provides.
 
-Conditions on `status`: `Ready` only — mirrors pod readiness, which is
-wired to tbot's tunnel diag endpoint. (The earlier `TokenSecretBound`
-condition is gone with the static-token model — see ADR 0004.)
+Conditions on `status`:
+
+- `Ready` — join-level state, mirrors pod readiness wired to tbot's
+  tunnel diag endpoint.
+- `Reconciled` — operator-internal state, surfaces whether the most
+  recent reconcile pass applied every owned object successfully.
+  Distinct from `Ready`: a successful reconcile does not imply the
+  tunnel is up, and a failed reconcile does not imply the tunnel is
+  down (a prior successful apply may still be serving traffic). Reason
+  is `ReconcileSucceeded` or `ReconcileError`.
+
+(The earlier `TokenSecretBound` condition is gone with the static-token
+model — see ADR 0004.)
 
 ### Readiness
 

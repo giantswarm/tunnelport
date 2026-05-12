@@ -25,10 +25,11 @@ pod-template annotation.
 Trust mode is `static_jwks`. `in_cluster` is rejected: it requires Teleport
 (Central MC) to reach each consumer MC's `tokenreviews` endpoint, which is
 incompatible with GS's typical network topology (consumer kube-apiservers
-are private). `oidc` (Teleport v18+) remains a future opt-in if
-`static_jwks`'s "re-render every ProvisionToken when consumer signing keys
-rotate" cost becomes painful — additive change to this ADR, not a
-re-decision.
+are private). The cost `static_jwks` carries today is that every
+`ProvisionToken` embedding a consumer MC's JWKS must be re-rendered when
+that MC rotates its signing keys — `oidc` would eliminate this. `oidc`
+(Teleport v18+) remains a future opt-in if that re-render cost becomes
+painful — additive change to this ADR, not a re-decision.
 
 Out of scope for the operator: exporting each consumer MC's JWKS to
 Central. That is a platform-team GitOps step — same sealed/sync pipeline
@@ -42,7 +43,9 @@ Implicit operational coupling worth naming: the ProvisionToken's
 engineer must commit to the CR's name+namespace before creating the bot
 on Central. This is the same coupling the static-token method had (the
 Secret name had to match `spec.tokenRef.name`), shifted from a Secret
-name into an allowlist entry.
+name into the `kubernetes.allow` `service_account` entry, and now pins
+CR namespace **as well as** name. The old token method only required the
+Secret *name* to match.
 
 CRD change: `spec.tokenRef` (Secret name + key) is removed and replaced
 with two fields:
@@ -57,12 +60,28 @@ with two fields:
   therefore renders a projected `serviceAccountToken` volume on the tbot
   pod with `audience: <cr.spec.clusterName>` and points `tbot` at it via
   `KUBERNETES_TOKEN_PATH`, mirroring the upstream `tbot` Helm chart
-  pattern. The `aud` value is per-CR (not chart-wide) so multi-Teleport-
-  cluster setups on a single consumer MC stay possible without
-  re-installing the chart.
+  pattern. The projected token's TTL is 600s — under Teleport's 30-minute
+  `static_jwks` ceiling and above the kubelet's 10-minute minimum, so any
+  future tuning must stay in `[600s, 1800s]`. The `aud` value is per-CR
+  (not a chart-wide knob) so multi-Teleport-cluster setups on a single
+  consumer MC stay possible without re-installing the chart — a
+  forward-compatibility property, not a sizing one.
 
-The `TokenSecretBound` status condition is removed; `Ready` (driven by
-tbot pod readiness against the tunnel diag endpoint) remains the only
-observable condition. The CRD stays `v1alpha1` — the alpha contract
-permits breaking changes — and there are no production consumers to
-migrate.
+The `TokenSecretBound` status condition is removed. Two conditions now
+surface:
+
+- `Ready` — driven by tbot pod readiness against the tunnel diag
+  endpoint; reflects join-level state (the tunnel either reaches Teleport
+  and serves traffic, or it does not).
+- `Reconciled` — operator-internal state: True when every owned-object
+  apply in the most recent reconcile pass succeeded, False (with
+  `Reason: ReconcileError`) when any failed. Distinct from `Ready` on
+  purpose: a successful reconcile does not imply the tunnel is up
+  (tbot may still be starting), and a failed reconcile does not imply
+  the tunnel is down (a prior successful apply may still be serving
+  traffic). Surfacing both gives platform engineers an unambiguous
+  signal whether the operator itself is making progress, independent of
+  whether the join is working.
+
+The CRD stays `v1alpha1` — the alpha contract permits breaking changes —
+and there are no production consumers to migrate.

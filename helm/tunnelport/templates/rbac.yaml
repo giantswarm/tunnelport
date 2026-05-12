@@ -38,6 +38,9 @@ rules:
 # Per-CR ServiceAccount — the operator renders one ServiceAccount per
 # RemoteApp (ADR 0004 kubernetes-join model). The SA's projected JWT is
 # the subject the Teleport ProvisionToken's `allow` rule pins.
+# Operator uses Server-Side Apply (`client.Apply`), so `update` is not
+# needed (SSA goes through `patch`); `delete` is also not needed because
+# the ServiceAccount is GC'd via OwnerReferences when the CR is deleted.
 - apiGroups:
   - ""
   resources:
@@ -47,9 +50,7 @@ rules:
   - list
   - watch
   - create
-  - update
   - patch
-  - delete
 
 # Pod metadata — read-only. Slice 4's status loop derives
 # `status.lastError` from pod Phase / ContainerStatuses / RestartCount /

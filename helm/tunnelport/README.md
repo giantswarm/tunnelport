@@ -185,7 +185,8 @@ The chart's NetworkPolicy is *operator hygiene*, not tenant policy.
 ## Pod-churn caveat (per ADR 0002)
 
 tbot's destination directory is an `emptyDir`, not a PVC. Every tbot
-pod restart triggers a fresh join with the static token. **Rolling many
+pod restart triggers a fresh join via the kubernetes join method
+(projected SA JWT). **Rolling many
 `RemoteApp` Deployments simultaneously** — chart upgrades that bump
 `tbot.image`, MC-wide node rolls, large-fleet redeploys — **may briefly
 hit Central's join-rate limits** while the new pods establish their

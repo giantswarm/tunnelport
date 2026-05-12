@@ -18,6 +18,17 @@ package v1alpha1
 
 const (
 	// ConditionTypeReady mirrors pod readiness, which is wired to tbot's diag
-	// endpoint reporting tunnel state.
+	// endpoint reporting tunnel state. It surfaces join-level state: the
+	// tunnel either reaches Teleport and serves traffic, or it does not.
 	ConditionTypeReady = "Ready"
+
+	// ConditionTypeReconciled surfaces operator-internal state: whether the
+	// last reconcile pass successfully applied every owned object
+	// (ServiceAccount, ConfigMap, Deployment, Service) to the API server.
+	// It is intentionally distinct from `Ready` — a reconcile can succeed
+	// (Reconciled=True) while the tunnel itself is not yet up (Ready=False
+	// because tbot is still starting), and a reconcile can fail
+	// (Reconciled=False) while the tunnel is still serving traffic from a
+	// previously-successful apply (Ready=True).
+	ConditionTypeReconciled = "Reconciled"
 )

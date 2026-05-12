@@ -165,6 +165,15 @@ func TestStatus_HealthyPodFlipsReadyTrue(t *testing.T) {
 		if c == nil || c.Status != metav1.ConditionTrue {
 			return false, fmt.Errorf("Ready condition not True: %+v", c)
 		}
+		// Reconciled=True after a successful reconcile pass: the
+		// reconciler's apply loop completed without error, so
+		// operator-internal state is healthy. This is independent of
+		// Ready (a passing apply doesn't imply the tunnel is up), but
+		// in this test both happen to be True.
+		rc := meta.FindStatusCondition(got.Status.Conditions, accessv1alpha1.ConditionTypeReconciled)
+		if rc == nil || rc.Status != metav1.ConditionTrue {
+			return false, fmt.Errorf("Reconciled condition not True: %+v", rc)
+		}
 		return true, nil
 	})
 }

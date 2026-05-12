@@ -35,7 +35,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 package remoteapp
 
@@ -120,24 +120,46 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.applyOwned(ctx, cr, renderServiceAccount(cr, r.PodDefaults)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile ServiceAccount: %w", err)
-	}
-	if err := r.applyOwned(ctx, cr, renderConfigMap(cr, r.PodDefaults)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile ConfigMap: %w", err)
-	}
-	if err := r.applyOwned(ctx, cr, renderDeployment(cr, r.PodDefaults)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile Deployment: %w", err)
-	}
-	if err := r.applyOwned(ctx, cr, renderService(cr, r.PodDefaults)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("reconcile Service: %w", err)
+	// Collect the first apply error rather than bailing out early. The
+	// status pass below needs to know whether any apply failed so it can
+	// set the `Reconciled` condition; returning early would skip that
+	// signal entirely. We still surface the error via the returned
+	// ctrl.Result so controller-runtime requeues with backoff.
+	var applyErr error
+	for _, step := range []struct {
+		name string
+		obj  client.Object
+	}{
+		{"ServiceAccount", renderServiceAccount(cr, r.PodDefaults)},
+		{"ConfigMap", renderConfigMap(cr, r.PodDefaults)},
+		{"Deployment", renderDeployment(cr, r.PodDefaults)},
+		{"Service", renderService(cr, r.PodDefaults)},
+	} {
+		if err := r.applyOwned(ctx, cr, step.obj); err != nil {
+			applyErr = fmt.Errorf("reconcile %s: %w", step.name, err)
+			break
+		}
 	}
 
 	// Status: derived from k8s-visible state only (ADR 0003). This must
 	// run last so observedGeneration only catches up after the owned
-	// objects above are applied successfully.
-	if err := r.reconcileStatus(ctx, cr); err != nil {
+	// objects above are applied successfully. Always run it — even on
+	// apply failure — so the Reconciled condition reflects reality.
+	applyErrSummary := ""
+	if applyErr != nil {
+		applyErrSummary = applyErr.Error()
+	}
+	if err := r.reconcileStatus(ctx, cr, applyErrSummary); err != nil {
+		// If status itself fails, prefer surfacing the apply error (it's
+		// the root cause); fall back to the status error.
+		if applyErr != nil {
+			return ctrl.Result{}, applyErr
+		}
 		return ctrl.Result{}, fmt.Errorf("reconcile status: %w", err)
+	}
+
+	if applyErr != nil {
+		return ctrl.Result{}, applyErr
 	}
 
 	logger.V(1).Info("reconciled")
@@ -251,14 +273,14 @@ func (r *Reconciler) mapPodToRemoteApp(_ context.Context, obj client.Object) []r
 // imprint, and `meta.SetStatusCondition` doesn't speak that protocol — we'd
 // have to fork the helper. MergeFrom gets the convergence semantics we need
 // without that surgery.
-func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.RemoteApp) error {
+func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.RemoteApp, applyErrSummary string) error {
 	pods, err := r.listTbotPods(ctx, cr)
 	if err != nil {
 		return fmt.Errorf("list tbot pods: %w", err)
 	}
 
 	before := cr.Status.DeepCopy()
-	newStatus := computeStatus(cr, pods, before.Conditions)
+	newStatus := computeStatus(cr, pods, before.Conditions, applyErrSummary)
 	if statusEqual(before, &newStatus) {
 		return nil
 	}

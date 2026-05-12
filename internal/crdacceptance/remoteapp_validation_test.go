@@ -26,6 +26,7 @@ package crdacceptance
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -176,6 +177,80 @@ func TestRemoteApp_RejectsEmptyProxyAddr(t *testing.T) {
 
 	if err := k8sClient.Create(context.Background(), cr); err == nil {
 		t.Fatal("expected empty proxyAddr to be rejected, got nil error")
+	}
+}
+
+// TestRemoteApp_RejectsInvalidTokenName covers the DNS-1123-subdomain
+// constraint added in the ADR-0004 review pass: TokenName must match the
+// DNS subdomain pattern and stay under 254 characters. Teleport resource
+// names follow the same conventions.
+func TestRemoteApp_RejectsInvalidTokenName(t *testing.T) {
+	cases := []struct {
+		name      string
+		tokenName string
+	}{
+		{name: "uppercase", tokenName: "BadToken"},
+		{name: "underscore", tokenName: "bad_token"},
+		{name: "leading-dash", tokenName: "-bad"},
+		{name: "trailing-dot", tokenName: "bad."},
+		{name: "too-long", tokenName: strings.Repeat("a", 254)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &accessv1alpha1.RemoteApp{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bad-tokenname-" + tc.name,
+					Namespace: "default",
+				},
+				Spec: accessv1alpha1.RemoteAppSpec{
+					AppName:     "myapp",
+					Port:        8080,
+					ProxyAddr:   "teleport.example.com:443",
+					TokenName:   tc.tokenName,
+					ClusterName: "teleport.example.com",
+				},
+			}
+
+			if err := k8sClient.Create(context.Background(), cr); err == nil {
+				t.Fatalf("expected tokenName=%q to be rejected, got nil error", tc.tokenName)
+			}
+		})
+	}
+}
+
+// TestRemoteApp_RejectsInvalidClusterName covers the same DNS-1123
+// constraint on ClusterName.
+func TestRemoteApp_RejectsInvalidClusterName(t *testing.T) {
+	cases := []struct {
+		name        string
+		clusterName string
+	}{
+		{name: "uppercase", clusterName: "Teleport.Example.Com"},
+		{name: "underscore", clusterName: "teleport_example.com"},
+		{name: "too-long", clusterName: strings.Repeat("a", 254)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &accessv1alpha1.RemoteApp{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bad-clustername-" + tc.name,
+					Namespace: "default",
+				},
+				Spec: accessv1alpha1.RemoteAppSpec{
+					AppName:     "myapp",
+					Port:        8080,
+					ProxyAddr:   "teleport.example.com:443",
+					TokenName:   "myapp-token",
+					ClusterName: tc.clusterName,
+				},
+			}
+
+			if err := k8sClient.Create(context.Background(), cr); err == nil {
+				t.Fatalf("expected clusterName=%q to be rejected, got nil error", tc.clusterName)
+			}
+		})
 	}
 }
 

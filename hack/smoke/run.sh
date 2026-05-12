@@ -264,14 +264,20 @@ export JWKS_JSON
 # random name) and is unrelated to this apply. The `allow` rule pins
 # the per-CR ServiceAccount the operator renders for this RemoteApp
 # ("smoke:smoke-app").
+export REPO_ROOT
 python3 - <<'PYEOF' > "${SMOKE_BOT_TOKEN_FILE}"
-import json, os, pathlib
-src = pathlib.Path('hack/smoke/teleport/tokens.yaml').read_text()
+import json, os, pathlib, textwrap
+# Use REPO_ROOT so the substitution works regardless of cwd (defence in
+# depth — the script already cd's to REPO_ROOT at top, but a relative
+# pathlib.Path silently yields an empty doc if that ever regresses).
+src = pathlib.Path(os.environ['REPO_ROOT'], 'hack/smoke/teleport/tokens.yaml').read_text()
 docs = src.split('\n---\n', 1)
 bot_doc = docs[1] if len(docs) == 2 else docs[0]
-# JSON-encode the JWKS string so embedded quotes survive the YAML
-# round-trip safely.
-bot_doc = bot_doc.replace('REPLACE_WITH_CONSUMER_JWKS', json.dumps(os.environ['JWKS_JSON']))
+# The JWKS field is now a YAML block scalar (`jwks: |`). Indent the
+# compact JSON to match — 8 spaces lines up under the `static_jwks`
+# nesting in tokens.yaml.
+jwks_block = textwrap.indent(os.environ['JWKS_JSON'], '        ')
+bot_doc = bot_doc.replace('        REPLACE_WITH_CONSUMER_JWKS', jwks_block)
 print(bot_doc)
 PYEOF
 

@@ -46,8 +46,12 @@ spec:
     type: static_jwks
     static_jwks:
       # Replaced at smoke-time with the consumer kind cluster's
-      # `/openid/v1/jwks` document (single line, JSON).
-      jwks: REPLACE_WITH_CONSUMER_JWKS
+      # `/openid/v1/jwks` document. Block scalar (`|`) so any future
+      # JWKS bytes (long base64 modulus values, etc.) are not at the
+      # mercy of YAML line-length quirks; run.sh indents the JSON to
+      # match the 8-space lead below.
+      jwks: |
+        REPLACE_WITH_CONSUMER_JWKS
     allow:
       # The ServiceAccount projected JWT the rendered tbot pod
       # presents. The operator renders one SA per RemoteApp; the
