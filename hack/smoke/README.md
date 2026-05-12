@@ -314,6 +314,31 @@ That string is the literal `-text` flag value passed to
 from the consumer cluster proves the data path works: curl → Service
 → tbot pod → Teleport tunnel → producer kube-agent → http-echo.
 
+## 8. Restart the tbot pod and verify rejoin
+
+```bash
+kubectl --context kind-consumer -n smoke delete pod \
+  -l tunnelport.giantswarm.io/role=tbot,tunnelport.giantswarm.io/remoteapp=smoke-app
+
+kubectl --context kind-consumer -n smoke rollout status deployment/smoke-app
+
+kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \
+  --for=jsonpath='{.status.ready}'=true --timeout=2m
+
+kubectl --context kind-consumer -n smoke delete job smoke-curl
+kubectl --context kind-consumer apply -f hack/smoke/consumer/curl-pod.yaml
+kubectl --context kind-consumer -n smoke wait job/smoke-curl \
+  --for=condition=complete --timeout=2m
+kubectl --context kind-consumer -n smoke logs job/smoke-curl
+```
+
+The body should still be `hello-from-producer`. Under ADR 0004 the
+ProvisionToken is an allowlist of ServiceAccount subjects, not a
+single-use bot token: the replacement pod's projected SA JWT joins
+without any operator-side or platform-team intervention. This step
+explicitly proves the property that justifies keeping the cert cache
+in `emptyDir` (ADR 0002 stays valid).
+
 ## Tearing down
 
 ```bash

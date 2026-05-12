@@ -306,5 +306,60 @@ if [[ "${ACTUAL_BODY}" != "${EXPECTED_BODY}" ]]; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------
+# Re-join after pod restart. Under ADR 0004 (kubernetes join method) the
+# ProvisionToken is NOT a single-use bot token — it's an allowlist of
+# ServiceAccount subjects. Killing the tbot pod drops the emptyDir cert
+# cache; the kubelet's projected SA token volume provides a fresh JWT
+# at the new pod's start; tbot rejoins without operator intervention.
+# This step explicitly verifies that property, since it's the exact
+# scenario PR #10's (now-reverted) ADR 0004 was trying to fix with PVCs.
+# ---------------------------------------------------------------------
+
+step "Restarting tbot pods and re-verifying the tunnel"
+PRE_RESTART_POD="$(kubectl --context kind-consumer -n smoke get pods \
+  -l tunnelport.giantswarm.io/role=tbot \
+  -o jsonpath='{.items[0].metadata.name}')"
+echo "Pre-restart pod: ${PRE_RESTART_POD}"
+
+# Delete every tbot pod for this RemoteApp; the Deployment recreates them
+# with a fresh emptyDir cert cache. --wait=true blocks until the API
+# server acknowledges deletion.
+kubectl --context kind-consumer -n smoke delete pod \
+  -l tunnelport.giantswarm.io/role=tbot,tunnelport.giantswarm.io/remoteapp=smoke-app \
+  --wait=true >/dev/null
+
+# Wait for the replacement pod to come up. RolloutStatus is the cheap
+# signal that the Deployment converged on its desired replicas Ready.
+kubectl --context kind-consumer -n smoke rollout status deployment/smoke-app \
+  --timeout="${READY_WAIT}s" >/dev/null
+
+# RemoteApp.status.ready can flap briefly during the swap. wait again
+# so the post-restart curl runs against a known-Ready RemoteApp.
+kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \
+  --for=jsonpath='{.status.ready}'=true --timeout="${READY_WAIT}s"
+
+POST_RESTART_POD="$(kubectl --context kind-consumer -n smoke get pods \
+  -l tunnelport.giantswarm.io/role=tbot \
+  -o jsonpath='{.items[0].metadata.name}')"
+echo "Post-restart pod: ${POST_RESTART_POD}"
+if [[ "${POST_RESTART_POD}" == "${PRE_RESTART_POD}" ]]; then
+  warn "Pod name unchanged after delete — restart did not happen"
+  exit 1
+fi
+
+# Re-run the curl. Completed Jobs are immutable; delete first.
+kubectl --context kind-consumer -n smoke delete job smoke-curl >/dev/null
+kubectl --context kind-consumer apply -f hack/smoke/consumer/curl-pod.yaml >/dev/null
+kubectl --context kind-consumer -n smoke wait job/smoke-curl \
+  --for=condition=complete --timeout="${CURL_WAIT}s"
+
+POST_RESTART_BODY="$(kubectl --context kind-consumer -n smoke logs job/smoke-curl 2>&1 | tail -1)"
+echo "Got body after restart: ${POST_RESTART_BODY}"
+if [[ "${POST_RESTART_BODY}" != "${EXPECTED_BODY}" ]]; then
+  warn "Post-restart curl body mismatch: expected '${EXPECTED_BODY}', got '${POST_RESTART_BODY}'"
+  exit 1
+fi
+
 step "✅ SMOKE PASSED"
 SMOKE_RESULT=ok
