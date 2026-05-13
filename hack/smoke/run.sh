@@ -305,8 +305,11 @@ export JWKS_JSON
 #   [2] tunnelport-trust-bundle-token (singleton tbot — ADR 0008)
 # Both [1] and [2] need the JWKS substituted; they pin DIFFERENT
 # ServiceAccount subjects via their respective `allow` rules.
-export REPO_ROOT
-python3 - <<PYEOF
+export REPO_ROOT SMOKE_BOT_TOKEN_FILE TRUST_BUNDLE_TOKEN_FILE
+# Quoted heredoc — body is literal so backticks in comments (e.g. the
+# static_jwks reference below) are not interpreted as shell command
+# substitution.
+python3 - <<'PYEOF'
 import os, pathlib, textwrap
 # Use REPO_ROOT so the substitution works regardless of cwd (defence in
 # depth — the script already cd's to REPO_ROOT at top, but a relative
@@ -320,8 +323,8 @@ if len(docs) < 3:
 # nesting in tokens.yaml.
 jwks_block = textwrap.indent(os.environ['JWKS_JSON'], '        ')
 for doc, out_path in [
-    (docs[1], "${SMOKE_BOT_TOKEN_FILE}"),
-    (docs[2], "${TRUST_BUNDLE_TOKEN_FILE}"),
+    (docs[1], os.environ['SMOKE_BOT_TOKEN_FILE']),
+    (docs[2], os.environ['TRUST_BUNDLE_TOKEN_FILE']),
 ]:
     rendered = doc.replace('        REPLACE_WITH_CONSUMER_JWKS', jwks_block)
     pathlib.Path(out_path).write_text(rendered)
