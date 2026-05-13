@@ -157,10 +157,14 @@ if [ -z "${TELEPORT_CHART_VERSION}" ]; then
   # Placeholder teleport.* values: this template is parsed for the tbot
   # major only — the resolved value isn't installed anywhere. Schema
   # (ADR 0005) requires both fields to be non-empty for templating to
-  # succeed, so we pass shape-valid throwaways.
+  # succeed, so we pass shape-valid throwaways. trustBundle is disabled
+  # for the probe because ADR 0008 requires `trustBundle.tokenName` when
+  # enabled — the probe only inspects the operator Deployment's
+  # `--tbot-image` flag, which is rendered regardless of trustBundle.
   TBOT_MAJOR="$(helm template ./helm/tunnelport \
       --set teleport.clusterName=tbot-major-probe \
-      --set teleport.proxyAddr=tbot-major-probe:443 |
+      --set teleport.proxyAddr=tbot-major-probe:443 \
+      --set trustBundle.enabled=false |
     grep -oE -- '--tbot-image=[^[:space:]]+' | head -1 |
     sed -E 's|.*tbot-distroless:([0-9]+).*|\1|')"
   if ! printf '%s' "${TBOT_MAJOR}" | grep -qE '^[0-9]+$'; then
