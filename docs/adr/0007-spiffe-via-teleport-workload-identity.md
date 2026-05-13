@@ -2,13 +2,23 @@
 
 **Status: supersedes ADR 0006.**
 
+**Amendment 2026-05-13:** Prototype-time verification cleared the
+four checklist items called out below. The JWKS-conversion fallback
+and the separate `spiffe-trust-bundle` service framing in the
+original draft were inaccurate for tbot v18.x — the
+`workload-identity-x509` service emits the trust bundle as
+`svid_bundle.pem` (PEM) alongside the SVID, in the same destination.
+References to a distinct `spiffe-trust-bundle` service have been
+removed; the JWKS risk has been dropped from the Risks paragraph.
+
 The tunnel Service grows a TLS listener served by a `ghostunnel`
 sidecar colocated with `tbot` in every RemoteApp pod. The server
 certificate the sidecar presents is a SPIFFE X.509-SVID minted by
 `tbot`'s `workload-identity-x509` output, signed by Teleport central's
 SPIFFE CA. Consumers verify the SVID against a SPIFFE trust bundle
-materialised by `tbot`'s `spiffe-trust-bundle` output and mounted into
-the consumer pod. The sidecar listens on `8443`, terminates TLS, and
+emitted by `tbot`'s `workload-identity-x509` output as
+`svid_bundle.pem` alongside the SVID, mounted into the consumer
+pod. The sidecar listens on `8443`, terminates TLS, and
 forwards plaintext to the existing `application-tunnel` on
 `127.0.0.1:<spec.port>`. The Service grows `tls/8443` alongside the
 existing plaintext port `8080`; deprecation of the plaintext port is
@@ -46,8 +56,9 @@ Trust distribution simplifies asymmetrically. Cert-manager-on-consumer
 materialises a `Certificate` re-issued from `tunnelport-ca` in every
 consumer namespace so the consumer pod can mount a CA bundle — per
 namespace, per consumer MC. SPIFFE-via-Teleport materialises a single
-trust bundle artefact emitted by `tbot`'s `spiffe-trust-bundle` output
-and rotated by Teleport. Every consumer MC paired to the same Teleport
+trust bundle artefact emitted by `tbot`'s `workload-identity-x509`
+output as `svid_bundle.pem` and rotated by Teleport. Every
+consumer MC paired to the same Teleport
 cluster shares that one bundle. Cross-MC trust becomes the default,
 not a per-MC GitOps chore. The cert-manager design carries the
 opposite property: each consumer MC's CA is private, so a future
@@ -109,18 +120,18 @@ same GitOps shape as the existing ProvisionToken story, not a new
 question.
 
 Trust bundle distribution to consumers. `tbot`'s
-`spiffe-trust-bundle` output writes the bundle into an emptyDir or a
-Kubernetes Secret. Mounting the Secret variant into the consumer pod
-gives the consumer a CA file at a stable path; the consumer's existing
-`caFile`-style knob (for muster, `oauth.server.dex.caFile`) loads it
-into a fresh `*x509.CertPool`. The bundle ships as JWKS-formatted
-JSON natively; converting to PEM is either done by a tbot output
-flag (preferred) or by a one-line init container in the consumer
-pod (fallback). Both are surfaceable at implementation time, not
-architectural objections. A consumer that wants to verify the SPIFFE
-ID — not just the chain — opts in with a separate field on its own
-configuration; consumers that only verify the chain transition into
-the new model silently.
+`workload-identity-x509` service writes `svid_bundle.pem` — the
+PEM-encoded SPIFFE trust bundle — into its destination alongside
+`svid.pem` and `svid_key.pem`. For the producer pod the destination
+is an emptyDir shared with the ghostunnel sidecar; for consumer-side
+distribution the destination is a Kubernetes Secret mounted into
+consumer pods at a stable path. The consumer's existing `caFile`-
+style knob (for muster, `oauth.server.dex.caFile`) loads the file
+into a fresh `*x509.CertPool`. The v18 service emits PEM directly —
+no JWKS-to-PEM conversion and no init container are needed. A
+consumer that wants to verify the SPIFFE ID — not just the chain —
+opts in with a separate field on its own configuration; consumers
+that only verify the chain transition into the new model silently.
 
 Risks worth naming, all surfaceable at implementation time, none
 blocking the architectural commitment. First, `ghostunnel` accepts
@@ -129,17 +140,13 @@ stock Go `crypto/tls` client checks `ServerName` against DNS SANs
 by default; the `WorkloadIdentity` resource therefore must stamp
 DNS SANs on every SVID in addition to the SPIFFE URI SAN.
 Confirmable from the Teleport `WorkloadIdentity` resource spec at
-prototype time. Second, the `spiffe-trust-bundle` tbot output
-format on the v18.7 line is JWKS, which off-the-shelf TLS verifiers
-do not consume directly; a tbot output flag for PEM, or a small
-conversion step on the consumer side, closes the gap. Third,
-SVID lifetime defaults under Teleport v18.7 favour short-lived
-identities (hours, not days); confirm the renewal cadence
-ghostunnel needs to tolerate and that the file-watch reload property
-holds. Fourth, Teleport workload identity must be enabled on the
-GS Teleport instance (`teleport.giantswarm.io`); confirm before
-shipping. None of these is an architectural objection — they are
-the prototype's checklist.
+prototype time. Second, SVID lifetime defaults under Teleport v18.7
+favour short-lived identities (hours, not days); confirm the
+renewal cadence ghostunnel needs to tolerate and that the file-
+watch reload property holds. Third, Teleport workload identity
+must be enabled on the GS Teleport instance
+(`teleport.giantswarm.io`); confirm before shipping. None of these
+is an architectural objection — they are the prototype's checklist.
 
 Migration shape is additive. The first cut ships with the plaintext
 port `8080` still served, the TLS port `8443` added, and consumers
