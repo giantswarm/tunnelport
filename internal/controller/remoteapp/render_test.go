@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -221,20 +220,13 @@ func TestRenderConfigMap_ContainsWorkloadIdentityX509Service(t *testing.T) {
 	}
 }
 
-// TestRenderConfigMap_WorkloadIdentityHasKubernetesSecretDestination
-// pins slice 03 (ADR 0007 §"Trust bundle distribution to consumers"):
-// the workload-identity-x509 service carries TWO destinations — the
-// existing in-pod directory (ghostunnel reads it) AND a kubernetes_secret
-// destination writing svid_bundle.pem into the per-CR
-// `<cr.Name>-spiffe-bundle` Secret consumer pods mount.
-//
-// Upstream shape: each workload-identity-x509 service has a SINGULAR
-// `destination:` (see Teleport
-// `lib/tbot/services/workloadidentity/x509_output_config.go`). To get
-// both a directory destination (for ghostunnel) and a kubernetes_secret
-// destination (for consumer pods), the renderer emits TWO
-// workload-identity-x509 service blocks sharing the same selector.
-func TestRenderConfigMap_WorkloadIdentityHasKubernetesSecretDestination(t *testing.T) {
+// TestRenderConfigMap_NoKubernetesSecretDestination pins ADR 0008: the
+// per-CR tbot's workload-identity-x509 service carries exactly ONE
+// destination (`directory`, shared with the ghostunnel sidecar) — the
+// `kubernetes_secret` destination from ADR 0007 is removed. Consumer
+// trust-bundle distribution is the chart-managed singleton bot's job;
+// per-CR tbots no longer write into a Kubernetes Secret.
+func TestRenderConfigMap_NoKubernetesSecretDestination(t *testing.T) {
 	cr := fixtureRemoteApp()
 
 	cm := renderConfigMap(cr, fixtureConfig())
@@ -243,29 +235,25 @@ func TestRenderConfigMap_WorkloadIdentityHasKubernetesSecretDestination(t *testi
 		t.Fatalf("ConfigMap missing tbot.yaml key; got keys: %v", keys(cm.Data))
 	}
 
-	// Two workload-identity-x509 service blocks, one per destination
-	// type. The string appears once per service block (the `type:` tag
-	// in each).
-	if got := strings.Count(cfg, "type: workload-identity-x509"); got != 2 {
-		t.Errorf("expected 2 workload-identity-x509 service blocks, got %d\n---\n%s\n---", got, cfg)
+	// Exactly one workload-identity-x509 service block now.
+	if got := strings.Count(cfg, "type: workload-identity-x509"); got != 1 {
+		t.Errorf("expected exactly 1 workload-identity-x509 service block (ADR 0008), got %d\n---\n%s\n---", got, cfg)
 	}
 
-	// Directory destination (slice 01) — preserved.
+	// Directory destination — preserved.
 	if !strings.Contains(cfg, "type: directory") {
-		t.Errorf("tbot.yaml lost the directory destination from slice 01\n---\n%s\n---", cfg)
+		t.Errorf("tbot.yaml lost the directory destination\n---\n%s\n---", cfg)
 	}
 	if !strings.Contains(cfg, "path: "+mountPathSVID) {
 		t.Errorf("tbot.yaml directory destination path: want %q\n---\n%s\n---", mountPathSVID, cfg)
 	}
 
-	// kubernetes_secret destination (slice 03) — name follows the
-	// `${cr.Name}-spiffe-bundle` convention pinned in the ADR.
-	if !strings.Contains(cfg, "type: kubernetes_secret") {
-		t.Errorf("tbot.yaml missing kubernetes_secret destination (slice 03)\n---\n%s\n---", cfg)
+	// kubernetes_secret destination — must NOT appear.
+	if strings.Contains(cfg, "type: kubernetes_secret") {
+		t.Errorf("tbot.yaml still emits a kubernetes_secret destination (ADR 0008 removed it)\n---\n%s\n---", cfg)
 	}
-	wantSecret := cr.Name + "-spiffe-bundle"
-	if !strings.Contains(cfg, "name: "+wantSecret) {
-		t.Errorf("tbot.yaml kubernetes_secret destination name: want %q\n---\n%s\n---", wantSecret, cfg)
+	if strings.Contains(cfg, "-spiffe-bundle") {
+		t.Errorf("tbot.yaml still references per-CR *-spiffe-bundle Secret name (ADR 0008 removed it)\n---\n%s\n---", cfg)
 	}
 }
 
@@ -751,171 +739,6 @@ func TestRenderDeployment_HasGhostunnelSidecar(t *testing.T) {
 	}
 	if cc.SeccompProfile == nil || cc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("ghostunnel SeccompProfile: want RuntimeDefault, got %+v", cc.SeccompProfile)
-	}
-}
-
-// TestRenderTrustBundleSecret_OwnedByRemoteApp pins slice 03 (ADR 0007):
-// the operator pre-creates the `<cr.Name>-spiffe-bundle` Secret with the
-// ownerRef back to the CR so tbot's writes (via the kubernetes_secret
-// destination on the workload-identity-x509 service) hit an existing
-// target. tbot owns only the Data on that Secret — initial Data must be
-// nil/empty so SSA doesn't claim ownership of `svid_bundle.pem` and
-// race tbot's renewer.
-func TestRenderTrustBundleSecret_OwnedByRemoteApp(t *testing.T) {
-	cr := fixtureRemoteApp()
-
-	sec := renderTrustBundleSecret(cr, fixtureConfig())
-
-	wantName := cr.Name + "-spiffe-bundle"
-	if sec.Name != wantName {
-		t.Errorf("Secret name: want %q, got %q", wantName, sec.Name)
-	}
-	if sec.Namespace != cr.Namespace {
-		t.Errorf("Secret namespace: want %q, got %q", cr.Namespace, sec.Namespace)
-	}
-	if sec.Type != corev1.SecretTypeOpaque {
-		t.Errorf("Secret type: want Opaque, got %q", sec.Type)
-	}
-	if sec.Kind != "Secret" || sec.APIVersion != "v1" {
-		t.Errorf("Secret TypeMeta: want v1/Secret, got %q/%q", sec.APIVersion, sec.Kind)
-	}
-	if got, want := sec.Labels[LabelRole], LabelRoleValue; got != want {
-		t.Errorf("Secret labels[%s]: want %q, got %q", LabelRole, want, got)
-	}
-	if got, want := sec.Labels[LabelRemoteAppInstance], cr.Name; got != want {
-		t.Errorf("Secret labels[%s]: want %q, got %q", LabelRemoteAppInstance, want, got)
-	}
-
-	// Initial Data must be empty — tbot writes svid_bundle.pem on its
-	// first renewal. A placeholder key here would create an SSA
-	// field-conflict the moment tbot tries to update.
-	if len(sec.Data) != 0 {
-		t.Errorf("Secret.Data must be nil/empty (tbot writes svid_bundle.pem); got %d keys: %v", len(sec.Data), keys2(sec.Data))
-	}
-	if len(sec.StringData) != 0 {
-		t.Errorf("Secret.StringData must be nil/empty; got %d keys", len(sec.StringData))
-	}
-
-	// OwnerRef invariants — same shape as every other rendered object.
-	if len(sec.OwnerReferences) != 1 {
-		t.Fatalf("OwnerReferences: want 1, got %d", len(sec.OwnerReferences))
-	}
-	or := sec.OwnerReferences[0]
-	if or.UID != cr.UID {
-		t.Errorf("ownerRef UID: want %q, got %q", cr.UID, or.UID)
-	}
-	if or.Name != cr.Name {
-		t.Errorf("ownerRef Name: want %q, got %q", cr.Name, or.Name)
-	}
-	if or.Kind != kindRemoteApp {
-		t.Errorf("ownerRef Kind: want RemoteApp, got %q", or.Kind)
-	}
-	if or.Controller == nil || !*or.Controller {
-		t.Errorf("ownerRef.Controller: want true, got %v", or.Controller)
-	}
-	if or.BlockOwnerDeletion == nil || !*or.BlockOwnerDeletion {
-		t.Errorf("ownerRef.BlockOwnerDeletion: want true, got %v", or.BlockOwnerDeletion)
-	}
-}
-
-// keys2 returns map keys for any-byte-valued map. The existing keys()
-// helper above is typed on map[string]string for ConfigMap Data; Secret
-// Data is map[string][]byte and needs its own narrow helper.
-func keys2(m map[string][]byte) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
-
-// TestRenderTrustBundleRole_NarrowSecretScope pins slice 03 (ADR 0007):
-// the per-CR Role grants tbot's per-CR ServiceAccount the minimum verbs
-// needed to update one named Secret in the namespace.
-//
-// Critical invariant: `resourceNames` restricts the grant to the single
-// trust-bundle Secret — without it, a compromised tbot pod could
-// read/write any Secret in the namespace.
-func TestRenderTrustBundleRole_NarrowSecretScope(t *testing.T) {
-	cr := fixtureRemoteApp()
-
-	role := renderTrustBundleRole(cr, fixtureConfig())
-
-	wantName := cr.Name + "-spiffe-bundle"
-	if role.Name != wantName {
-		t.Errorf("Role name: want %q, got %q", wantName, role.Name)
-	}
-	if role.Namespace != cr.Namespace {
-		t.Errorf("Role namespace: want %q, got %q", cr.Namespace, role.Namespace)
-	}
-	if role.Kind != kindRole || role.APIVersion != "rbac.authorization.k8s.io/v1" {
-		t.Errorf("Role TypeMeta: want rbac.authorization.k8s.io/v1/Role, got %q/%q", role.APIVersion, role.Kind)
-	}
-
-	if len(role.Rules) != 1 {
-		t.Fatalf("Role rules: want exactly 1 rule, got %d: %+v", len(role.Rules), role.Rules)
-	}
-	rule := role.Rules[0]
-	if !slices.Equal(rule.APIGroups, []string{""}) {
-		t.Errorf("rule.APIGroups: want [\"\"], got %v", rule.APIGroups)
-	}
-	if !slices.Equal(rule.Resources, []string{"secrets"}) {
-		t.Errorf("rule.Resources: want [secrets], got %v", rule.Resources)
-	}
-	if !slices.Equal(rule.ResourceNames, []string{wantName}) {
-		t.Errorf("rule.ResourceNames: want [%q] (single-Secret scope), got %v", wantName, rule.ResourceNames)
-	}
-	wantVerbs := []string{"get", "update", "patch"}
-	if !slices.Equal(rule.Verbs, wantVerbs) {
-		t.Errorf("rule.Verbs: want %v, got %v", wantVerbs, rule.Verbs)
-	}
-
-	// OwnerRef: cascade-delete with the CR.
-	if len(role.OwnerReferences) != 1 || role.OwnerReferences[0].UID != cr.UID {
-		t.Errorf("Role ownerRef: want one ref to CR uid=%q, got %+v", cr.UID, role.OwnerReferences)
-	}
-}
-
-// TestRenderTrustBundleRoleBinding_BindsRoleToPerCRSA pins slice 03:
-// the per-CR RoleBinding ties the per-CR Role to the per-CR
-// ServiceAccount (the same SA the tbot pod uses for the kubernetes-join
-// JWT, ADR 0004). Same namespace as the CR.
-func TestRenderTrustBundleRoleBinding_BindsRoleToPerCRSA(t *testing.T) {
-	cr := fixtureRemoteApp()
-
-	rb := renderTrustBundleRoleBinding(cr, fixtureConfig())
-
-	wantName := cr.Name + "-spiffe-bundle"
-	if rb.Name != wantName {
-		t.Errorf("RoleBinding name: want %q, got %q", wantName, rb.Name)
-	}
-	if rb.Namespace != cr.Namespace {
-		t.Errorf("RoleBinding namespace: want %q, got %q", cr.Namespace, rb.Namespace)
-	}
-	if rb.Kind != "RoleBinding" || rb.APIVersion != "rbac.authorization.k8s.io/v1" {
-		t.Errorf("RoleBinding TypeMeta: want rbac.authorization.k8s.io/v1/RoleBinding, got %q/%q", rb.APIVersion, rb.Kind)
-	}
-
-	if rb.RoleRef.APIGroup != "rbac.authorization.k8s.io" || rb.RoleRef.Kind != kindRole || rb.RoleRef.Name != wantName {
-		t.Errorf("RoleBinding.RoleRef: want rbac.authorization.k8s.io/Role/%q, got %+v", wantName, rb.RoleRef)
-	}
-
-	if len(rb.Subjects) != 1 {
-		t.Fatalf("RoleBinding.Subjects: want 1, got %d: %+v", len(rb.Subjects), rb.Subjects)
-	}
-	s := rb.Subjects[0]
-	if s.Kind != rbacv1.ServiceAccountKind {
-		t.Errorf("Subject.Kind: want %q, got %q", rbacv1.ServiceAccountKind, s.Kind)
-	}
-	if s.Name != cr.Name {
-		t.Errorf("Subject.Name: want %q (per-CR SA = cr.Name), got %q", cr.Name, s.Name)
-	}
-	if s.Namespace != cr.Namespace {
-		t.Errorf("Subject.Namespace: want %q, got %q", cr.Namespace, s.Namespace)
-	}
-
-	if len(rb.OwnerReferences) != 1 || rb.OwnerReferences[0].UID != cr.UID {
-		t.Errorf("RoleBinding ownerRef: want one ref to CR uid=%q, got %+v", cr.UID, rb.OwnerReferences)
 	}
 }
 

@@ -1,0 +1,122 @@
+{{- if .Values.trustBundle.enabled }}
+# Singleton trust-bundle tbot Deployment (ADR 0008). One replica — this
+# is a non-HA dedicated identity, and tbot's state machine assumes a
+# single writer for a given Secret destination. The Secret persists
+# across pod restarts, so a brief absence of this Deployment does not
+# revoke any existing consumer's trust bundle.
+#
+# Shares the operator's tbot image (.Values.tbot.image); both bots speak
+# the same on-disk schema, so re-using the pin keeps image governance
+# tight.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+    tunnelport.giantswarm.io/role: trust-bundle-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "tunnelport.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      tunnelport.giantswarm.io/role: trust-bundle-bot
+  template:
+    metadata:
+      labels:
+        {{- include "tunnelport.selectorLabels" . | nindent 8 }}
+        tunnelport.giantswarm.io/role: trust-bundle-bot
+      annotations:
+        # Re-roll on tbot.yaml change so a renamed Secret or rotated
+        # token name propagates immediately rather than waiting for a
+        # pod-restart-for-unrelated-reasons.
+        tunnelport.giantswarm.io/config-hash: {{ include (print $.Template.BasePath "/trust-bundle-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "tunnelport.fullname" . }}-trust-bundle
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecret }}
+      imagePullSecrets:
+      - name: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: tbot
+        image: {{ .Values.tbot.image }}
+        command: ["tbot"]
+        args:
+        - start
+        - -c
+        - /etc/tbot/tbot.yaml
+        env:
+        # KUBERNETES_TOKEN_PATH points tbot at the projected SA token
+        # whose `aud` claim matches the Teleport cluster name — the
+        # shape `static_jwks` validation requires (mirrors ADR 0004
+        # for per-RemoteApp tbots).
+        - name: KUBERNETES_TOKEN_PATH
+          value: /var/run/secrets/tokens/join-sa-token
+        # POD_NAMESPACE is required by the `kubernetes_secret`
+        # destination — tbot uses it to locate the Secret it writes
+        # into. Without it, the destination init fails with
+        # "unable to detect namespace from POD_NAMESPACE environment
+        # variable".
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        ports:
+        - name: diag
+          containerPort: 3001
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: diag
+          initialDelaySeconds: 2
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: diag
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 2
+          failureThreshold: 5
+        resources:
+          {{- toYaml .Values.trustBundle.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /etc/tbot
+          readOnly: true
+        - name: storage
+          mountPath: /var/lib/tbot
+        - name: tmp
+          mountPath: /tmp
+        - name: join-sa-token
+          mountPath: /var/run/secrets/tokens
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "tunnelport.fullname" . }}-trust-bundle
+      - name: storage
+        emptyDir: {}
+      - name: tmp
+        emptyDir: {}
+      - name: join-sa-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: join-sa-token
+              audience: {{ required "teleport.clusterName is required for trustBundle.enabled (ADR 0008)" .Values.teleport.clusterName }}
+              expirationSeconds: 600
+{{- end }}

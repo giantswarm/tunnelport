@@ -1,0 +1,47 @@
+{{- if .Values.trustBundle.enabled }}
+# tbot.yaml for the singleton trust-bundle bot. ONE
+# workload-identity-x509 service with a kubernetes_secret destination.
+# The SVID itself is a side-effect (tbot v18 has no bundle-only output
+# mode — see ADR 0008 §"Risks"); we only consume the
+# svid_bundle.pem the same service writes alongside it.
+#
+# Onboarding mirrors the per-RemoteApp shape: kubernetes join method,
+# the SA's projected JWT validated by Teleport's static_jwks against
+# the named ProvisionToken on Central.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+data:
+  tbot.yaml: |
+    version: v2
+    proxy_server: {{ required "teleport.proxyAddr is required for trustBundle.enabled (ADR 0008)" .Values.teleport.proxyAddr }}
+    {{- if .Values.tbot.insecure }}
+    insecure: true
+    {{- end }}
+    onboarding:
+      join_method: kubernetes
+      token: {{ required "trustBundle.tokenName is required when trustBundle.enabled (ADR 0008)" .Values.trustBundle.tokenName }}
+    storage:
+      type: directory
+      path: /var/lib/tbot
+    diag_addr: 0.0.0.0:3001
+    services:
+    - type: workload-identity-x509
+      selector:
+        labels:
+          {{- range $k, $vs := .Values.trustBundle.workloadIdentityLabels }}
+          {{ $k }}:
+            {{- range $vs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- end }}
+      destination:
+        type: kubernetes_secret
+        name: {{ .Values.trustBundle.secretName }}
+      credential_ttl: {{ .Values.trustBundle.credentialTTL }}
+      renewal_interval: {{ .Values.trustBundle.renewalInterval }}
+{{- end }}

@@ -28,7 +28,6 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -143,15 +142,12 @@ func canonicalLabels(cr *accessv1alpha1.RemoteApp) map[string]string {
 // `service_account: "<namespace>:<cr.Name>"`), so a leaked tbot pod can
 // only join *that one* CR's join token.
 //
-// The SA has exactly one RoleBinding (slice 03 / ADR 0007): the
-// per-CR `renderTrustBundleRoleBinding` ties it to a Role whose single
-// rule is `secrets get;update;patch` *restricted by resourceNames to the
-// one Secret `<cr.Name>-spiffe-bundle`*. That narrow scope is what lets
-// tbot's `kubernetes_secret` destination update svid_bundle.pem in-place
-// while keeping the SA's authority on every other Secret in the
-// namespace at zero. The pod template's
-// `automountServiceAccountToken: true` is what causes the kubelet to
-// mount the projected JWT.
+// The SA has no RoleBinding in this package — ADR 0008 removed the
+// per-CR trust-bundle Role/RoleBinding that previously narrowed the
+// SA's authority to one Secret. Consumer trust-bundle distribution is
+// now the chart-managed singleton bot's responsibility. The pod
+// template's `automountServiceAccountToken: true` is what causes the
+// kubelet to mount the projected JWT.
 //
 // Name = CR name (same convention as the rendered Deployment / Service /
 // ConfigMap, per `canonicalLabels`).
@@ -533,22 +529,6 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 									Name:  "KUBERNETES_TOKEN_PATH",
 									Value: mountPathTbotJoinSAToken + "/" + tbotJoinSATokenFileName,
 								},
-								{
-									// POD_NAMESPACE is read by tbot's
-									// kubernetes_secret destination (ADR
-									// 0007 trust-bundle Secret) to locate
-									// the Secret in the pod's own
-									// namespace. Without it, the
-									// destination fails Init with
-									// "unable to detect namespace from
-									// POD_NAMESPACE environment variable".
-									Name: "POD_NAMESPACE",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "metadata.namespace",
-										},
-									},
-								},
 							},
 							Args: []string{
 								"start",
@@ -707,134 +687,6 @@ func renderService(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.Servic
 func configHash(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	sum := sha256.Sum256([]byte(tbotConfig(cr, cfg)))
 	return hex.EncodeToString(sum[:])
-}
-
-// trustBundleSecretName returns the convention name of the per-CR Secret
-// tbot's `kubernetes_secret` destination writes svid_bundle.pem into
-// (slice 03 / ADR 0007). Centralised so render.go, tbot_config.go, and
-// the per-CR Role all reference the same string and a rename touches one
-// place.
-func trustBundleSecretName(cr *accessv1alpha1.RemoteApp) string {
-	return cr.Name + "-spiffe-bundle"
-}
-
-// renderTrustBundleSecret returns the per-CR Secret tbot writes the
-// SPIFFE trust bundle (`svid_bundle.pem`) into via the
-// `kubernetes_secret` destination on the workload-identity-x509 service
-// (slice 03 / ADR 0007 §"Trust bundle distribution to consumers").
-//
-// Ownership split: the operator pre-creates the Secret with the ownerRef
-// so the cascade-delete path is symmetric with every other rendered
-// object, and so tbot's first write hits an existing target. tbot owns
-// only the Data on the Secret — initial Data here is nil so the SSA
-// path doesn't claim ownership of `svid_bundle.pem` (claiming it would
-// race tbot's renewer and produce a field-manager conflict on every
-// renewal).
-//
-// TypeMeta is set explicitly for the same reason as
-// `renderConfigMap`: the apply path JSON-marshals through the
-// unstructured converter and the API server rejects SSA payloads
-// missing apiVersion/kind.
-func renderTrustBundleSecret(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.Secret {
-	sec := &corev1.Secret{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Secret",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      trustBundleSecretName(cr),
-			Namespace: cr.Namespace,
-			Labels:    canonicalLabels(cr),
-		},
-		Type: corev1.SecretTypeOpaque,
-	}
-	// Stamp the ownerRef in the renderer (rather than relying on
-	// `applyOwned` to re-stamp later) because consumers verifying chain
-	// trust against this Secret rely on the cascade-delete invariant
-	// from first render onward — and the test surface pins it directly.
-	mustOwn(cr, sec)
-	return sec
-}
-
-// renderTrustBundleRole returns the per-CR Role tbot's per-CR
-// ServiceAccount uses to update the trust-bundle Secret (slice 03).
-//
-// Single rule, single resourceName: `get;update;patch` restricted to the
-// one Secret `<cr.Name>-spiffe-bundle`. This is the narrow grant that
-// keeps a compromised tbot pod from reading or writing any other Secret
-// in the namespace — without `resourceNames` the grant would cover all
-// Secrets. `delete` is intentionally omitted (the operator GCs the
-// Secret via OwnerReferences when the CR is deleted); `create` is
-// omitted because the operator pre-creates the Secret.
-func renderTrustBundleRole(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *rbacv1.Role {
-	secretName := trustBundleSecretName(cr)
-	role := &rbacv1.Role{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "Role",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secretName,
-			Namespace: cr.Namespace,
-			Labels:    canonicalLabels(cr),
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups:     []string{""},
-				Resources:     []string{"secrets"},
-				ResourceNames: []string{secretName},
-				Verbs:         []string{"get", "update", "patch"},
-			},
-		},
-	}
-	mustOwn(cr, role)
-	return role
-}
-
-// renderTrustBundleRoleBinding ties the per-CR Role to the per-CR
-// ServiceAccount the tbot pod runs under. Same namespace as the CR.
-func renderTrustBundleRoleBinding(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *rbacv1.RoleBinding {
-	name := trustBundleSecretName(cr)
-	rb := &rbacv1.RoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "rbac.authorization.k8s.io/v1",
-			Kind:       "RoleBinding",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: cr.Namespace,
-			Labels:    canonicalLabels(cr),
-		},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "Role",
-			Name:     name,
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      rbacv1.ServiceAccountKind,
-				Name:      cr.Name,
-				Namespace: cr.Namespace,
-			},
-		},
-	}
-	mustOwn(cr, rb)
-	return rb
-}
-
-// mustOwn stamps the controller OwnerReference and panics on failure.
-// Failure here means the rendered object's scheme registration is broken
-// — a programming error, not a runtime one — so a panic is the right
-// posture. Used by renderTrustBundle{Secret,Role,RoleBinding} so the
-// rendered objects carry the ownerRef from first render, which is what
-// the cascade-delete invariant pinned by the unit tests requires.
-func mustOwn(cr *accessv1alpha1.RemoteApp, obj metav1.Object) {
-	if err := setOwnerRef(cr, obj); err != nil {
-		// All three rbac/core types we pass here are registered via
-		// clientgoscheme (renderScheme); a failure means setOwnerRef's
-		// scheme is misconfigured at compile time.
-		panic(err)
-	}
 }
 
 // ptr returns a pointer to v. The Kubernetes core types still use pointer

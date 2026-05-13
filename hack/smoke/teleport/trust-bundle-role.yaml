@@ -1,0 +1,52 @@
+# Teleport role + WorkloadIdentity for the singleton trust-bundle bot
+# (ADR 0008). Two documents share the file (mirrors role.yaml's shape).
+#
+# The bot mints an SVID nobody consumes; the side-effect svid_bundle.pem
+# is the artefact the chart-managed Secret distributes to consumers in
+# installNamespace.
+#
+# Apply with:
+#   tctl create -f hack/smoke/teleport/trust-bundle-role.yaml
+kind: role
+version: v7
+metadata:
+  name: tunnelport-trust-bundle
+spec:
+  allow:
+    # The bot issues against exactly one WorkloadIdentity, scoped by a
+    # selector key that is DELIBERATELY distinct from per-CR
+    # `remoteapp:` selectors (see role.yaml). Without this separation
+    # the trust-bundle bot could accidentally match a per-RemoteApp
+    # WorkloadIdentity and the per-CR bots could match the trust-bundle
+    # resource — neither is sound.
+    workload_identity_labels:
+      trust-bundle: ["tunnelport"]
+    rules:
+      - resources:
+          - workload_identity
+        verbs:
+          - list
+          - read
+    # No app_labels — the trust-bundle bot does not run an
+    # application-tunnel, so it needs no Application Access. Teleport's
+    # role validator still requires non-empty logins for any role; a
+    # placeholder principal satisfies that requirement.
+    logins:
+      - tunnelporttrustbundle
+---
+# WorkloadIdentity for the trust-bundle bot. Per ADR 0008:
+#   - Labelled with the distinct `trust-bundle` selector key.
+#   - NO DNS SANs: the SVID is never presented to a verifier (consumers
+#     only read svid_bundle.pem), so DNS-SAN stamping serves no purpose
+#     and would just add a maintenance surface.
+#   - SPIFFE ID under /bot/<bot-name> so the URI is meaningful even
+#     though no verifier checks it.
+kind: workload_identity
+version: v1
+metadata:
+  name: tunnelport-trust-bundle
+  labels:
+    trust-bundle: tunnelport
+spec:
+  spiffe:
+    id: /bot/tunnelport-trust-bundle-bot

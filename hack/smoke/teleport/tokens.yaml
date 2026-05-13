@@ -1,4 +1,4 @@
-# Two join tokens for the smoke environment.
+# Three join tokens for the smoke environment.
 #
 #  1) producer-agent-token  — used by the producer cluster's
 #     teleport-kube-agent to register the smoke app with Teleport.
@@ -11,6 +11,13 @@
 #     per ADR 0004. The placeholder `static_jwks.jwks` value is
 #     replaced at smoke-time with the consumer kind cluster's
 #     `/openid/v1/jwks` document (see hack/smoke/run.sh).
+#
+#  3) tunnelport-trust-bundle-token — used by the chart-managed
+#     singleton trust-bundle tbot (ADR 0008) to join as
+#     `tunnelport-trust-bundle-bot`. Same kubernetes-join shape as
+#     #2 (same JWKS substituted at smoke-time), but the `allow` rule
+#     pins a DIFFERENT ServiceAccount — the chart's
+#     `<release>-trust-bundle` SA in `tunnelport-system`.
 #
 # Apply with:
 #   tctl create -f hack/smoke/teleport/tokens.yaml
@@ -57,3 +64,28 @@ spec:
       # presents. The operator renders one SA per RemoteApp; the
       # name matches the CR name (CONTEXT.md "canonicalLabels").
       - service_account: "smoke:smoke-app"
+---
+kind: token
+version: v2
+metadata:
+  name: tunnelport-trust-bundle-token
+spec:
+  roles:
+    - Bot
+  bot_name: tunnelport-trust-bundle-bot
+  join_method: kubernetes
+  kubernetes:
+    type: static_jwks
+    static_jwks:
+      # Same shape as smoke-bot-token above — substituted at
+      # smoke-time with the consumer kind cluster's
+      # `/openid/v1/jwks` document. The JWKS is shared (both bots
+      # run on the same kind cluster); the `allow` rule below is
+      # the per-token narrowing.
+      jwks: |
+        REPLACE_WITH_CONSUMER_JWKS
+    allow:
+      # The chart's singleton trust-bundle bot SA, materialised by
+      # helm/tunnelport/templates/trust-bundle-serviceaccount.yaml in
+      # `installNamespace`. Format: `<namespace>:<sa-name>`.
+      - service_account: "tunnelport-system:tunnelport-trust-bundle"

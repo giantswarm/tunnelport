@@ -170,3 +170,50 @@ securityContext:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Singleton trust-bundle tbot (ADR 0008). One chart-managed tbot
+# Deployment in `installNamespace` writes the SPIFFE trust bundle into a
+# single Kubernetes Secret. Consumers (muster, etc.) co-deployed in this
+# same namespace mount that Secret and use `svid_bundle.pem` as the CA
+# bundle for verifying tunnel SVIDs from any RemoteApp on the cluster.
+# Per-RemoteApp tbots no longer emit a Kubernetes Secret destination —
+# see ADR 0008 §"Operator-side delta".
+#
+# Enable on every consumer MC that has at least one consumer of the
+# tunnel `:8443` port. Disable only on operator-only installs that
+# don't host their own RemoteApp consumers.
+trustBundle:
+  enabled: true
+  # Secret the singleton tbot writes svid_bundle.pem into. Mounted by
+  # consumer pods in this namespace and referenced as their CA bundle.
+  # Renaming this is a chart-upgrade rollout exercise — bump only if
+  # the existing name conflicts with another component's Secret.
+  secretName: tunnelport-spiffe-bundle
+  # Teleport-central ProvisionToken name that admits this bot via the
+  # kubernetes-join method. Required at install time; same shape as the
+  # per-RemoteApp tokens — one entry on Central, one bot here. The
+  # `static_jwks.allow` rule must list this Deployment's
+  # ServiceAccount (default `<release>-trust-bundle`).
+  tokenName: ""
+  # Teleport-central WorkloadIdentity resource the bot's
+  # workload-identity-x509 service binds to via a selector label.
+  # `{ "trust-bundle": ["tunnelport"] }` is the chart default; the
+  # corresponding WorkloadIdentity resource on Central must carry the
+  # matching label. Distinct from per-CR `remoteapp:` selectors so the
+  # bot can never accidentally claim a per-RemoteApp identity.
+  workloadIdentityLabels:
+    trust-bundle:
+      - tunnelport
+  # SVID lifetime / renewal cadence on the singleton bot. The SVID is
+  # never presented to a verifier (the trust bundle is the artefact
+  # consumers mount), so these only bound the renewal cycle, not the
+  # security window. Matches per-CR bots' values.
+  credentialTTL: 60m
+  renewalInterval: 20m
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

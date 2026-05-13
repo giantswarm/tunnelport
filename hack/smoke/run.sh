@@ -55,6 +55,7 @@ PRODUCER_TOKEN_FILE="${TMP}/smoke-producer-agent-token"
 TELEPORT_VALUES_FILE="${TMP}/smoke-teleport-values.yaml"
 KUBE_AGENT_VALUES_FILE="${TMP}/smoke-kube-agent-values.yaml"
 SMOKE_BOT_TOKEN_FILE="${TMP}/smoke-bot-token.yaml"
+TRUST_BUNDLE_TOKEN_FILE="${TMP}/tunnelport-trust-bundle-token.yaml"
 
 # ---------------------------------------------------------------------
 # Logging + lifecycle.
@@ -72,7 +73,7 @@ teardown() {
   for c in consumer producer teleport; do
     kind delete cluster --name "$c" >/dev/null 2>&1 || true
   done
-  rm -f "$PRODUCER_TOKEN_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE" "$SMOKE_BOT_TOKEN_FILE"
+  rm -f "$PRODUCER_TOKEN_FILE" "$TELEPORT_VALUES_FILE" "$KUBE_AGENT_VALUES_FILE" "$SMOKE_BOT_TOKEN_FILE" "$TRUST_BUNDLE_TOKEN_FILE"
   rm -f "${TMP}/smoke-producer-agent-token.json"
 }
 
@@ -88,11 +89,13 @@ dump_diag() {
   kubectl --context kind-consumer -n smoke logs -l tunnelport.giantswarm.io/role=tbot --tail=40 2>&1 | tail -50 >&2 || true
   printf '\n--- producer/smoke kube-agent logs ---\n' >&2
   kubectl --context kind-producer -n smoke logs -l app=teleport-kube-agent --tail=40 2>&1 | tail -50 >&2 || true
-  printf '\n--- consumer/smoke trust-bundle secret ---\n' >&2
-  kubectl --context kind-consumer -n smoke get secret smoke-app-spiffe-bundle \
+  printf '\n--- consumer/tunnelport-system trust-bundle secret (ADR 0008) ---\n' >&2
+  kubectl --context kind-consumer -n tunnelport-system get secret tunnelport-spiffe-bundle \
     -o jsonpath='{"data keys: "}{.data}{"\n"}' 2>&1 >&2 || true
-  printf '\n--- consumer/smoke tls-probe job ---\n' >&2
-  kubectl --context kind-consumer -n smoke logs job/smoke-curl-tls --all-containers=true --tail=30 2>&1 | tail -40 >&2 || true
+  printf '\n--- consumer/tunnelport-system trust-bundle tbot logs ---\n' >&2
+  kubectl --context kind-consumer -n tunnelport-system logs -l tunnelport.giantswarm.io/role=trust-bundle-bot --tail=40 2>&1 | tail -50 >&2 || true
+  printf '\n--- consumer/tunnelport-system tls-probe job ---\n' >&2
+  kubectl --context kind-consumer -n tunnelport-system logs job/smoke-curl-tls --all-containers=true --tail=30 2>&1 | tail -40 >&2 || true
 }
 
 SMOKE_RESULT=fail
@@ -196,15 +199,23 @@ step "Provisioning Teleport role, WorkloadIdentity, bot, and producer agent toke
 AUTH_POD="$(kubectl --context kind-teleport -n teleport get pods \
   -l app.kubernetes.io/component=auth -o jsonpath='{.items[0].metadata.name}')"
 
-# Role first — bot creation references it; role also gates SVID
-# issuance for the WorkloadIdentity created next (ADR 0007).
+# Roles first — bot creation references them; the per-RemoteApp role
+# also gates SVID issuance for the per-RemoteApp WorkloadIdentity
+# (ADR 0007). The trust-bundle role gates issuance against the
+# singleton bot's WorkloadIdentity (ADR 0008); it's distinct from the
+# per-RemoteApp role and uses a different selector key
+# (`trust-bundle:` not `remoteapp:`).
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/role.yaml >/dev/null
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/trust-bundle-role.yaml >/dev/null
 
 # WorkloadIdentity: per ADR 0007, one resource per RemoteApp. tbot's
 # workload-identity-x509 service mints the smoke RemoteApp's tunnel
 # SVID against this; the role's workload_identity_labels match scopes
 # issuance to this resource alone.
+# (The trust-bundle WorkloadIdentity for ADR 0008 lives in the same
+# file as its role above.)
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/workload-identity.yaml >/dev/null
 
@@ -216,12 +227,15 @@ kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
   > "${TMP}/smoke-producer-agent-token.json"
 jq -r .token "${TMP}/smoke-producer-agent-token.json" > "${PRODUCER_TOKEN_FILE}"
 
-# Bot identity. Under ADR 0004 the bot's join token is created
-# separately (kubernetes join method + static_jwks pinned to the
-# consumer cluster) — we cannot create it yet because we need the
-# consumer kind cluster's JWKS first.
+# Bot identities (per-RemoteApp + singleton trust-bundle). Under
+# ADR 0004 each bot's join token is created separately (kubernetes
+# join + static_jwks pinned to the consumer cluster) — we cannot
+# create them yet because we need the consumer kind cluster's JWKS
+# first.
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/bot.yaml >/dev/null
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/trust-bundle-bot.yaml >/dev/null
 
 step "Bringing up the producer (http-echo + teleport-kube-agent)"
 kubectl --context kind-producer apply -f hack/smoke/producer/http-echo.yaml >/dev/null
@@ -252,10 +266,69 @@ if [[ "${APP_SERVERS_OK}" -ne 1 ]]; then
 fi
 echo "smoke-app present in app_servers."
 
+step "Exporting consumer cluster JWKS and creating the kubernetes-join bot tokens"
+# ADR 0004 / ADR 0008: both kubernetes-join tokens carry the consumer
+# kind cluster's `/openid/v1/jwks` document in `static_jwks.jwks`.
+# Teleport auth validates each tbot pod's projected SA JWT against that
+# JWKS at join time; the per-token `allow` rule narrows which
+# ServiceAccount subjects each token admits.
+#
+# This step runs BEFORE `helm install` (below) so that the singleton
+# trust-bundle tbot the chart ships can join Teleport on its first try
+# — `helm --wait` waits for Ready, and a CrashLoopBackOff caused by a
+# missing token on Central would push us past HELM_WAIT.
+JWKS_JSON="$(kubectl --context kind-consumer get --raw /openid/v1/jwks | jq -c .)"
+if [[ -z "${JWKS_JSON}" || "${JWKS_JSON}" == "null" ]]; then
+  warn "consumer cluster's /openid/v1/jwks returned no document"
+  exit 1
+fi
+export JWKS_JSON
+
+# Render both kubernetes-join tokens from tokens.yaml with the JWKS
+# substituted. tokens.yaml carries three documents in order:
+#   [0] producer-agent-token       (NOT rendered — created on Central
+#                                    via `tctl tokens add` above with a
+#                                    random value; this doc is reference
+#                                    shape only)
+#   [1] smoke-bot-token            (per-RemoteApp tbot — ADR 0004)
+#   [2] tunnelport-trust-bundle-token (singleton tbot — ADR 0008)
+# Both [1] and [2] need the JWKS substituted; they pin DIFFERENT
+# ServiceAccount subjects via their respective `allow` rules.
+export REPO_ROOT
+python3 - <<PYEOF
+import os, pathlib, textwrap
+# Use REPO_ROOT so the substitution works regardless of cwd (defence in
+# depth — the script already cd's to REPO_ROOT at top, but a relative
+# pathlib.Path silently yields an empty doc if that ever regresses).
+src = pathlib.Path(os.environ['REPO_ROOT'], 'hack/smoke/teleport/tokens.yaml').read_text()
+docs = src.split('\n---\n')
+if len(docs) < 3:
+    raise SystemExit(f'tokens.yaml: expected 3 documents, got {len(docs)}')
+# The JWKS field is a YAML block scalar (`jwks: |`). Indent the
+# compact JSON to match — 8 spaces lines up under the `static_jwks`
+# nesting in tokens.yaml.
+jwks_block = textwrap.indent(os.environ['JWKS_JSON'], '        ')
+for doc, out_path in [
+    (docs[1], "${SMOKE_BOT_TOKEN_FILE}"),
+    (docs[2], "${TRUST_BUNDLE_TOKEN_FILE}"),
+]:
+    rendered = doc.replace('        REPLACE_WITH_CONSUMER_JWKS', jwks_block)
+    pathlib.Path(out_path).write_text(rendered)
+PYEOF
+
+# Create both tokens on Central before helm install so the singleton
+# trust-bundle tbot can join on its first reconcile.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < "${SMOKE_BOT_TOKEN_FILE}" >/dev/null
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < "${TRUST_BUNDLE_TOKEN_FILE}" >/dev/null
+
 step "Installing the operator on the consumer cluster"
 # teleport.clusterName matches the Teleport cluster name configured in
 # hack/smoke/teleport/helm-values.yaml; teleport.proxyAddr is the
 # kind-discovered NodePort proxy address (ADR 0005).
+# trustBundle.tokenName names the ProvisionToken created above —
+# without it the singleton tbot the chart ships fails to join (ADR 0008).
 helm --kube-context kind-consumer upgrade --install tunnelport \
   ./helm/tunnelport \
   --create-namespace --namespace tunnelport-system \
@@ -267,46 +340,8 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set tbot.insecure=true \
   --set teleport.clusterName=smoke.tunnelport.local \
   --set teleport.proxyAddr="${TELEPORT_PROXY_ADDR}" \
+  --set trustBundle.tokenName=tunnelport-trust-bundle-token \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
-
-step "Exporting consumer cluster JWKS and creating the kubernetes-join bot token"
-# ADR 0004: the bot token's `static_jwks` block is the consumer kind
-# cluster's `/openid/v1/jwks` document. Teleport auth validates the
-# tbot pod's projected SA JWT against that JWKS at join time.
-JWKS_JSON="$(kubectl --context kind-consumer get --raw /openid/v1/jwks | jq -c .)"
-if [[ -z "${JWKS_JSON}" || "${JWKS_JSON}" == "null" ]]; then
-  warn "consumer cluster's /openid/v1/jwks returned no document"
-  exit 1
-fi
-export JWKS_JSON
-
-# Render the kubernetes-join token from tokens.yaml with the JWKS
-# substituted, then create it on Central. We take only the smoke-bot-
-# token document — the producer-agent-token in the same file is the
-# reference shape for that side of the smoke; the actual producer
-# token was generated server-side via `tctl tokens add` above (with a
-# random name) and is unrelated to this apply. The `allow` rule pins
-# the per-CR ServiceAccount the operator renders for this RemoteApp
-# ("smoke:smoke-app").
-export REPO_ROOT
-python3 - <<'PYEOF' > "${SMOKE_BOT_TOKEN_FILE}"
-import json, os, pathlib, textwrap
-# Use REPO_ROOT so the substitution works regardless of cwd (defence in
-# depth — the script already cd's to REPO_ROOT at top, but a relative
-# pathlib.Path silently yields an empty doc if that ever regresses).
-src = pathlib.Path(os.environ['REPO_ROOT'], 'hack/smoke/teleport/tokens.yaml').read_text()
-docs = src.split('\n---\n', 1)
-bot_doc = docs[1] if len(docs) == 2 else docs[0]
-# The JWKS field is now a YAML block scalar (`jwks: |`). Indent the
-# compact JSON to match — 8 spaces lines up under the `static_jwks`
-# nesting in tokens.yaml.
-jwks_block = textwrap.indent(os.environ['JWKS_JSON'], '        ')
-bot_doc = bot_doc.replace('        REPLACE_WITH_CONSUMER_JWKS', jwks_block)
-print(bot_doc)
-PYEOF
-
-kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
-  tctl create -f - < "${SMOKE_BOT_TOKEN_FILE}" >/dev/null
 
 step "Applying the RemoteApp CR"
 # RemoteApp no longer carries proxyAddr / clusterName (ADR 0005) — the
@@ -351,9 +386,9 @@ kubectl --context kind-consumer apply -f hack/smoke/consumer/tls-probe.yaml >/de
 # (slice 02), the trust-bundle Secret carries the SPIFFE CA chain
 # (slice 03), and the SVID's SAN matches the Service hostname (curl
 # does standard hostname verification).
-kubectl --context kind-consumer -n smoke wait job/smoke-curl-tls \
+kubectl --context kind-consumer -n tunnelport-system wait job/smoke-curl-tls \
   --for=condition=complete --timeout="${CURL_WAIT}s"
-TLS_BODY="$(kubectl --context kind-consumer -n smoke logs job/smoke-curl-tls -c curl 2>&1 | tail -1)"
+TLS_BODY="$(kubectl --context kind-consumer -n tunnelport-system logs job/smoke-curl-tls -c curl 2>&1 | tail -1)"
 echo "Got TLS body: ${TLS_BODY}"
 if [[ "${TLS_BODY}" != "${EXPECTED_BODY}" ]]; then
   warn "TLS curl body mismatch: expected '${EXPECTED_BODY}', got '${TLS_BODY}'"

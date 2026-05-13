@@ -1,0 +1,18 @@
+# TeleportBot resource for the singleton trust-bundle bot (ADR 0008).
+# Bound to the `tunnelport-trust-bundle` role so its issued SVID is
+# scoped to the matching WorkloadIdentity. The bot identity is distinct
+# from per-RemoteApp `smoke-bot` (separate role, separate label-key
+# selectors) so the two bots cannot cross-issue.
+#
+# Apply with:
+#   tctl create -f hack/smoke/teleport/trust-bundle-bot.yaml
+kind: bot
+version: v1
+metadata:
+  name: tunnelport-trust-bundle-bot
+spec:
+  roles:
+    - tunnelport-trust-bundle
+  # Default cert TTL is fine for smoke. The chart's renewal_interval
+  # value (20m) is well under the default TTL; production tightening
+  # is the chart's call, not the bot's.

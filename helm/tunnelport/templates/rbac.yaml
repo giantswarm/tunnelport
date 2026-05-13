@@ -96,42 +96,15 @@ rules:
   - update
   - watch
 
-# Trust-bundle distribution (slice 03 / ADR 0007 §"Trust bundle
-# distribution to consumers"). The operator pre-creates a per-CR
-# `<cr.Name>-spiffe-bundle` Secret (owned by the RemoteApp, empty Data)
-# and a per-CR Role + RoleBinding that ties the per-CR ServiceAccount to
-# `get;update;patch` on that single named Secret. tbot then writes
-# `svid_bundle.pem` via its `kubernetes_secret` destination. The
-# operator-level ClusterRole is broad because controller-runtime's
-# typed client doesn't pre-filter writes; the *effective* in-cluster
-# authority handed to tbot pods is the per-CR Role, which carries a
-# `resourceNames: [<name>-spiffe-bundle]` constraint — see
-# render.go::renderTrustBundleRole.
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - rbac.authorization.k8s.io
-  resources:
-  - roles
-  - rolebindings
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
+# ADR 0008 removed the per-CR trust-bundle Secret/Role/RoleBinding;
+# the operator no longer renders any Secret, Role, or RoleBinding. The
+# `core/secrets` and `rbac.authorization.k8s.io/roles,rolebindings`
+# grants that ADR 0007 added here have been removed accordingly.
+# Consumer trust-bundle distribution is now the chart-managed singleton
+# tbot's job (see `trust-bundle-*.yaml` templates), and that bot's
+# permissions are namespace-scoped via its own per-Secret Role —
+# the operator does not need cluster-wide write authority on these
+# resource groups.
 
 # Leader-election: leases in the operator's own namespace. controller-
 # runtime defaults to a `coordination.k8s.io/leases` lock; the

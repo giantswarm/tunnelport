@@ -85,14 +85,14 @@ type tbotService struct {
 	AppName string `json:"app_name,omitempty"`
 	Listen  string `json:"listen,omitempty"`
 	// Fields below back the workload-identity-x509 service block (ADR
-	// 0007). Schema source: gravitational/teleport
+	// 0007 / 0008). Schema source: gravitational/teleport
 	// `lib/tbot/services/workloadidentity/x509_output_config.go`:
 	// `Destination` is singular — exactly one destination per service.
-	// The trust-bundle Secret (slice 03) is therefore a SECOND
-	// workload-identity-x509 service in the same tbot.yaml, sharing
-	// the same selector but with a `kubernetes_secret` destination
-	// instead of `directory`. credential_ttl / renewal_interval are
-	// inlined (CredentialLifetime in upstream) at the service level.
+	// Per-RemoteApp tbots emit one `directory` destination (read by the
+	// ghostunnel sidecar). Consumer trust-bundle distribution is the
+	// chart-managed singleton bot's job (ADR 0008), not the per-CR
+	// bot's — there is no second service block here writing into a
+	// Kubernetes Secret.
 	Selector        *tbotWISelector    `json:"selector,omitempty"`
 	Destination     *tbotWIDestination `json:"destination,omitempty"`
 	CredentialTTL   string             `json:"credential_ttl,omitempty"`
@@ -114,16 +114,18 @@ type tbotWISelector struct {
 	Labels map[string][]string `json:"labels,omitempty"`
 }
 
-// tbotWIDestination is one element of the workload-identity-x509 service's
-// `destinations:` list. Slice 01 emits the `directory` variant (ghostunnel
-// reads the SVID trio from a shared emptyDir); slice 03 adds the
-// `kubernetes_secret` variant — tbot writes `svid_bundle.pem` directly into
-// a Kubernetes Secret so consumer pods can mount the bundle for chain
-// verification (ADR 0007 §"Trust bundle distribution to consumers").
+// tbotWIDestination is the workload-identity-x509 service's `destination:`
+// (singular per service — upstream
+// `lib/tbot/services/workloadidentity/x509_output_config.go`). Per-CR
+// tbots emit the `directory` variant only: ghostunnel reads the SVID trio
+// from a shared emptyDir. The `kubernetes_secret` variant is used by the
+// chart-managed singleton trust-bundle bot (ADR 0008), not by per-CR
+// tbots; the `name` field below is retained on the struct for that
+// future use even though no per-CR call site sets it today.
 //
 // `path` is the on-disk directory for the `directory` variant.
-// `name` is the Secret name (in tbot's own namespace, the same namespace
-// the RemoteApp lives in) for the `kubernetes_secret` variant.
+// `name` is the Secret name (in tbot's own namespace) for the
+// `kubernetes_secret` variant.
 type tbotWIDestination struct {
 	Type string `json:"type"`
 	Path string `json:"path,omitempty"`
@@ -150,23 +152,15 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 				AppName: cr.Spec.AppName,
 				Listen:  fmt.Sprintf("tcp://0.0.0.0:%d", cr.Spec.Port),
 			},
-			// First workload-identity-x509 service: directory destination.
-			// Slice 01 / ADR 0007. The ghostunnel sidecar (slice 02) reads
+			// workload-identity-x509 service: directory destination only.
+			// ADR 0007 / 0008. The ghostunnel sidecar reads
 			// svid.pem / svid_key.pem from the shared emptyDir mount.
+			// Consumer trust-bundle distribution is the chart-managed
+			// singleton bot's responsibility (ADR 0008) — no second
+			// service block here writes into a Kubernetes Secret.
 			workloadIdentityX509Service(cr, &tbotWIDestination{
 				Type: "directory",
 				Path: mountPathSVID,
-			}),
-			// Second workload-identity-x509 service: kubernetes_secret
-			// destination. Slice 03 / ADR 0007 §"Trust bundle distribution".
-			// tbot writes svid_bundle.pem into the per-CR Secret the
-			// operator pre-creates with an ownerRef back to the RemoteApp.
-			// A second service block is required because upstream
-			// workload-identity-x509 supports exactly one `destination:`
-			// per service — see the struct doc on `tbotService.Destination`.
-			workloadIdentityX509Service(cr, &tbotWIDestination{
-				Type: "kubernetes_secret",
-				Name: trustBundleSecretName(cr),
 			}),
 		},
 	}

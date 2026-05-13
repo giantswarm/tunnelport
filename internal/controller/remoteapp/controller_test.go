@@ -19,7 +19,6 @@ package remoteapp
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,14 +34,11 @@ import (
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
 
-// kindRemoteApp / kindRole are the literal Kind strings owned objects'
-// ownerReferences should point at. They appear in assertions across
-// multiple tests in this package; collapsing to constants keeps the
+// kindRemoteApp is the literal Kind string owned objects'
+// ownerReferences should point at. Appears in assertions across
+// multiple tests in this package; collapsing to a constant keeps the
 // goconst linter quiet and makes a future rename safe.
-const (
-	kindRemoteApp = "RemoteApp"
-	kindRole      = "Role"
-)
+const kindRemoteApp = "RemoteApp"
 
 const (
 	pollInterval = 50 * time.Millisecond
@@ -373,64 +369,41 @@ func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T
 	})
 }
 
-// TestReconciler_AppliesTrustBundleSecretRoleAndRoleBinding pins
-// slice 03 (ADR 0007): every reconcile produces the per-CR
-// `<name>-spiffe-bundle` Secret (empty Data, owned by the CR), the
-// per-CR Role (single rule, single resourceName, three verbs), and a
-// RoleBinding tying that Role to the per-CR ServiceAccount.
-func TestReconciler_AppliesTrustBundleSecretRoleAndRoleBinding(t *testing.T) {
+// TestReconciler_DoesNotApplyTrustBundleObjects pins ADR 0008: the
+// reconcile loop no longer materialises a per-CR `<name>-spiffe-bundle`
+// Secret, Role, or RoleBinding. Consumer trust-bundle distribution
+// moved to a chart-managed singleton bot in the release namespace; the
+// per-CR objects that lived alongside each tbot under ADR 0007 are
+// gone. After a reconcile completes (proxied by the SA being
+// materialised), none of the three objects exist in the CR's namespace.
+func TestReconciler_DoesNotApplyTrustBundleObjects(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
 	cr := makeRemoteApp(ctx, t, ns, "bundle")
 	bundleName := cr.Name + "-spiffe-bundle"
 
+	// Wait for the SA to appear — proxy for "reconcile has run once" —
+	// then assert the trust-bundle trio is absent.
+	sa := &corev1.ServiceAccount{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sa)
+
 	sec := &corev1.Secret{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, sec)
-	if sec.Type != corev1.SecretTypeOpaque {
-		t.Errorf("Secret.Type: want Opaque, got %q", sec.Type)
-	}
-	if len(sec.Data) != 0 {
-		t.Errorf("Secret.Data must be empty on first reconcile (tbot owns the data); got %d keys", len(sec.Data))
+	err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, sec)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("per-CR trust-bundle Secret must not exist (ADR 0008); get returned err=%v", err)
 	}
 
 	role := &rbacv1.Role{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, role)
-	if len(role.Rules) != 1 {
-		t.Fatalf("Role.Rules: want 1, got %d: %+v", len(role.Rules), role.Rules)
-	}
-	r := role.Rules[0]
-	if !slices.Equal(r.APIGroups, []string{""}) ||
-		!slices.Equal(r.Resources, []string{"secrets"}) ||
-		!slices.Equal(r.ResourceNames, []string{bundleName}) ||
-		!slices.Equal(r.Verbs, []string{"get", "update", "patch"}) {
-		t.Errorf("Role.Rules[0] shape unexpected: %+v", r)
+	err = testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, role)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("per-CR trust-bundle Role must not exist (ADR 0008); get returned err=%v", err)
 	}
 
 	rb := &rbacv1.RoleBinding{}
-	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, rb)
-	if rb.RoleRef.Kind != kindRole || rb.RoleRef.Name != bundleName {
-		t.Errorf("RoleBinding.RoleRef: want Role/%q, got %+v", bundleName, rb.RoleRef)
-	}
-	if len(rb.Subjects) != 1 || rb.Subjects[0].Kind != rbacv1.ServiceAccountKind ||
-		rb.Subjects[0].Name != cr.Name || rb.Subjects[0].Namespace != ns {
-		t.Errorf("RoleBinding.Subjects: want one SA %s/%s, got %+v", ns, cr.Name, rb.Subjects)
-	}
-
-	// OwnerReferences on every new object cascade-delete with the CR.
-	for _, obj := range []client.Object{sec, role, rb} {
-		ors := obj.GetOwnerReferences()
-		if len(ors) != 1 {
-			t.Errorf("%T %s: ownerRefs want 1, got %d", obj, obj.GetName(), len(ors))
-			continue
-		}
-		or := ors[0]
-		if or.UID != cr.UID || or.Kind != kindRemoteApp {
-			t.Errorf("%T %s: ownerRef wrong: %+v", obj, obj.GetName(), or)
-		}
-		if or.Controller == nil || !*or.Controller {
-			t.Errorf("%T %s: ownerRef.Controller want true, got %v", obj, obj.GetName(), or.Controller)
-		}
+	err = testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, rb)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("per-CR trust-bundle RoleBinding must not exist (ADR 0008); get returned err=%v", err)
 	}
 }
 
