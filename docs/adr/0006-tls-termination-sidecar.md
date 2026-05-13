@@ -1,5 +1,12 @@
 # TLS termination on the tunnel Service via stunnel sidecar
 
+**Status: superseded by ADR 0007 before deployment.** This design was
+drafted, implemented in branch, and withdrawn before any commit
+landed in `main` or any consumer MC ran it. ADR 0007 records the
+SPIFFE-via-Teleport design that ships instead and the reasoning that
+flipped the decision. ADR 0006 is preserved here as the considered
+alternative; do not implement from it.
+
 The tunnel Service grows a TLS listener served by an `stunnel` sidecar
 container colocated with `tbot` in every RemoteApp pod. The sidecar
 listens on `8443`, terminates TLS, and forwards plaintext to tbot's
