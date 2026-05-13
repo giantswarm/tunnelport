@@ -25,6 +25,18 @@ spec:
     # matches `*:*`. See workload-identity.yaml for the resource.
     workload_identity_labels:
       remoteapp: ["smoke-app"]
+    # workload_identity_labels alone scopes WHICH WorkloadIdentity
+    # the bot may issue against, but tbot also has to look up the
+    # resource on Central before requesting a SVID. The list/read
+    # verbs on the workload_identity resource kind are required —
+    # without them tbot fails issuance with
+    # `access denied to perform action "list" on "workload_identity"`.
+    rules:
+      - resources:
+          - workload_identity
+        verbs:
+          - list
+          - read
     # No login matters for application-tunnel — but Teleport's role
     # validator requires logins to be non-empty for any role that
     # touches `app_labels`. "tunneluser" is a placeholder principal.

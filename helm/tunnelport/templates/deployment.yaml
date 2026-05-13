@@ -62,6 +62,9 @@ spec:
         - --tbot-memory-request={{ .Values.tbot.resources.requests.memory }}
         - --tbot-cpu-limit={{ .Values.tbot.resources.limits.cpu }}
         - --tbot-memory-limit={{ .Values.tbot.resources.limits.memory }}
+        - --ghostunnel-image={{ .Values.tls.ghostunnelImage }}
+        - --ghostunnel-reload-interval={{ .Values.tls.reloadInterval }}
+        - --ghostunnel-listen-port={{ .Values.tls.port }}
         - --teleport-cluster-name={{ required "teleport.clusterName is required (ADR 0005)" .Values.teleport.clusterName }}
         - --teleport-proxy-addr={{ required "teleport.proxyAddr is required (ADR 0005)" .Values.teleport.proxyAddr }}
         {{- if .Values.tbot.insecure }}

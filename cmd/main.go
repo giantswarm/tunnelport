@@ -84,6 +84,10 @@ type flags struct {
 	teleportClusterName string
 	teleportProxyAddr   string
 
+	ghostunnelImage          string
+	ghostunnelReloadInterval string
+	ghostunnelListenPort     int
+
 	zapOpts zap.Options
 }
 
@@ -122,6 +126,20 @@ func parseFlags() flags {
 	flag.StringVar(&f.teleportProxyAddr, "teleport-proxy-addr", "",
 		"Required. host:port of the Teleport proxy every rendered tbot pod connects to. "+
 			"Flows into `proxy_server` in the rendered tbot.yaml. Empty fails fast at startup.")
+	// Ghostunnel TLS-termination sidecar (ADR 0007 / slice 02). The sidecar
+	// reads the SVID tbot writes into a shared emptyDir and serves it on
+	// the rendered Service's `tls` port. The 5-minute reload cadence is
+	// safe because tbot's workload-identity-x509 service renews every 20m
+	// by default.
+	flag.StringVar(&f.ghostunnelImage, "ghostunnel-image", "ghostunnel/ghostunnel:v1.7.3",
+		"Container image for the ghostunnel TLS-termination sidecar (ADR 0007). "+
+			"The same image is used for every rendered tbot Deployment.")
+	flag.StringVar(&f.ghostunnelReloadInterval, "ghostunnel-reload-interval", "5m",
+		"Value passed to ghostunnel's --timed-reload flag (Go-duration). 5m is safe "+
+			"with tbot's default 20m SVID renewal cadence.")
+	flag.IntVar(&f.ghostunnelListenPort, "ghostunnel-listen-port", 8443,
+		"Port the ghostunnel sidecar listens on inside the pod; the rendered "+
+			"Service exposes it as the `tls` port with the same value.")
 	flag.StringVar(&f.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -238,6 +256,9 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 		TeleportProxyAddr: requireOrExit(
 			"teleport-proxy-addr", f.teleportProxyAddr, teleportProxyAddrPattern,
 		),
+		GhostunnelImage:          f.ghostunnelImage,
+		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
+		GhostunnelListenPort:     int32(f.ghostunnelListenPort),
 	}
 }
 

@@ -88,6 +88,11 @@ dump_diag() {
   kubectl --context kind-consumer -n smoke logs -l tunnelport.giantswarm.io/role=tbot --tail=40 2>&1 | tail -50 >&2 || true
   printf '\n--- producer/smoke kube-agent logs ---\n' >&2
   kubectl --context kind-producer -n smoke logs -l app=teleport-kube-agent --tail=40 2>&1 | tail -50 >&2 || true
+  printf '\n--- consumer/smoke trust-bundle secret ---\n' >&2
+  kubectl --context kind-consumer -n smoke get secret smoke-app-spiffe-bundle \
+    -o jsonpath='{"data keys: "}{.data}{"\n"}' 2>&1 >&2 || true
+  printf '\n--- consumer/smoke tls-probe job ---\n' >&2
+  kubectl --context kind-consumer -n smoke logs job/smoke-curl-tls --all-containers=true --tail=30 2>&1 | tail -40 >&2 || true
 }
 
 SMOKE_RESULT=fail
@@ -322,6 +327,36 @@ ACTUAL_BODY="$(kubectl --context kind-consumer -n smoke logs job/smoke-curl 2>&1
 echo "Got body: ${ACTUAL_BODY}"
 if [[ "${ACTUAL_BODY}" != "${EXPECTED_BODY}" ]]; then
   warn "Curl body mismatch: expected '${EXPECTED_BODY}', got '${ACTUAL_BODY}'"
+  exit 1
+fi
+
+# ---------------------------------------------------------------------
+# TLS-side assertions (ADR 0007 / spiffe-tunnel-tls slices 02 + 03).
+# The plaintext :8080 path above keeps slice 01 honest — the WI service
+# block in tbot.yaml must not break the existing application-tunnel.
+# Below we additionally assert the ghostunnel sidecar serves a valid
+# SVID on :8443 (slice 02) and that a pod mounting the
+# operator-rendered ${cr.Name}-spiffe-bundle Secret can curl the
+# tunnel over HTTPS with full-chain verification (slice 03).
+# ---------------------------------------------------------------------
+
+step "Running TLS assertion (cacert-verified HTTPS curl on :8443)"
+kubectl --context kind-consumer apply -f hack/smoke/consumer/tls-probe.yaml >/dev/null
+
+# The initContainer waits for tbot to populate svid_bundle.pem in the
+# mounted Secret; the curl container retries the request until the
+# tunnel is up. CURL_WAIT is generous to cover both budgets. A
+# successful --cacert HTTPS curl transitively verifies: tbot wrote
+# the SVID files (slice 01), ghostunnel terminates TLS using them
+# (slice 02), the trust-bundle Secret carries the SPIFFE CA chain
+# (slice 03), and the SVID's SAN matches the Service hostname (curl
+# does standard hostname verification).
+kubectl --context kind-consumer -n smoke wait job/smoke-curl-tls \
+  --for=condition=complete --timeout="${CURL_WAIT}s"
+TLS_BODY="$(kubectl --context kind-consumer -n smoke logs job/smoke-curl-tls -c curl 2>&1 | tail -1)"
+echo "Got TLS body: ${TLS_BODY}"
+if [[ "${TLS_BODY}" != "${EXPECTED_BODY}" ]]; then
+  warn "TLS curl body mismatch: expected '${EXPECTED_BODY}', got '${TLS_BODY}'"
   exit 1
 fi
 

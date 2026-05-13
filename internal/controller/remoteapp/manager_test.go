@@ -62,6 +62,11 @@ func testConfig() PodDefaults {
 		// integration tests can assert against deterministic values.
 		TeleportClusterName: "teleport.example.com",
 		TeleportProxyAddr:   "teleport.example.com:443",
+		// Ghostunnel sidecar defaults (slice 02 / ADR 0007). Fixed image
+		// reference so integration tests see a non-empty container image.
+		GhostunnelImage:          "test.example.com/ghostunnel:test",
+		GhostunnelReloadInterval: "5m",
+		GhostunnelListenPort:     tlsListenPortDefault,
 	}
 }
 

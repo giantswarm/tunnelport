@@ -104,6 +104,24 @@ tbot:
       cpu: 200m
       memory: 256Mi
 
+# Ghostunnel TLS-termination sidecar (ADR 0007 / slice 02). Every
+# rendered tbot Deployment grows a ghostunnel sidecar that reads the
+# SVID tbot writes into a shared emptyDir and serves it on the
+# rendered Service's `tls` port. These values flow into the operator
+# manager's CLI flags (`--ghostunnel-image`, etc.).
+tls:
+  # Pinned ghostunnel release; bump deliberately. `ghostunnel/ghostunnel`
+  # is the upstream image on Docker Hub.
+  ghostunnelImage: ghostunnel/ghostunnel:v1.7.3
+  # Polling interval ghostunnel uses to re-read the SVID files from
+  # disk. Safe at 5m because tbot's workload-identity-x509 service
+  # renews every 20m by default — see ADR 0007 §"Migration shape".
+  reloadInterval: 5m
+  # TLS port the rendered Service exposes (and the ghostunnel sidecar
+  # listens on inside the pod). The plaintext port name `tbot` is
+  # preserved for selector / NetworkPolicy backward compatibility.
+  port: 8443
+
 # CRD packaging. With `crds.install: true` (the default) the chart
 # bundles the CRD inline in `templates/crds.yml` with
 # `helm.sh/resource-policy: keep`, so `helm uninstall` does NOT delete

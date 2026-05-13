@@ -79,21 +79,47 @@ func TestRBAC_RoleManifestGrantsServiceAccountsWrite(t *testing.T) {
 	}
 }
 
-// TestRBAC_RoleManifestExcludesSecrets pins ADR 0004: the kubernetes-
-// join model removes the static-token Secret entirely, so the operator
-// must NOT request any verb on `secrets`.
-func TestRBAC_RoleManifestExcludesSecrets(t *testing.T) {
+// TestRBAC_RoleManifestGrantsSecretsForTrustBundle pins slice 03 (ADR
+// 0007 §"Trust bundle distribution to consumers", which supersedes the
+// ADR 0004 no-Secrets posture for this specific case): the operator
+// pre-creates a per-CR `<cr.Name>-spiffe-bundle` Secret with an
+// ownerRef back to the CR (tbot owns the Data via its
+// `kubernetes_secret` destination). Pre-creating that Secret requires
+// the full write verbs on core/secrets at the operator's ClusterRole
+// level — narrowed back to a single resourceName at the per-CR
+// in-namespace Role the operator also renders.
+//
+// The token-Secret prohibition from ADR 0004 still holds at the model
+// level: no Secret carries a static Teleport join token; the
+// kubernetes-join JWT is mounted via the projected SA token volume.
+func TestRBAC_RoleManifestGrantsSecretsForTrustBundle(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "config", "rbac", "role.yaml")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	// Match the standalone resource line so we don't false-positive on
-	// substrings inside other words.
-	for _, bad := range []string{"- secrets\n", "  - secrets\n"} {
-		if strings.Contains(string(body), bad) {
-			t.Fatalf("%s grants access on secrets; ADR 0004 kubernetes-join "+
-				"model has no token Secret to read.", path)
+	if !strings.Contains(string(body), "- secrets\n") &&
+		!strings.Contains(string(body), "  - secrets\n") {
+		t.Fatalf("%s missing secrets grant; ADR 0007 trust-bundle "+
+			"distribution requires the operator to pre-create "+
+			"the per-CR `<name>-spiffe-bundle` Secret.", path)
+	}
+}
+
+// TestRBAC_RoleManifestGrantsRolesAndRoleBindings pins slice 03 (ADR
+// 0007): the operator renders a per-CR Role + RoleBinding that scopes
+// the per-CR ServiceAccount's authority on the trust-bundle Secret to a
+// single resourceName. Creating those requires write verbs on the
+// rbac.authorization.k8s.io group.
+func TestRBAC_RoleManifestGrantsRolesAndRoleBindings(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "config", "rbac", "role.yaml")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	for _, want := range []string{"- roles\n", "- rolebindings\n"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("%s missing %s grant; ADR 0007 trust-bundle distribution needs it.", path, strings.TrimSpace(want))
 		}
 	}
 }

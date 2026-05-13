@@ -19,12 +19,14 @@ package remoteapp
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -219,8 +221,10 @@ func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
 		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, svc); err != nil {
 			return false, err
 		}
-		if len(svc.Spec.Ports) != 1 {
-			return false, fmt.Errorf("expected 1 port, got %d", len(svc.Spec.Ports))
+		// Slice 02 added the TLS port — the rendered Service now has two
+		// ports; the first one (`tbot`) tracks cr.Spec.Port.
+		if len(svc.Spec.Ports) != 2 {
+			return false, fmt.Errorf("expected 2 ports (tbot + tls), got %d", len(svc.Spec.Ports))
 		}
 		if svc.Spec.Ports[0].Port != newPort {
 			return false, fmt.Errorf("Service port still %d", svc.Spec.Ports[0].Port)
@@ -358,6 +362,67 @@ func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T
 		}
 		return true, nil
 	})
+}
+
+// TestReconciler_AppliesTrustBundleSecretRoleAndRoleBinding pins
+// slice 03 (ADR 0007): every reconcile produces the per-CR
+// `<name>-spiffe-bundle` Secret (empty Data, owned by the CR), the
+// per-CR Role (single rule, single resourceName, three verbs), and a
+// RoleBinding tying that Role to the per-CR ServiceAccount.
+func TestReconciler_AppliesTrustBundleSecretRoleAndRoleBinding(t *testing.T) {
+	ctx := context.Background()
+	ns := uniqueNS(t, ctx)
+
+	cr := makeRemoteApp(ctx, t, ns, "bundle")
+	bundleName := cr.Name + "-spiffe-bundle"
+
+	sec := &corev1.Secret{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, sec)
+	if sec.Type != corev1.SecretTypeOpaque {
+		t.Errorf("Secret.Type: want Opaque, got %q", sec.Type)
+	}
+	if len(sec.Data) != 0 {
+		t.Errorf("Secret.Data must be empty on first reconcile (tbot owns the data); got %d keys", len(sec.Data))
+	}
+
+	role := &rbacv1.Role{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, role)
+	if len(role.Rules) != 1 {
+		t.Fatalf("Role.Rules: want 1, got %d: %+v", len(role.Rules), role.Rules)
+	}
+	r := role.Rules[0]
+	if !slices.Equal(r.APIGroups, []string{""}) ||
+		!slices.Equal(r.Resources, []string{"secrets"}) ||
+		!slices.Equal(r.ResourceNames, []string{bundleName}) ||
+		!slices.Equal(r.Verbs, []string{"get", "update", "patch"}) {
+		t.Errorf("Role.Rules[0] shape unexpected: %+v", r)
+	}
+
+	rb := &rbacv1.RoleBinding{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, rb)
+	if rb.RoleRef.Kind != "Role" || rb.RoleRef.Name != bundleName {
+		t.Errorf("RoleBinding.RoleRef: want Role/%q, got %+v", bundleName, rb.RoleRef)
+	}
+	if len(rb.Subjects) != 1 || rb.Subjects[0].Kind != rbacv1.ServiceAccountKind ||
+		rb.Subjects[0].Name != cr.Name || rb.Subjects[0].Namespace != ns {
+		t.Errorf("RoleBinding.Subjects: want one SA %s/%s, got %+v", ns, cr.Name, rb.Subjects)
+	}
+
+	// OwnerReferences on every new object cascade-delete with the CR.
+	for _, obj := range []client.Object{sec, role, rb} {
+		ors := obj.GetOwnerReferences()
+		if len(ors) != 1 {
+			t.Errorf("%T %s: ownerRefs want 1, got %d", obj, obj.GetName(), len(ors))
+			continue
+		}
+		or := ors[0]
+		if or.UID != cr.UID || or.Kind != "RemoteApp" {
+			t.Errorf("%T %s: ownerRef wrong: %+v", obj, obj.GetName(), or)
+		}
+		if or.Controller == nil || !*or.Controller {
+			t.Errorf("%T %s: ownerRef.Controller want true, got %v", obj, obj.GetName(), or.Controller)
+		}
+	}
 }
 
 func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {

@@ -30,13 +30,26 @@ limitations under the License.
 // The operator does not mount or read the SA's projected token itself —
 // the kubelet does that into the tbot pod.
 //
+// Trust-bundle distribution (slice 03 / ADR 0007 §"Trust bundle
+// distribution to consumers"): the operator pre-creates a per-CR
+// `<cr.Name>-spiffe-bundle` Secret (owned by the RemoteApp, empty Data)
+// and a per-CR Role + RoleBinding granting the per-CR ServiceAccount
+// `get;update;patch` on that one named Secret. tbot then owns the
+// Data via its `kubernetes_secret` destination on the
+// workload-identity-x509 service. This is why the operator now needs
+// write verbs on core/secrets and on the rbac role/rolebinding types
+// — under the old kubernetes-join-only model (ADR 0004) it didn't.
+//
 // +kubebuilder:rbac:groups=access.giantswarm.io,resources=remoteapps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=access.giantswarm.io,resources=remoteapps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 package remoteapp
 
 import (
@@ -45,6 +58,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -97,8 +111,13 @@ type Reconciler struct {
 // pod authenticates to Teleport via the projected JWT for that SA. No
 // static-token Secret on the consumer cluster is involved.
 //
-// Apply order: ServiceAccount → ConfigMap → Deployment → Service. The
-// Deployment references the SA by name, so SA must be ahead of it.
+// Apply order: ServiceAccount → ConfigMap → Role → RoleBinding → Secret
+// → Deployment → Service. The Deployment references the SA by name, so
+// SA must be ahead of it. The trust-bundle Secret (slice 03 / ADR 0007)
+// must exist before the Deployment so the first reconcile of tbot
+// finds an existing target for its `kubernetes_secret` destination;
+// Role + RoleBinding ahead of the Secret keep RBAC ready by the time
+// tbot first attempts to update the Secret.
 //
 // RBAC: the operator must NOT request `pods/log` (ADR 0003). The
 // package-level markers in this file request only what this slice's
@@ -132,6 +151,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}{
 		{"ServiceAccount", renderServiceAccount(cr, r.PodDefaults)},
 		{"ConfigMap", renderConfigMap(cr, r.PodDefaults)},
+		{"TrustBundleRole", renderTrustBundleRole(cr, r.PodDefaults)},
+		{"TrustBundleRoleBinding", renderTrustBundleRoleBinding(cr, r.PodDefaults)},
+		{"TrustBundleSecret", renderTrustBundleSecret(cr, r.PodDefaults)},
 		{"Deployment", renderDeployment(cr, r.PodDefaults)},
 		{"Service", renderService(cr, r.PodDefaults)},
 	} {
@@ -227,6 +249,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.ServiceAccount{}).
+		// Trust-bundle objects (slice 03 / ADR 0007). The Secret is
+		// owned by the RemoteApp; tbot writes Data into it but the
+		// operator owns creation + ownerRef, so reacting to Secret
+		// events keeps the field-manager invariants self-healing.
+		Owns(&corev1.Secret{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(r.mapPodToRemoteApp),

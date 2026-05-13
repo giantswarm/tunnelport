@@ -1,0 +1,82 @@
+# TLS-side smoke assertion (ADR 0007 / spiffe-tunnel-tls slices 02 + 03).
+#
+# A curl Job that mounts the operator-rendered
+# `smoke-app-spiffe-bundle` Secret (the trust bundle tbot's
+# kubernetes_secret destination populates) and calls
+# `curl --cacert <bundle> https://smoke-app.smoke.svc.cluster.local:8443`.
+#
+# What this verifies, transitively:
+#   - tbot's workload-identity-x509 service is minting SVIDs (slice 01)
+#   - ghostunnel terminates TLS on :8443 using the SVID (slice 02)
+#   - the SVID's SAN matches the Service DNS name — curl does standard
+#     TLS hostname verification, and would fail otherwise
+#   - the trust bundle is in the per-CR Secret with the SPIFFE CA chain
+#     (slice 03) — the chain verifies against the SVID
+#   - end-to-end consumer pattern works: a pod that knows only the
+#     bundle reaches the tunnel over verified HTTPS
+#
+# Apply AFTER the existing :8080 plaintext smoke-curl Job has passed.
+# The initContainer below polls the mounted Secret file so we don't
+# race tbot's first SVID issuance.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: smoke-curl-tls
+  namespace: smoke
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        - name: trust-bundle
+          secret:
+            # Pre-created (empty Data) by the operator with ownerRef
+            # back to the RemoteApp; tbot's kubernetes_secret
+            # destination on the workload-identity-x509 service writes
+            # svid_bundle.pem into it. The initContainer blocks until
+            # the file is non-empty so curl never reads a zero-byte CA.
+            secretName: smoke-app-spiffe-bundle
+      initContainers:
+        - name: wait-for-trust-bundle
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              # tbot needs to complete the SVID handshake before the
+              # bundle file exists in the mount. Bound the wait to ~2min.
+              for _ in $(seq 1 60); do
+                if [ -s /etc/spiffe/svid_bundle.pem ]; then
+                  echo "trust bundle ready"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "FAIL: svid_bundle.pem never populated by tbot"
+              ls -la /etc/spiffe || true
+              exit 1
+          volumeMounts:
+            - name: trust-bundle
+              mountPath: /etc/spiffe
+              readOnly: true
+      containers:
+        - name: curl
+          image: curlimages/curl:8.10.1
+          args:
+            - --silent
+            - --show-error
+            - --fail-with-body
+            - --retry
+            - "20"
+            - --retry-delay
+            - "3"
+            - --retry-connrefused
+            - --cacert
+            - /etc/spiffe/svid_bundle.pem
+            - https://smoke-app.smoke.svc.cluster.local:8443
+          volumeMounts:
+            - name: trust-bundle
+              mountPath: /etc/spiffe
+              readOnly: true

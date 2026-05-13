@@ -24,6 +24,13 @@ import (
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
 
+// tbotWISelectorLabelRemoteApp is the label key the per-RemoteApp
+// WorkloadIdentity resource on Teleport central is stamped with
+// (hack/smoke/teleport/workload-identity.yaml). The tbot
+// workload-identity-x509 service's `selector.labels` map pins this key
+// to the CR's name so the SVID is minted against exactly one identity.
+const tbotWISelectorLabelRemoteApp = "remoteapp"
+
 // tbot_config.go: typed schema and marshaling for the tbot.yaml content
 // that lands in the rendered ConfigMap. Split out from render.go because
 // it speaks tbot's on-disk config format (an external, evolving schema)
@@ -77,6 +84,50 @@ type tbotService struct {
 	Type    string `json:"type"`
 	AppName string `json:"app_name,omitempty"`
 	Listen  string `json:"listen,omitempty"`
+	// Fields below back the workload-identity-x509 service block (ADR
+	// 0007). Schema source: gravitational/teleport
+	// `lib/tbot/services/workloadidentity/x509_output_config.go`:
+	// `Destination` is singular — exactly one destination per service.
+	// The trust-bundle Secret (slice 03) is therefore a SECOND
+	// workload-identity-x509 service in the same tbot.yaml, sharing
+	// the same selector but with a `kubernetes_secret` destination
+	// instead of `directory`. credential_ttl / renewal_interval are
+	// inlined (CredentialLifetime in upstream) at the service level.
+	Selector        *tbotWISelector    `json:"selector,omitempty"`
+	Destination     *tbotWIDestination `json:"destination,omitempty"`
+	CredentialTTL   string             `json:"credential_ttl,omitempty"`
+	RenewalInterval string             `json:"renewal_interval,omitempty"`
+}
+
+// tbotWISelector mirrors the workload-identity-x509 service's `selector`
+// field. The `labels` map matches a single WorkloadIdentity resource on
+// Teleport central; the per-RemoteApp resource is labelled
+// `remoteapp: <cr.Name>` (hack/smoke/teleport/workload-identity.yaml).
+//
+// Values are []string, not scalar — tbot's upstream schema is list-valued
+// so a single key can match multiple WorkloadIdentity resources at once.
+// A scalar value fails tbot's config parse with
+// `cannot unmarshal !!str into []string`. We always emit a one-element
+// list (singular RemoteApp scoping is enforced by the role's
+// workload_identity_labels — same shape — in hack/smoke/teleport/role.yaml).
+type tbotWISelector struct {
+	Labels map[string][]string `json:"labels,omitempty"`
+}
+
+// tbotWIDestination is one element of the workload-identity-x509 service's
+// `destinations:` list. Slice 01 emits the `directory` variant (ghostunnel
+// reads the SVID trio from a shared emptyDir); slice 03 adds the
+// `kubernetes_secret` variant — tbot writes `svid_bundle.pem` directly into
+// a Kubernetes Secret so consumer pods can mount the bundle for chain
+// verification (ADR 0007 §"Trust bundle distribution to consumers").
+//
+// `path` is the on-disk directory for the `directory` variant.
+// `name` is the Secret name (in tbot's own namespace, the same namespace
+// the RemoteApp lives in) for the `kubernetes_secret` variant.
+type tbotWIDestination struct {
+	Type string `json:"type"`
+	Path string `json:"path,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
@@ -99,6 +150,24 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 				AppName: cr.Spec.AppName,
 				Listen:  fmt.Sprintf("tcp://0.0.0.0:%d", cr.Spec.Port),
 			},
+			// First workload-identity-x509 service: directory destination.
+			// Slice 01 / ADR 0007. The ghostunnel sidecar (slice 02) reads
+			// svid.pem / svid_key.pem from the shared emptyDir mount.
+			workloadIdentityX509Service(cr, &tbotWIDestination{
+				Type: "directory",
+				Path: mountPathSVID,
+			}),
+			// Second workload-identity-x509 service: kubernetes_secret
+			// destination. Slice 03 / ADR 0007 §"Trust bundle distribution".
+			// tbot writes svid_bundle.pem into the per-CR Secret the
+			// operator pre-creates with an ownerRef back to the RemoteApp.
+			// A second service block is required because upstream
+			// workload-identity-x509 supports exactly one `destination:`
+			// per service — see the struct doc on `tbotService.Destination`.
+			workloadIdentityX509Service(cr, &tbotWIDestination{
+				Type: "kubernetes_secret",
+				Name: trustBundleSecretName(cr),
+			}),
 		},
 	}
 	out, err := yaml.Marshal(&doc)
@@ -114,4 +183,27 @@ func tbotConfig(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 		panic(fmt.Errorf("tbotConfig marshal: %w", err))
 	}
 	return string(out)
+}
+
+// workloadIdentityX509Service returns a workload-identity-x509 service
+// bound to the per-RemoteApp WorkloadIdentity (label-matched by
+// `remoteapp: <cr.Name>`) with the supplied destination. Upstream's
+// X509OutputConfig has exactly one Destination per service, so the
+// directory and kubernetes_secret destinations are emitted as two
+// separate service blocks rather than two entries on one (ADR 0007).
+func workloadIdentityX509Service(cr *accessv1alpha1.RemoteApp, dest *tbotWIDestination) tbotService {
+	return tbotService{
+		Type: "workload-identity-x509",
+		Selector: &tbotWISelector{
+			Labels: map[string][]string{
+				tbotWISelectorLabelRemoteApp: {cr.Name},
+			},
+		},
+		Destination: dest,
+		// 60min TTL / 20min renewal — bounds blast radius and matches
+		// ghostunnel's file-watch reload cadence (Issue 01 criterion).
+		// Strings flow through tbot's yaml.v3 time.Duration parsing.
+		CredentialTTL:   "60m",
+		RenewalInterval: "20m",
+	}
 }
