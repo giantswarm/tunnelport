@@ -187,13 +187,21 @@ helm --kube-context kind-teleport upgrade teleport-cluster \
   --namespace teleport --values "${TELEPORT_VALUES_FILE}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
-step "Provisioning Teleport role, bot, and producer agent token via tctl"
+step "Provisioning Teleport role, WorkloadIdentity, bot, and producer agent token via tctl"
 AUTH_POD="$(kubectl --context kind-teleport -n teleport get pods \
   -l app.kubernetes.io/component=auth -o jsonpath='{.items[0].metadata.name}')"
 
-# Role first — bot creation references it.
+# Role first — bot creation references it; role also gates SVID
+# issuance for the WorkloadIdentity created next (ADR 0007).
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < hack/smoke/teleport/role.yaml >/dev/null
+
+# WorkloadIdentity: per ADR 0007, one resource per RemoteApp. tbot's
+# workload-identity-x509 service mints the smoke RemoteApp's tunnel
+# SVID against this; the role's workload_identity_labels match scopes
+# issuance to this resource alone.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create -f - < hack/smoke/teleport/workload-identity.yaml >/dev/null
 
 # Producer agent (Node+App) join token — still a static token; the
 # producer side of the smoke is out of scope for the kubernetes-join

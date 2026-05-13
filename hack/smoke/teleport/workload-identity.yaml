@@ -1,0 +1,30 @@
+# WorkloadIdentity for the smoke RemoteApp's tunnel Service SVID
+# (ADR 0007). tbot's workload-identity-x509 service mints an X.509
+# SVID against this resource and writes svid.pem, svid_key.pem, and
+# svid_bundle.pem to the emptyDir shared with the ghostunnel sidecar.
+#
+# The DNS SANs match the ClusterIP Service the operator renders for
+# the RemoteApp (smoke-app.smoke.svc.*) so a stock Go crypto/tls
+# client verifying ServerName accepts the SVID as a server cert.
+#
+# Issuance is gated by the role's workload_identity_labels match
+# (see role.yaml). Per ADR 0007's posture, every WorkloadIdentity
+# is scoped to one RemoteApp via the `remoteapp` label — no wildcard
+# issuance for the bot.
+#
+# Apply with:
+#   tctl create -f hack/smoke/teleport/workload-identity.yaml
+kind: workload_identity
+version: v1
+metadata:
+  name: smoke-app-svid
+  labels:
+    remoteapp: smoke-app
+spec:
+  spiffe:
+    id: /bot/smoke-bot
+    x509:
+      dns_sans:
+        - smoke-app.smoke.svc.cluster.local
+        - smoke-app.smoke.svc
+        - smoke-app.smoke

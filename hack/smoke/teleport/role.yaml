@@ -1,6 +1,12 @@
-# Teleport role granting access to the smoke app via Application Access.
-# The bot (see bot.yaml) is bound to this role so its issued certs can
-# tunnel to the app named "smoke-app". The runbook applies this with:
+# Teleport role granting (a) Application Access to the smoke app's
+# tunnel, and (b) SVID issuance against the smoke-app WorkloadIdentity
+# (ADR 0007). The bot (see bot.yaml) is bound to this role so its
+# rendered certs can tunnel to "smoke-app" AND so tbot can issue an
+# X.509-SVID with DNS SANs for the tunnel Service. Per-RemoteApp
+# scoping is enforced by both `app_labels` (tunnel side) and
+# `workload_identity_labels` (SVID side).
+#
+# Apply with:
 #   tctl create -f hack/smoke/teleport/role.yaml
 kind: role
 version: v7
@@ -13,6 +19,12 @@ spec:
     # the bot's cert leaks, only this one app is reachable.
     app_labels:
       app-name: smoke-app
+    # Per ADR 0007: the bot may only issue SVIDs against the
+    # WorkloadIdentity labelled `remoteapp: smoke-app`. Narrower than
+    # the cluster's wildcard-workload-identity-issuer role, which
+    # matches `*:*`. See workload-identity.yaml for the resource.
+    workload_identity_labels:
+      remoteapp: ["smoke-app"]
     # No login matters for application-tunnel — but Teleport's role
     # validator requires logins to be non-empty for any role that
     # touches `app_labels`. "tunneluser" is a placeholder principal.
