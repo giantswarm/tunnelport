@@ -44,9 +44,16 @@ TELEPORT_CHART_VERSION="${TELEPORT_CHART_VERSION:-}"
 OPERATOR_IMAGE="${OPERATOR_IMAGE:-tunnelport:smoke}"
 EXPECTED_BODY="${EXPECTED_BODY:-hello-from-producer}"
 
-# Per-step timeouts (seconds). Total target wall-clock <10min.
+# Per-step timeouts (seconds). Total target wall-clock <12min.
 KIND_WAIT="${KIND_WAIT:-180}"
 HELM_WAIT="${HELM_WAIT:-180}"
+# Operator install (ADR 0008) now waits for the singleton trust-bundle
+# tbot Deployment to be Ready as part of `helm --wait`, which means
+# the bot must reach Teleport and issue its first SVID before helm
+# returns. On CI's Ubuntu kind the first-connection retry path is
+# slower than local; 300s leaves room. The other helm installs
+# (Teleport, kube-agent) still use the shorter HELM_WAIT.
+OPERATOR_HELM_WAIT="${OPERATOR_HELM_WAIT:-300}"
 READY_WAIT="${READY_WAIT:-180}"
 CURL_WAIT="${CURL_WAIT:-120}"
 
@@ -345,7 +352,7 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set teleport.clusterName=smoke.tunnelport.local \
   --set teleport.proxyAddr="${TELEPORT_PROXY_ADDR}" \
   --set trustBundle.tokenName=tunnelport-trust-bundle-token \
-  --wait --timeout "${HELM_WAIT}s" >/dev/null
+  --wait --timeout "${OPERATOR_HELM_WAIT}s" >/dev/null
 
 step "Applying the RemoteApp CR"
 # RemoteApp no longer carries proxyAddr / clusterName (ADR 0005) — the
