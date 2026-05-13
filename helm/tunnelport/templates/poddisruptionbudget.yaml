@@ -17,7 +17,17 @@ spec:
   # when the PDB budget is at zero — without this, a crashlooping pod
   # plus a PDB can wedge `kubectl drain` indefinitely.
   unhealthyPodEvictionPolicy: {{ .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  # Selector matches the operator's manager pod only. The chart-managed
+  # singleton trust-bundle bot (ADR 0008) shares `app.kubernetes.io/*`
+  # selector labels but carries the additional
+  # `tunnelport.giantswarm.io/role=trust-bundle-bot` label; excluding
+  # that role keeps the PDB scoped to the operator (which ships with
+  # replicaCount >= 2 by default and tolerates minAvailable: 1) and
+  # leaves the single-replica trust-bundle bot outside any PDB.
   selector:
     matchLabels:
       {{- include "tunnelport.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: tunnelport.giantswarm.io/role
+        operator: DoesNotExist
 {{- end }}
