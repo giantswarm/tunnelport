@@ -35,6 +35,15 @@ import (
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
 
+// kindRemoteApp / kindRole are the literal Kind strings owned objects'
+// ownerReferences should point at. They appear in assertions across
+// multiple tests in this package; collapsing to constants keeps the
+// goconst linter quiet and makes a future rename safe.
+const (
+	kindRemoteApp = "RemoteApp"
+	kindRole      = "Role"
+)
+
 const (
 	pollInterval = 50 * time.Millisecond
 	pollTimeout  = 5 * time.Second
@@ -139,7 +148,7 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 		if or.UID != cr.UID {
 			t.Errorf("%T %s: ownerRef UID want %q, got %q", obj, obj.GetName(), cr.UID, or.UID)
 		}
-		if or.Kind != "RemoteApp" {
+		if or.Kind != kindRemoteApp {
 			t.Errorf("%T %s: ownerRef Kind want RemoteApp, got %q", obj, obj.GetName(), or.Kind)
 		}
 		if or.Controller == nil || !*or.Controller {
@@ -400,7 +409,7 @@ func TestReconciler_AppliesTrustBundleSecretRoleAndRoleBinding(t *testing.T) {
 
 	rb := &rbacv1.RoleBinding{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, rb)
-	if rb.RoleRef.Kind != "Role" || rb.RoleRef.Name != bundleName {
+	if rb.RoleRef.Kind != kindRole || rb.RoleRef.Name != bundleName {
 		t.Errorf("RoleBinding.RoleRef: want Role/%q, got %+v", bundleName, rb.RoleRef)
 	}
 	if len(rb.Subjects) != 1 || rb.Subjects[0].Kind != rbacv1.ServiceAccountKind ||
@@ -416,7 +425,7 @@ func TestReconciler_AppliesTrustBundleSecretRoleAndRoleBinding(t *testing.T) {
 			continue
 		}
 		or := ors[0]
-		if or.UID != cr.UID || or.Kind != "RemoteApp" {
+		if or.UID != cr.UID || or.Kind != kindRemoteApp {
 			t.Errorf("%T %s: ownerRef wrong: %+v", obj, obj.GetName(), or)
 		}
 		if or.Controller == nil || !*or.Controller {

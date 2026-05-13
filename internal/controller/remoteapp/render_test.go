@@ -807,7 +807,7 @@ func TestRenderTrustBundleSecret_OwnedByRemoteApp(t *testing.T) {
 	if or.Name != cr.Name {
 		t.Errorf("ownerRef Name: want %q, got %q", cr.Name, or.Name)
 	}
-	if or.Kind != "RemoteApp" {
+	if or.Kind != kindRemoteApp {
 		t.Errorf("ownerRef Kind: want RemoteApp, got %q", or.Kind)
 	}
 	if or.Controller == nil || !*or.Controller {
@@ -848,7 +848,7 @@ func TestRenderTrustBundleRole_NarrowSecretScope(t *testing.T) {
 	if role.Namespace != cr.Namespace {
 		t.Errorf("Role namespace: want %q, got %q", cr.Namespace, role.Namespace)
 	}
-	if role.Kind != "Role" || role.APIVersion != "rbac.authorization.k8s.io/v1" {
+	if role.Kind != kindRole || role.APIVersion != "rbac.authorization.k8s.io/v1" {
 		t.Errorf("Role TypeMeta: want rbac.authorization.k8s.io/v1/Role, got %q/%q", role.APIVersion, role.Kind)
 	}
 
@@ -896,7 +896,7 @@ func TestRenderTrustBundleRoleBinding_BindsRoleToPerCRSA(t *testing.T) {
 		t.Errorf("RoleBinding TypeMeta: want rbac.authorization.k8s.io/v1/RoleBinding, got %q/%q", rb.APIVersion, rb.Kind)
 	}
 
-	if rb.RoleRef.APIGroup != "rbac.authorization.k8s.io" || rb.RoleRef.Kind != "Role" || rb.RoleRef.Name != wantName {
+	if rb.RoleRef.APIGroup != "rbac.authorization.k8s.io" || rb.RoleRef.Kind != kindRole || rb.RoleRef.Name != wantName {
 		t.Errorf("RoleBinding.RoleRef: want rbac.authorization.k8s.io/Role/%q, got %+v", wantName, rb.RoleRef)
 	}
 
@@ -983,7 +983,7 @@ func TestSetOwnerRef_StampsControllerRefBackToCR(t *testing.T) {
 	if or.Name != cr.Name {
 		t.Errorf("ownerRef Name: want %q, got %q", cr.Name, or.Name)
 	}
-	if or.Kind != "RemoteApp" {
+	if or.Kind != kindRemoteApp {
 		t.Errorf("ownerRef Kind: want RemoteApp, got %q", or.Kind)
 	}
 	if or.Controller == nil || !*or.Controller {
