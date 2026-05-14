@@ -20,21 +20,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// TokenRef points to a Secret holding the static join token for this RemoteApp's
-// dedicated TeleportBot. The operator never reads the Secret's contents — it
-// only references (name, key, resourceVersion).
-type TokenRef struct {
-	// Name of the Secret in the same namespace as the RemoteApp.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Name string `json:"name"`
-	// Key inside the Secret holding the join token value.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Key string `json:"key"`
-}
-
 // RemoteAppSpec defines the desired state of a RemoteApp.
+//
+// See ADR 0004 for the kubernetes-join semantics: tbot authenticates to
+// Teleport using the projected ServiceAccount JWT (no static-token Secret
+// on the consumer MC), and `TokenName` is the name of the Teleport
+// ProvisionToken resource pre-provisioned on Central.
+//
+// The Teleport proxy host:port and cluster name (the `aud` claim Teleport's
+// `static_jwks` validator pins) are operator-level configuration, not CR
+// fields — see ADR 0005 for the rationale. A given consumer MC's RemoteApps
+// all bind to the same Teleport cluster; multi-Teleport-on-one-MC needs a
+// second operator install.
 type RemoteAppSpec struct {
 	// AppName is the Teleport application name to expose. Teleport application
 	// names are RFC 1123 DNS labels, so we constrain to that here.
@@ -54,21 +51,17 @@ type RemoteAppSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self != 3001",message="port 3001 is reserved for tbot's diagnostic endpoint"
 	Port int32 `json:"port"`
 
-	// ProxyAddr is the host:port of the Teleport proxy this RemoteApp connects
-	// to. We use a Pattern (not the CEL format.hostname() library) because the
-	// value is host:port — format.hostname() only validates the hostname part
-	// and would still need a separate split+port check, so a single regex is
-	// simpler. The pattern accepts lowercase RFC 1123 hostnames with at least
-	// one label, optional dotted subdomains, and a numeric port.
+	// TokenName is the name of the Teleport ProvisionToken on Central that
+	// this RemoteApp's tbot uses to join via the `kubernetes` join method
+	// (per ADR 0004). It is a literal token name, not a Kubernetes Secret
+	// reference — the operator delivers no static token secret on the
+	// consumer MC. Constrained to DNS-1123 subdomain shape because Teleport
+	// resource names are validated against the same conventions.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$"
-	ProxyAddr string `json:"proxyAddr"`
-
-	// TokenRef references a Secret in the same namespace holding the static
-	// join token for this RemoteApp's TeleportBot.
-	// +kubebuilder:validation:Required
-	TokenRef TokenRef `json:"tokenRef"`
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern="^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+	TokenName string `json:"tokenName"`
 
 	// Replicas is the desired number of tbot pods for this RemoteApp. The
 	// reconciler defaults absence to 1 — the CRD intentionally has no default
@@ -95,8 +88,9 @@ type RemoteAppStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Conditions report the current state of the RemoteApp. Standard types
-	// are Ready and TokenSecretBound.
+	// Conditions report the current state of the RemoteApp. The only
+	// standard type is `Ready` — the kubernetes-join model (ADR 0004) has
+	// no consumer-side token-Secret state to report.
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -108,9 +102,9 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="App",type=string,JSONPath=`.spec.appName`
 // +kubebuilder:printcolumn:name="Port",type=integer,JSONPath=`.spec.port`
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
-// +kubebuilder:printcolumn:name="Token",type=string,JSONPath=".status.conditions[?(@.type=='TokenSecretBound')].status"
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="LastError",type=string,JSONPath=`.status.lastError`,priority=1
+// +kubebuilder:printcolumn:name="Reconciled",type=string,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`,priority=1
 
 // RemoteApp declares that a Teleport-exposed app should be reachable on this
 // management cluster as a local Service. See CONTEXT.md for field semantics.

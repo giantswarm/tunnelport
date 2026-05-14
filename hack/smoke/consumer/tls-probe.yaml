@@ -1,0 +1,94 @@
+# TLS-side smoke assertion (ADR 0007 / 0008).
+#
+# A curl Job that mounts the chart-managed `tunnelport-spiffe-bundle`
+# Secret (the trust bundle the singleton tbot's `kubernetes_secret`
+# destination populates) and calls
+# `curl --cacert <bundle> https://smoke-app.smoke.svc.cluster.local:8443`.
+#
+# Namespace = `tunnelport-system` (the chart's release namespace), NOT
+# the RemoteApp's `smoke` namespace. ADR 0008 commits to consumers
+# co-deploying with tunnelport in the release namespace; the smoke
+# probe faithfully models that topology by mounting the Secret from
+# its own namespace. The target Service is in `smoke` but kube DNS
+# resolves cross-namespace via the full `.smoke.svc.cluster.local`
+# name — no cross-namespace mount or copy is needed.
+#
+# What this verifies, transitively:
+#   - tbot's workload-identity-x509 service is minting SVIDs (ADR 0007)
+#   - ghostunnel terminates TLS on :8443 using the SVID (ADR 0007)
+#   - the SVID's SAN matches the Service DNS name — curl does standard
+#     TLS hostname verification, and would fail otherwise
+#   - the singleton trust bundle in `tunnelport-spiffe-bundle` carries
+#     Teleport central's SPIFFE CA root (ADR 0008) — the chain
+#     verifies against an SVID minted by a DIFFERENT bot, which is
+#     the load-bearing claim of ADR 0008
+#   - end-to-end consumer pattern works: a pod that knows only the
+#     bundle reaches the tunnel over verified HTTPS
+#
+# Apply AFTER the existing :8080 plaintext smoke-curl Job has passed.
+# The initContainer below polls the mounted Secret file so we don't
+# race tbot's first SVID issuance.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: smoke-curl-tls
+  namespace: tunnelport-system
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        - name: trust-bundle
+          secret:
+            # Pre-created (empty Data) by the chart with
+            # `helm.sh/resource-policy: keep` (ADR 0008). The chart's
+            # singleton tbot Deployment writes `svid_bundle.pem` into
+            # it via the `workload-identity-x509` service's
+            # `kubernetes_secret` destination. The initContainer
+            # blocks until the file is non-empty so curl never reads
+            # a zero-byte CA.
+            secretName: tunnelport-spiffe-bundle
+      initContainers:
+        - name: wait-for-trust-bundle
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              # tbot needs to complete the SVID handshake before the
+              # bundle file exists in the mount. Bound the wait to ~2min.
+              for _ in $(seq 1 60); do
+                if [ -s /etc/spiffe/svid_bundle.pem ]; then
+                  echo "trust bundle ready"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "FAIL: svid_bundle.pem never populated by tbot"
+              ls -la /etc/spiffe || true
+              exit 1
+          volumeMounts:
+            - name: trust-bundle
+              mountPath: /etc/spiffe
+              readOnly: true
+      containers:
+        - name: curl
+          image: curlimages/curl:8.10.1
+          args:
+            - --silent
+            - --show-error
+            - --fail-with-body
+            - --retry
+            - "20"
+            - --retry-delay
+            - "3"
+            - --retry-connrefused
+            - --cacert
+            - /etc/spiffe/svid_bundle.pem
+            - https://smoke-app.smoke.svc.cluster.local:8443
+          volumeMounts:
+            - name: trust-bundle
+              mountPath: /etc/spiffe
+              readOnly: true

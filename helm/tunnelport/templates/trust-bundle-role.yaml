@@ -1,0 +1,44 @@
+{{- if .Values.trustBundle.enabled }}
+# Role + RoleBinding scoping the singleton bot's authority to ONE Secret
+# in installNamespace — the trust-bundle Secret it writes via tbot's
+# `kubernetes_secret` destination. `resourceNames` is the load-bearing
+# narrowing: without it the bot would have unrestricted secret access in
+# the namespace. `delete` / `create` are intentionally omitted — the
+# chart pre-creates the Secret with `helm.sh/resource-policy: keep` so
+# tbot's first write hits an existing target and a helm uninstall
+# preserves the artefact for a planned, deliberate cleanup.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  resourceNames:
+  - {{ .Values.trustBundle.secretName }}
+  verbs:
+  - get
+  - update
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle
+subjects:
+- kind: ServiceAccount
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle
+  namespace: {{ .Values.installNamespace }}
+{{- end }}

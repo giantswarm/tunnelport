@@ -48,6 +48,30 @@ resources:
     cpu: 200m
     memory: 256Mi
 
+# Teleport binding for this consumer MC. Both fields are REQUIRED at
+# install — templates/deployment.yaml uses the helm `required` function
+# to fail `helm install` with a directional error if either is missing
+# (ADR 0005). Every RemoteApp on this MC binds to the cluster and proxy
+# named here; multi-Teleport-cluster on a single consumer MC needs a
+# second operator install in its own namespace.
+#
+# The empty `{}` default lets `ct lint` accept the chart's own
+# values.yaml — `helm install` without `-f`/`--set` still fails fast
+# at template render time via the `required` helm function (with a
+# clearer message than a JSON Schema violation). Uncomment-and-fill
+# in your values overlay or pass via `--set`:
+#
+#   teleport:
+#     # Teleport cluster name (the `Cluster:` line from `tctl status` on
+#     # Central). Used as the `aud` claim on every rendered tbot pod's
+#     # projected ServiceAccount JWT — Teleport's `static_jwks` validator
+#     # pins JWT `aud` to this exact value. DNS-1123 subdomain shape.
+#     clusterName: teleport.example.com
+#     # host:port of the Teleport proxy every rendered tbot pod connects
+#     # to. Flows into `proxy_server` in the rendered tbot.yaml.
+#     proxyAddr: teleport.example.com:443
+teleport: {}
+
 # Per-tbot-Deployment defaults. These flow into the operator manager's
 # CLI flags (`--tbot-image`, `--tbot-cpu-request`, etc.) which the
 # operator stamps onto every tbot Deployment it renders. They are
@@ -81,6 +105,24 @@ tbot:
     limits:
       cpu: 200m
       memory: 256Mi
+
+# Ghostunnel TLS-termination sidecar (ADR 0007 / slice 02). Every
+# rendered tbot Deployment grows a ghostunnel sidecar that reads the
+# SVID tbot writes into a shared emptyDir and serves it on the
+# rendered Service's `tls` port. These values flow into the operator
+# manager's CLI flags (`--ghostunnel-image`, etc.).
+tls:
+  # Pinned ghostunnel release; bump deliberately. `ghostunnel/ghostunnel`
+  # is the upstream image on Docker Hub.
+  ghostunnelImage: ghostunnel/ghostunnel:v1.7.3
+  # Polling interval ghostunnel uses to re-read the SVID files from
+  # disk. Safe at 5m because tbot's workload-identity-x509 service
+  # renews every 20m by default — see ADR 0007 §"Migration shape".
+  reloadInterval: 5m
+  # TLS port the rendered Service exposes (and the ghostunnel sidecar
+  # listens on inside the pod). The plaintext port name `tbot` is
+  # preserved for selector / NetworkPolicy backward compatibility.
+  port: 8443
 
 # CRD packaging. With `crds.install: true` (the default) the chart
 # bundles the CRD inline in `templates/crds.yml` with
@@ -128,3 +170,50 @@ securityContext:
 nodeSelector: {}
 tolerations: []
 affinity: {}
+
+# Singleton trust-bundle tbot (ADR 0008). One chart-managed tbot
+# Deployment in `installNamespace` writes the SPIFFE trust bundle into a
+# single Kubernetes Secret. Consumers (muster, etc.) co-deployed in this
+# same namespace mount that Secret and use `svid_bundle.pem` as the CA
+# bundle for verifying tunnel SVIDs from any RemoteApp on the cluster.
+# Per-RemoteApp tbots no longer emit a Kubernetes Secret destination —
+# see ADR 0008 §"Operator-side delta".
+#
+# Enable on every consumer MC that has at least one consumer of the
+# tunnel `:8443` port. Disable only on operator-only installs that
+# don't host their own RemoteApp consumers.
+trustBundle:
+  enabled: true
+  # Secret the singleton tbot writes svid_bundle.pem into. Mounted by
+  # consumer pods in this namespace and referenced as their CA bundle.
+  # Renaming this is a chart-upgrade rollout exercise — bump only if
+  # the existing name conflicts with another component's Secret.
+  secretName: tunnelport-spiffe-bundle
+  # Teleport-central ProvisionToken name that admits this bot via the
+  # kubernetes-join method. Required at install time; same shape as the
+  # per-RemoteApp tokens — one entry on Central, one bot here. The
+  # `static_jwks.allow` rule must list this Deployment's
+  # ServiceAccount (default `<release>-trust-bundle`).
+  tokenName: ""
+  # Teleport-central WorkloadIdentity resource the bot's
+  # workload-identity-x509 service binds to via a selector label.
+  # `{ "trust-bundle": ["tunnelport"] }` is the chart default; the
+  # corresponding WorkloadIdentity resource on Central must carry the
+  # matching label. Distinct from per-CR `remoteapp:` selectors so the
+  # bot can never accidentally claim a per-RemoteApp identity.
+  workloadIdentityLabels:
+    trust-bundle:
+      - tunnelport
+  # SVID lifetime / renewal cadence on the singleton bot. The SVID is
+  # never presented to a verifier (the trust bundle is the artefact
+  # consumers mount), so these only bound the renewal cycle, not the
+  # security window. Matches per-CR bots' values.
+  credentialTTL: 60m
+  renewalInterval: 20m
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi

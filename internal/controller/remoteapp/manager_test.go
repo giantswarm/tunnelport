@@ -58,6 +58,15 @@ func testConfig() PodDefaults {
 				corev1.ResourceMemory: resource.MustParse("128Mi"),
 			},
 		},
+		// Operator-level Teleport binding (ADR 0005). Fixed strings so
+		// integration tests can assert against deterministic values.
+		TeleportClusterName: "teleport.example.com",
+		TeleportProxyAddr:   "teleport.example.com:443",
+		// Ghostunnel sidecar defaults (slice 02 / ADR 0007). Fixed image
+		// reference so integration tests see a non-empty container image.
+		GhostunnelImage:          "test.example.com/ghostunnel:test",
+		GhostunnelReloadInterval: "5m",
+		GhostunnelListenPort:     tlsListenPortDefault,
 	}
 }
 

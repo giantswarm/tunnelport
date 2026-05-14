@@ -265,7 +265,22 @@ func containerTerminatedSummary(cs *corev1.ContainerStatus) string {
 // computeStatus derives the full RemoteAppStatus from k8s-visible inputs.
 // Pure: no I/O, no logging. meta.SetStatusCondition uses metav1.Now() for
 // LastTransitionTime — that's library-imposed and stripped by statusEqual.
-func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, view TokenSecretView, prevConditions []metav1.Condition) accessv1alpha1.RemoteAppStatus {
+//
+// Per ADR 0004 the operator emits two conditions:
+//
+//   - `Ready` — join-level state, derived from tbot pod readiness against
+//     the tunnel diag endpoint.
+//   - `Reconciled` — operator-internal state: True if every owned-object
+//     apply in the most recent reconcile pass succeeded; False with
+//     Reason=ReconcileError if any failed. Distinct from `Ready`: a
+//     successful reconcile doesn't imply the tunnel is up (tbot may still
+//     be starting), and a failed reconcile doesn't imply the tunnel is
+//     down (a prior successful apply may still be serving traffic).
+//
+// applyErrSummary is the operator-internal summary of the most recent
+// reconcile pass's apply errors (empty string means all applies
+// succeeded). The caller — reconcileStatus — collects it before calling.
+func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition, applyErrSummary string) accessv1alpha1.RemoteAppStatus {
 	ready, lastError := summarizeStatus(pods)
 
 	conditions := append([]metav1.Condition(nil), prevConditions...)
@@ -282,14 +297,20 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, view TokenSe
 	}
 	meta.SetStatusCondition(&conditions, readyCond)
 
-	tokenBound, tokenReason, tokenMsg := evalTokenSecretBound(cr, view)
-	meta.SetStatusCondition(&conditions, metav1.Condition{
-		Type:               accessv1alpha1.ConditionTypeTokenSecretBound,
-		Status:             boolToConditionStatus(tokenBound),
+	reconciledCond := metav1.Condition{
+		Type:               accessv1alpha1.ConditionTypeReconciled,
 		ObservedGeneration: cr.Generation,
-		Reason:             tokenReason,
-		Message:            tokenMsg,
-	})
+	}
+	if applyErrSummary == "" {
+		reconciledCond.Status = metav1.ConditionTrue
+		reconciledCond.Reason = "ReconcileSucceeded"
+		reconciledCond.Message = "all owned objects applied"
+	} else {
+		reconciledCond.Status = metav1.ConditionFalse
+		reconciledCond.Reason = "ReconcileError"
+		reconciledCond.Message = applyErrSummary
+	}
+	meta.SetStatusCondition(&conditions, reconciledCond)
 
 	return accessv1alpha1.RemoteAppStatus{
 		Ready:              ready,
@@ -297,24 +318,6 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, view TokenSe
 		ObservedGeneration: cr.Generation,
 		Conditions:         conditions,
 	}
-}
-
-// evalTokenSecretBound classifies the TokenSecretView into the
-// TokenSecretBound condition fields. Order matters: a non-NotFound fetch
-// error wins over absence; absence wins over key absence.
-func evalTokenSecretBound(cr *accessv1alpha1.RemoteApp, view TokenSecretView) (bool, string, string) {
-	if view.FetchErr != nil {
-		return false, "SecretGetError", view.FetchErr.Error()
-	}
-	if view.ResourceVersion == "" {
-		return false, "SecretNotFound",
-			fmt.Sprintf("Secret %q not found in namespace %q", view.Name, cr.Namespace)
-	}
-	if !view.KeyExists {
-		return false, "KeyNotFound",
-			fmt.Sprintf("Secret %q has no key %q", view.Name, view.Key)
-	}
-	return true, "Bound", fmt.Sprintf("Secret %q key %q present", view.Name, view.Key)
 }
 
 func boolToConditionStatus(b bool) metav1.ConditionStatus {

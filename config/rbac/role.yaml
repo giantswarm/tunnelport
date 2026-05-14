@@ -21,10 +21,19 @@ rules:
   - ""
   resources:
   - pods
-  - secrets
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
+  verbs:
+  - create
+  - get
+  - list
+  - patch
   - watch
 - apiGroups:
   - access.giantswarm.io

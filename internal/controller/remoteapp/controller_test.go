@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,12 @@ import (
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
+
+// kindRemoteApp is the literal Kind string owned objects'
+// ownerReferences should point at. Appears in assertions across
+// multiple tests in this package; collapsing to a constant keeps the
+// goconst linter quiet and makes a future rename safe.
+const kindRemoteApp = "RemoteApp"
 
 const (
 	pollInterval = 50 * time.Millisecond
@@ -56,12 +63,12 @@ func uniqueNS(t *testing.T, ctx context.Context) string {
 
 // makeRemoteApp builds a minimal valid RemoteApp in ns and Creates it.
 // Built on top of the shared newRemoteApp fixture (see fixtures_test.go);
-// tests that need a non-default spec compose fixtureOpts at the call site
-// or mutate the returned object before re-Update. Servers strip the
-// fixture's default UID on Create — the API server assigns a fresh one.
-func makeRemoteApp(ctx context.Context, t *testing.T, ns, name string, opts ...fixtureOpt) *accessv1alpha1.RemoteApp {
+// tests that need a non-default spec mutate the returned object before
+// re-Update. Servers strip the fixture's default UID on Create — the API
+// server assigns a fresh one.
+func makeRemoteApp(ctx context.Context, t *testing.T, ns, name string) *accessv1alpha1.RemoteApp {
 	t.Helper()
-	cr := newRemoteApp(append([]fixtureOpt{withName(ns, name)}, opts...)...)
+	cr := newRemoteApp(withName(ns, name))
 	cr.UID = "" // let the API server assign one on Create.
 	if err := testClient.Create(ctx, cr); err != nil {
 		t.Fatalf("create RemoteApp: %v", err)
@@ -137,7 +144,7 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 		if or.UID != cr.UID {
 			t.Errorf("%T %s: ownerRef UID want %q, got %q", obj, obj.GetName(), cr.UID, or.UID)
 		}
-		if or.Kind != "RemoteApp" {
+		if or.Kind != kindRemoteApp {
 			t.Errorf("%T %s: ownerRef Kind want RemoteApp, got %q", obj, obj.GetName(), or.Kind)
 		}
 		if or.Controller == nil || !*or.Controller {
@@ -219,8 +226,10 @@ func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
 		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, svc); err != nil {
 			return false, err
 		}
-		if len(svc.Spec.Ports) != 1 {
-			return false, fmt.Errorf("expected 1 port, got %d", len(svc.Spec.Ports))
+		// Slice 02 added the TLS port — the rendered Service now has two
+		// ports; the first one (`tbot`) tracks cr.Spec.Port.
+		if len(svc.Spec.Ports) != 2 {
+			return false, fmt.Errorf("expected 2 ports (tbot + tls), got %d", len(svc.Spec.Ports))
 		}
 		if svc.Spec.Ports[0].Port != newPort {
 			return false, fmt.Errorf("Service port still %d", svc.Spec.Ports[0].Port)
@@ -299,11 +308,11 @@ func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
 	})
 }
 
-func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t *testing.T) {
+func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T) {
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
-	cr := makeRemoteApp(ctx, t, ns, "appname-proxy-change")
+	cr := makeRemoteApp(ctx, t, ns, "appname-change")
 
 	// Initial render.
 	depBefore := &appsv1.Deployment{}
@@ -312,18 +321,18 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cmBefore)
 	bodyBefore := cmBefore.Data["tbot.yaml"]
 
-	// Mutate appName + proxyAddr.
+	// Mutate appName. (The Teleport proxy/cluster name are operator-level
+	// flags now — ADR 0005 — so they have no per-CR mutation surface.)
 	got := &accessv1alpha1.RemoteApp{}
 	if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	got.Spec.AppName = "renamed-app"
-	got.Spec.ProxyAddr = "teleport.new.example.com:443"
 	if err := testClient.Update(ctx, got); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 
-	// ConfigMap reflects new app name + proxy addr.
+	// ConfigMap reflects new app name.
 	eventually(t, func() (bool, error) {
 		cm := &corev1.ConfigMap{}
 		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cm); err != nil {
@@ -335,9 +344,6 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 		}
 		if !strings.Contains(body, "app_name: renamed-app") {
 			return false, fmt.Errorf("ConfigMap missing new app_name")
-		}
-		if !strings.Contains(body, "proxy_server: teleport.new.example.com:443") {
-			return false, fmt.Errorf("ConfigMap missing new proxy_server")
 		}
 		return true, nil
 	})
@@ -357,10 +363,48 @@ func TestReconciler_AppNameAndProxyAddrChangeUpdateConfigMapAndRollDeployment(t 
 			return false, fmt.Errorf("config-hash annotation missing on initial Deployment")
 		}
 		if hashAfter == hashBefore {
-			return false, fmt.Errorf("config-hash unchanged after appName/proxyAddr update; Deployment would not roll")
+			return false, fmt.Errorf("config-hash unchanged after appName update; Deployment would not roll")
 		}
 		return true, nil
 	})
+}
+
+// TestReconciler_DoesNotApplyTrustBundleObjects pins ADR 0008: the
+// reconcile loop no longer materialises a per-CR `<name>-spiffe-bundle`
+// Secret, Role, or RoleBinding. Consumer trust-bundle distribution
+// moved to a chart-managed singleton bot in the release namespace; the
+// per-CR objects that lived alongside each tbot under ADR 0007 are
+// gone. After a reconcile completes (proxied by the SA being
+// materialised), none of the three objects exist in the CR's namespace.
+func TestReconciler_DoesNotApplyTrustBundleObjects(t *testing.T) {
+	ctx := context.Background()
+	ns := uniqueNS(t, ctx)
+
+	cr := makeRemoteApp(ctx, t, ns, "bundle")
+	bundleName := cr.Name + "-spiffe-bundle"
+
+	// Wait for the SA to appear — proxy for "reconcile has run once" —
+	// then assert the trust-bundle trio is absent.
+	sa := &corev1.ServiceAccount{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, sa)
+
+	sec := &corev1.Secret{}
+	err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, sec)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("per-CR trust-bundle Secret must not exist (ADR 0008); get returned err=%v", err)
+	}
+
+	role := &rbacv1.Role{}
+	err = testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, role)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("per-CR trust-bundle Role must not exist (ADR 0008); get returned err=%v", err)
+	}
+
+	rb := &rbacv1.RoleBinding{}
+	err = testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: bundleName}, rb)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("per-CR trust-bundle RoleBinding must not exist (ADR 0008); get returned err=%v", err)
+	}
 }
 
 func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {

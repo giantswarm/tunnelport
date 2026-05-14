@@ -43,11 +43,7 @@ func newRemoteApp(opts ...fixtureOpt) *accessv1alpha1.RemoteApp {
 		Spec: accessv1alpha1.RemoteAppSpec{
 			AppName:   "demo-app",
 			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "demo-token",
-				Key:  "token",
-			},
+			TokenName: "demo-token",
 		},
 	}
 	for _, o := range opts {
@@ -80,12 +76,11 @@ func withAppName(name string) fixtureOpt {
 	}
 }
 
-// withTokenRefName overrides spec.tokenRef.Name. Spec.TokenRef.Key stays
-// at the default ("token") because every test in this package uses that
-// key — adding a `key` parameter would be unused noise. If a future test
-// needs a different key, widen this option then.
-func withTokenRefName(name string) fixtureOpt {
+// withTokenName overrides spec.tokenName. Under the kubernetes-join
+// model (ADR 0004) this is the literal name of the ProvisionToken on
+// Central — not a Kubernetes Secret reference.
+func withTokenName(name string) fixtureOpt {
 	return func(cr *accessv1alpha1.RemoteApp) {
-		cr.Spec.TokenRef.Name = name
+		cr.Spec.TokenName = name
 	}
 }

@@ -8,7 +8,10 @@ metadata:
 spec:
   appName: my-teleport-app
   port: 8080
-  proxyAddr: teleport.example.com:443
-  tokenRef:
-    name: my-teleport-app-token
-    key: token
+  # Name of the Teleport ProvisionToken on Central. The operator's
+  # kubernetes-join model (ADR 0004) does not deliver a static-token
+  # Secret on the consumer cluster.
+  tokenName: my-app-bot
+  # The Teleport cluster name + proxy address are operator-level
+  # configuration (chart values teleport.clusterName / teleport.proxyAddr,
+  # ADR 0005), not CR fields. A consumer MC binds to one Teleport cluster.

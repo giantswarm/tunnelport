@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"regexp"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -80,6 +81,13 @@ type flags struct {
 	tbotMemLimit   string
 	tbotInsecure   bool
 
+	teleportClusterName string
+	teleportProxyAddr   string
+
+	ghostunnelImage          string
+	ghostunnelReloadInterval string
+	ghostunnelListenPort     int
+
 	zapOpts zap.Options
 }
 
@@ -104,6 +112,34 @@ func parseFlags() flags {
 			"TLS verification. Development-only — never set in production. Useful for "+
 			"kind-based smoke tests where the proxy is reached by IP and the cert SAN "+
 			"does not match.")
+	// ADR 0005: the Teleport cluster name (`aud` claim Teleport's
+	// `static_jwks` validator pins) and proxy host:port are operator-level
+	// constants, NOT per-CR fields. Both are required at startup; an empty
+	// value would silently produce uniformly broken tbot pods, so we
+	// validate here and exit early. The shapes match the regexes the CRD
+	// previously enforced on the per-CR fields (DNS-1123 subdomain for
+	// the cluster name; same with a numeric port suffix for the proxy).
+	flag.StringVar(&f.teleportClusterName, "teleport-cluster-name", "",
+		"Required. The Teleport cluster name (the `Cluster:` line from `tctl status` "+
+			"on Central). Used as the `aud` claim on every rendered tbot pod's projected "+
+			"ServiceAccount JWT. Empty fails fast at startup.")
+	flag.StringVar(&f.teleportProxyAddr, "teleport-proxy-addr", "",
+		"Required. host:port of the Teleport proxy every rendered tbot pod connects to. "+
+			"Flows into `proxy_server` in the rendered tbot.yaml. Empty fails fast at startup.")
+	// Ghostunnel TLS-termination sidecar (ADR 0007 / slice 02). The sidecar
+	// reads the SVID tbot writes into a shared emptyDir and serves it on
+	// the rendered Service's `tls` port. The 5-minute reload cadence is
+	// safe because tbot's workload-identity-x509 service renews every 20m
+	// by default.
+	flag.StringVar(&f.ghostunnelImage, "ghostunnel-image", "ghostunnel/ghostunnel:v1.7.3",
+		"Container image for the ghostunnel TLS-termination sidecar (ADR 0007). "+
+			"The same image is used for every rendered tbot Deployment.")
+	flag.StringVar(&f.ghostunnelReloadInterval, "ghostunnel-reload-interval", "5m",
+		"Value passed to ghostunnel's --timed-reload flag (Go-duration). 5m is safe "+
+			"with tbot's default 20m SVID renewal cadence.")
+	flag.IntVar(&f.ghostunnelListenPort, "ghostunnel-listen-port", 8443,
+		"Port the ghostunnel sidecar listens on inside the pod; the rendered "+
+			"Service exposes it as the `tls` port with the same value.")
 	flag.StringVar(&f.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -160,9 +196,46 @@ func parseQuantityOrExit(name, value string) resource.Quantity {
 	return q
 }
 
+// DNS-1123 subdomain pattern for the Teleport cluster name. Same shape
+// the CRD enforced on `spec.clusterName` before ADR 0005 moved the
+// field to an operator flag.
+var teleportClusterNamePattern = regexp.MustCompile(
+	`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`,
+)
+
+// host:port pattern for the Teleport proxy address. Same shape the CRD
+// enforced on `spec.proxyAddr` before ADR 0005.
+var teleportProxyAddrPattern = regexp.MustCompile(
+	`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$`,
+)
+
+// requireOrExit returns value when it is non-empty and matches pattern; on
+// any failure it logs a directional error against the flag name and exits
+// 1. ADR 0005: an empty or malformed --teleport-cluster-name /
+// --teleport-proxy-addr would silently produce uniformly broken tbot
+// pods, so we fail at startup rather than after the first reconcile.
+func requireOrExit(name, value string, pattern *regexp.Regexp) string {
+	if value == "" {
+		setupLog.Error(nil, "required flag is empty",
+			"flag", name,
+			"hint", "set --"+name+" on the manager (helm value teleport.* — ADR 0005)")
+		os.Exit(1)
+	}
+	if !pattern.MatchString(value) {
+		setupLog.Error(nil, "required flag has invalid format",
+			"flag", name,
+			"value", value,
+			"pattern", pattern.String())
+		os.Exit(1)
+	}
+	return value
+}
+
 // buildReconcilerConfig translates flag values into the reconciler's
 // PodDefaults struct. Quantity parsing is the failure-prone bit, so it
 // lives here behind parseQuantityOrExit rather than inline in main().
+// The Teleport binding (ADR 0005) is validated via requireOrExit — both
+// values are required and shape-checked at startup.
 func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 	return remoteappctrl.PodDefaults{
 		TbotImage: f.tbotImage,
@@ -177,6 +250,15 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 			},
 		},
 		Insecure: f.tbotInsecure,
+		TeleportClusterName: requireOrExit(
+			"teleport-cluster-name", f.teleportClusterName, teleportClusterNamePattern,
+		),
+		TeleportProxyAddr: requireOrExit(
+			"teleport-proxy-addr", f.teleportProxyAddr, teleportProxyAddrPattern,
+		),
+		GhostunnelImage:          f.ghostunnelImage,
+		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
+		GhostunnelListenPort:     int32(f.ghostunnelListenPort),
 	}
 }
 
@@ -254,37 +336,25 @@ func main() {
 	}
 
 	// Cache scoping. The default controller-runtime cache subscribes to
-	// every object of every watched GVK cluster-wide; for Secrets that
-	// pulls every Secret on the consumer MC into the operator's
-	// informer, inflating RSS and exposing data the operator promises
-	// it doesn't read. We pin two label selectors:
+	// every object of every watched GVK cluster-wide; for Pods that
+	// pulls every pod on the consumer MC into the operator's informer.
+	// We pin one label selector:
 	//
-	//   - Secrets carrying `tunnelport.giantswarm.io/role=token-secret`
-	//     — platform engineers MUST stamp this label on the Secrets
-	//     referenced by `RemoteApp.spec.tokenRef`. Documented in the
-	//     helm chart README. The operator never writes this label
-	//     itself: that would be a mutation of a user-managed Secret
-	//     (CONTEXT.md "Token Secret delivery").
 	//   - Pods carrying `tunnelport.giantswarm.io/role=tbot` — the
 	//     reconciler-stamped label on every tbot pod template
 	//     (`renderDeployment`). These are the only pods status
 	//     synthesis ever consults.
 	//
-	// The controller's per-event watch predicate
-	// (`secretIsReferenced`) is the second layer on top of this cache
-	// filter, and the ConfigMap / Service / Deployment caches stay
+	// The ConfigMap / Service / Deployment / ServiceAccount caches stay
 	// unscoped because `Owns(...)` already routes them via
-	// OwnerReferences.
-	tokenSecretLabel := labels.SelectorFromSet(map[string]string{
-		"tunnelport.giantswarm.io/role": "token-secret",
-	})
+	// OwnerReferences. Under the kubernetes join model (ADR 0004) the
+	// operator no longer watches Secrets at all.
 	tbotPodLabel := labels.SelectorFromSet(map[string]string{
 		"tunnelport.giantswarm.io/role": "tbot",
 	})
 	cacheOpts := cache.Options{
 		ByObject: map[client.Object]cache.ByObject{
-			&corev1.Secret{}: {Label: tokenSecretLabel},
-			&corev1.Pod{}:    {Label: tbotPodLabel},
+			&corev1.Pod{}: {Label: tbotPodLabel},
 		},
 	}
 

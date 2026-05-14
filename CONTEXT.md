@@ -9,10 +9,10 @@ as if it were a local Service — no Teleport SDK in caller code.
 ### Audience
 
 The CR is authored by **platform engineers** on a consumer MC, not by app teams.
-The bot identity is shared at MC scope (one `TeleportBot` per consumer MC), the
-join trust is cluster-level (kubernetes SA JWT), and access control is per-MC
-label match. All of those assume a single trusted operator role per cluster, so
-self-serve by app teams is out of scope for v1.
+Bot identity is **per-RemoteApp** (one Central-side `TeleportBot` per CR; see
+"Auth model" below), and access control is per-MC label match on the role
+bound to each bot. All of this assumes a single trusted operator role per
+cluster, so self-serve by app teams is out of scope for v1.
 
 ### `RemoteApp`
 
@@ -28,19 +28,39 @@ tbot tunnel exposed on a port); `RemoteApp` describes what the user *declares*.
 
 ### Auth model
 
-Each `RemoteApp` has its own static **join token** on Central, bound to a
-dedicated `TeleportBot` whose role is scoped to exactly that one app. The
-token is delivered to the consumer MC out-of-band (GitOps + secret sync)
-as a `Secret`, and the `RemoteApp` references it via `tokenRef`.
+Each `RemoteApp`'s tbot Deployment authenticates to Teleport via the
+**`kubernetes` join method** (see [ADR 0004](./docs/adr/0004-kubernetes-join-method.md)).
+The operator renders one consumer-side `ServiceAccount` per CR (name =
+CR name, namespace = CR namespace). On Central, each CR has a dedicated
+`TeleportBot` whose `ProvisionToken` carries `spec.kubernetes.type:
+static_jwks` (with the consumer MC's JWKS embedded inline) and
+`spec.kubernetes.allow: [<cr.namespace>:<cr.name>]`. The bot's role is
+scoped to exactly that one Teleport application.
 
-This gives **per-app blast-radius isolation**: if one tbot pod is compromised,
-the leaked identity reaches only that one app. The cost is one paired action
-on Central per `RemoteApp` (create `TeleportBot` + role + token).
+This gives **per-app blast-radius isolation**: a compromised tbot pod
+yields a credential reaching only that one app. The cost is one paired
+action on Central per `RemoteApp` (create `TeleportBot` + role +
+`ProvisionToken` with the allowlist entry). The `RemoteApp` references
+the Central-side ProvisionToken by name via `spec.tokenName`. The
+Teleport cluster name — used as the `aud` claim of the projected SA
+JWT — comes from the operator's `--teleport-cluster-name` flag rather
+than the CR (see [ADR 0005](./docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md)).
+Teleport's `static_jwks` validator pins JWT `aud` to the Teleport
+cluster name; the kubelet's default mounted SA token uses the
+kube-apiserver's audience and is rejected, so the operator renders a
+projected `serviceAccountToken` volume with the right audience.
 
-The `kubernetes` join method is rejected for v1: it would require per-CR
-`ServiceAccount` orchestration on the consumer side and pinning each token's
-allowed-subject on Central, for the same isolation property the static-token
-approach already gives.
+The SA JWT is auto-rotated by the kubelet's projected-token mechanism;
+tbot consumes it transparently. The operator does **not** observe or
+manage any rotating secret, surfaces no `TokenSecretBound`-style
+condition, and never reads `Secret.Data` of any object on the cluster.
+
+JWKS export from each consumer MC to Central is a platform-team GitOps
+step — out of scope for the operator. The smoke harness exports the
+JWKS via `kubectl --raw /openid/v1/jwks` inline; production paths use
+the platform team's sealed/sync mechanism for Central-side resources.
+
+ADR 0001 (the earlier static-token model) is superseded.
 
 ### tbot topology
 
@@ -58,23 +78,24 @@ purpose, and `Headless` has no meaningful use here (every tbot pod's tunnel
 terminates at the same Teleport-side app). If a real headless need surfaces,
 add it then; don't ship the knob without a use case.
 
-### Reconciliation on token rotation
+### Reconciliation on rotation
 
-The operator **does** auto-roll the tbot Deployment when the referenced
-`tokenRef` Secret content changes. Mechanism: a watch on `Secret`s triggers
-reconcile, and the operator stamps the Secret's `resourceVersion` onto the
-pod-template annotation; the Deployment's RollingUpdate strategy handles the
-rest.
+The SA JWT mounted into each tbot pod is auto-rotated by the kubelet's
+projected-token mechanism. tbot consumes the rotated JWT transparently
+on the next join; the operator does not observe or trigger anything on
+JWT rotation, because the pod-side credential lifecycle is the kubelet's
+concern.
 
-Reason: in this operational model, token changes typically reflect bot
-identity changes on Central — at which point the running tbot's renewable
-certs are invalid anyway, and waiting for them to fail naturally is worse
-than rolling immediately. Even in the rarer "same bot, new token value"
-case, auto-rolling is a bounded, predictable disturbance.
-
-The operator never reads the Secret's contents — it only references
-`(name, key, resourceVersion)`, keeping itself out of the secret-handling
-blast radius.
+The only Deployment-roll trigger the operator stamps onto the pod
+template is `tunnelport.giantswarm.io/config-hash` — a SHA-256 of the
+rendered `tbot.yaml`. Anything that changes the on-disk tbot config
+(`spec.appName`, `spec.port`, `spec.tokenName`, or the operator-level
+proxy / cluster-name flags) rolls the Deployment via its existing
+`RollingUpdate` strategy. There is no per-token-rotation annotation,
+because nothing on the consumer side "rotates" in a way that needs
+operator-driven roll. A change to either operator-level flag rolls
+*every* RemoteApp's tbot pods on the next reconcile pass — accepted
+as the standard blast-radius cost of MC-wide config (ADR 0005).
 
 ### Cert cache
 
@@ -100,9 +121,19 @@ classification to tbot's log format (which isn't a stable API). The operator
 performs no retries or auto-recovery beyond what the kubelet's restart policy
 already provides.
 
-Conditions on `status`: `Ready` (mirrors pod readiness, which is wired to
-tbot's tunnel diag endpoint), and `TokenSecretBound` (the named Secret + key
-exist). That's it.
+Conditions on `status`:
+
+- `Ready` — join-level state, mirrors pod readiness wired to tbot's
+  tunnel diag endpoint.
+- `Reconciled` — operator-internal state, surfaces whether the most
+  recent reconcile pass applied every owned object successfully.
+  Distinct from `Ready`: a successful reconcile does not imply the
+  tunnel is up, and a failed reconcile does not imply the tunnel is
+  down (a prior successful apply may still be serving traffic). Reason
+  is `ReconcileSucceeded` or `ReconcileError`.
+
+(The earlier `TokenSecretBound` condition is gone with the static-token
+model — see ADR 0004.)
 
 ### Readiness
 
@@ -114,11 +145,28 @@ captures failures visible on the consumer side.
 
 ### Operator config posture
 
-The operator chart has no required cluster-wide config. Every per-CR
-parameter — `proxyAddr`, `appName`, `tokenRef` — lives on the `RemoteApp`
-itself. Trade-off accepted: the same `proxyAddr` will be repeated across most
-CRs in a cluster, and a typo affects only that one CR. Goal is "install the
-chart once, then everything is per-CR GitOps."
+Two Teleport-binding values are operator-level, not per-CR: the
+Teleport cluster name (the `aud` claim Teleport's `static_jwks`
+validator pins) and the proxy host:port. Both flow into the chart as
+required values (`teleport.clusterName`, `teleport.proxyAddr`) and
+land on the manager pod as `--teleport-cluster-name` /
+`--teleport-proxy-addr`. The operator fails fast at startup if either
+is empty.
+
+Everything else stays per-CR: `appName`, `port`, `tokenName`, and the
+optional `replicas`. A given consumer MC therefore hosts RemoteApps
+that all target the same Teleport cluster; multi-Teleport on one MC
+is an explicit non-goal — the answer is a second operator install in
+its own namespace. See [ADR 0005](./docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md)
+for the rationale (in particular, why the per-CR forward-compat that
+ADR 0004 reserved was withdrawn after first production deployment).
+
+Trade-off accepted: a typo in either operator-level flag breaks every
+RemoteApp on this MC at once, not just one CR. We accept that because
+the values are static per MC, the failure mode is loud and fast
+(startup error or 100% join failure across every tbot), and the
+upstream chart redeploy that introduces the typo is also the loudest
+signal.
 
 ### Scope of "app"
 
@@ -153,24 +201,26 @@ half-applicable defaults.
   can tune; per-CR sizing is busywork because the tbot sidecar's profile
   doesn't vary per app.
 
-### Token Secret delivery
+### Central-side provisioning (out of scope for the operator)
 
-The platform team provides the `tokenRef` Secret out-of-band — typically via
-GitOps with a sealed/sync mechanism. The operator never creates, copies, or
-reads the Secret's contents. If the Secret is missing when the CR is created,
-the rendered `Deployment` stays `Pending` (volume mount fails) and
-`status.TokenSecretBound = false` — handling the GitOps-race case where the
-CR arrives before the Secret.
+The platform team creates the per-CR `TeleportBot` + `ProvisionToken` on
+Central via their existing Central-config GitOps. The ProvisionToken
+carries `spec.kubernetes.allow: [<cr.namespace>:<cr.name>]` and
+`spec.kubernetes.static_jwks.jwks` (the consumer MC's JWKS, exported
+once per consumer MC and refreshed on signing-key rotation). Exporting
+that JWKS is a one-time-per-MC platform-team step; the operator stays
+consumer-side-only and never talks to Central. See ADR 0004.
 
 ### Operator topology
 
 - One operator Deployment per consumer MC, running in its own namespace
   (e.g. `tunnelport-system`).
-- Watches `RemoteApp` CRs cluster-wide. Renders `Deployment` + `Service` +
-  `ConfigMap` (tbot config) **in the CR's namespace** — no cross-namespace
-  references.
-- RBAC: cluster-scoped read on `RemoteApp` and `Secret`; namespace-scoped
-  write on the rendered resource types via a single ClusterRole.
+- Watches `RemoteApp` CRs cluster-wide. Renders `ServiceAccount` +
+  `Deployment` + `Service` + `ConfigMap` (tbot config) **in the CR's
+  namespace** — no cross-namespace references.
+- RBAC: cluster-scoped read on `RemoteApp`; namespace-scoped write on the
+  rendered resource types (including `serviceaccounts`) via a single
+  ClusterRole. **Does not** grant any verbs on `secrets`.
 - The chart ships the operator and CRD only. It does **not** create
   `RoleBinding`s granting create-`RemoteApp` to anyone — that's an explicit
   per-cluster decision the platform team makes via their own RBAC.

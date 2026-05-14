@@ -1,10 +1,15 @@
 # Sample RemoteApp CR for the smoke environment. The operator
-# materialises this into a tbot Deployment, ConfigMap, and ClusterIP
-# Service in the `smoke` namespace.
+# materialises this into a tbot Deployment, ConfigMap, ClusterIP
+# Service, and per-CR ServiceAccount in the `smoke` namespace.
 #
 # After this is applied, the curl-pod (curl-pod.yaml) hits
 # http://smoke-app.smoke.svc.cluster.local:8080 and the response body
 # should be `hello-from-producer`.
+#
+# Per ADR 0005, the Teleport proxy address and cluster name are passed
+# to the operator at install time (chart values
+# teleport.{clusterName,proxyAddr}, see hack/smoke/run.sh) — not
+# fields on the CR.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -24,14 +29,8 @@ spec:
   # this port via the Service `smoke-app.smoke.svc.cluster.local`.
   port: 8080
 
-  # REPLACE with the same Teleport proxy address used by the
-  # producer's kube-agent — see runbook "Network setup". Format:
-  # "<ip>:443".
-  proxyAddr: REPLACE_WITH_TELEPORT_PROXY_ADDR
-
-  # Reference (NOT contents) of the Secret holding the bot token.
-  # The operator only reads the Secret's metadata.resourceVersion to
-  # detect rotations; the token value lives in the mounted volume.
-  tokenRef:
-    name: smoke-bot-token
-    key: token
+  # Name of the Teleport ProvisionToken on Central. Under the
+  # kubernetes-join model (ADR 0004) tbot authenticates with the
+  # projected SA JWT for the per-CR ServiceAccount the operator
+  # renders. No static-token Secret on the consumer cluster.
+  tokenName: smoke-bot-token

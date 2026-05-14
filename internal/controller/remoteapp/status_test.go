@@ -78,7 +78,7 @@ func TestSummarizePodError_PendingWithVolumeMountFailureSurfacesReason(t *testin
 					State: corev1.ContainerState{
 						Waiting: &corev1.ContainerStateWaiting{
 							Reason:  "ContainerCreating",
-							Message: `MountVolume.SetUp failed for volume "tbot-token" : secret "myapp-token" not found`,
+							Message: `MountVolume.SetUp failed for volume "tbot-config" : configmap "myapp" not found`,
 						},
 					},
 				},
@@ -89,7 +89,7 @@ func TestSummarizePodError_PendingWithVolumeMountFailureSurfacesReason(t *testin
 	got := summarizePodError(pod)
 	// The user has to see *why* the pod is pending. ContainerCreating on
 	// its own is not enough — we must surface the volume-mount message.
-	for _, want := range []string{"ContainerCreating", "secret \"myapp-token\" not found"} {
+	for _, want := range []string{"ContainerCreating", "configmap \"myapp\" not found"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("pending volume-mount: want substring %q in %q", want, got)
 		}
@@ -345,21 +345,21 @@ func TestSummarizeStatus_PicksHighestSeverityRegardlessOfOrder(t *testing.T) {
 	}
 }
 
-// computeStatus is the pure end-to-end synthesis: pods + token Secret view
-// → full RemoteAppStatus. Driven from a table; pins the exact Reason
-// strings that automation pattern-matches on.
+// computeStatus is the pure end-to-end synthesis: pods → full
+// RemoteAppStatus. Driven from a table; pins the exact Reason strings
+// automation pattern-matches on. Per ADR 0004 computeStatus emits two
+// conditions: `Ready` (join-level) and `Reconciled` (operator-internal).
+// The cases here exercise happy-path Reconciled=True; the
+// ReconcileError path is covered by
+// TestComputeStatus_ReconciledFalseOnApplyError below.
 
 func TestComputeStatus(t *testing.T) {
-	// computeStatus consumes only ObjectMeta + spec.TokenRef from the CR;
-	// the rest of the fixture's defaults are inert here. Bumping Generation
-	// to 7 inline rather than carrying a named option for it — only this
+	// computeStatus consumes only ObjectMeta from the CR; the rest of
+	// the fixture's defaults are inert here. Bumping Generation to 7
+	// inline rather than carrying a named option for it — only this
 	// one test needs that knob.
-	cr := newRemoteApp(withName("demo", "ra"), withTokenRefName("tok"))
+	cr := newRemoteApp(withName("demo", "ra"), withTokenName("tok"))
 	cr.Generation = 7
-	bound := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: true}
-	missing := TokenSecretView{Name: "tok", Key: "token"}
-	keyAbsent := TokenSecretView{Name: "tok", Key: "token", ResourceVersion: "100", KeyExists: false}
-	fetchErr := TokenSecretView{Name: "tok", Key: "token", FetchErr: stubErr("api unavailable")}
 
 	readyPod := corev1.Pod{Status: corev1.PodStatus{
 		Phase:      corev1.PodRunning,
@@ -378,36 +378,21 @@ func TestComputeStatus(t *testing.T) {
 	cases := []struct {
 		name          string
 		pods          []corev1.Pod
-		view          TokenSecretView
 		wantReady     bool
 		wantLastError string // substring match
 		wantReadyRsn  string
-		wantTokenRsn  string
-		wantTokenStat metav1.ConditionStatus
 	}{
-		{name: "no pods, secret bound", pods: nil, view: bound,
-			wantReady: false, wantLastError: "no tbot pods",
-			wantReadyRsn: "NoPods", wantTokenRsn: "Bound", wantTokenStat: metav1.ConditionTrue},
-		{name: "ready pod, secret bound", pods: []corev1.Pod{readyPod}, view: bound,
-			wantReady: true, wantLastError: "",
-			wantReadyRsn: "TunnelReady", wantTokenRsn: "Bound", wantTokenStat: metav1.ConditionTrue},
-		{name: "crashloop pod, secret bound", pods: []corev1.Pod{crashPod}, view: bound,
-			wantReady: false, wantLastError: "CrashLoopBackOff",
-			wantReadyRsn: "PodNotReady", wantTokenRsn: "Bound", wantTokenStat: metav1.ConditionTrue},
-		{name: "ready pod, secret missing", pods: []corev1.Pod{readyPod}, view: missing,
-			wantReady: true, wantLastError: "",
-			wantReadyRsn: "TunnelReady", wantTokenRsn: "SecretNotFound", wantTokenStat: metav1.ConditionFalse},
-		{name: "ready pod, key absent", pods: []corev1.Pod{readyPod}, view: keyAbsent,
-			wantReady: true, wantLastError: "",
-			wantReadyRsn: "TunnelReady", wantTokenRsn: "KeyNotFound", wantTokenStat: metav1.ConditionFalse},
-		{name: "no pods, secret fetch error", pods: nil, view: fetchErr,
-			wantReady: false, wantLastError: "no tbot pods",
-			wantReadyRsn: "NoPods", wantTokenRsn: "SecretGetError", wantTokenStat: metav1.ConditionFalse},
+		{name: "no pods", pods: nil,
+			wantReady: false, wantLastError: "no tbot pods", wantReadyRsn: "NoPods"},
+		{name: "ready pod", pods: []corev1.Pod{readyPod},
+			wantReady: true, wantLastError: "", wantReadyRsn: "TunnelReady"},
+		{name: "crashloop pod", pods: []corev1.Pod{crashPod},
+			wantReady: false, wantLastError: "CrashLoopBackOff", wantReadyRsn: "PodNotReady"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeStatus(cr, tc.pods, tc.view, nil)
+			got := computeStatus(cr, tc.pods, nil, "")
 			if got.Ready != tc.wantReady {
 				t.Errorf("Ready: want %v, got %v", tc.wantReady, got.Ready)
 			}
@@ -421,12 +406,56 @@ func TestComputeStatus(t *testing.T) {
 			if rc == nil || rc.Reason != tc.wantReadyRsn {
 				t.Errorf("Ready condition reason: want %q, got %v", tc.wantReadyRsn, rc)
 			}
-			tc2 := findCond(got.Conditions, accessv1alpha1.ConditionTypeTokenSecretBound)
-			if tc2 == nil || tc2.Reason != tc.wantTokenRsn || tc2.Status != tc.wantTokenStat {
-				t.Errorf("TokenSecretBound condition: want reason=%q status=%q, got %+v",
-					tc.wantTokenRsn, tc.wantTokenStat, tc2)
+			// Reconciled=True on the happy paths: apply succeeded
+			// (applyErrSummary=""), so every case in this table must
+			// see Reconciled=True with reason ReconcileSucceeded.
+			rec := findCond(got.Conditions, accessv1alpha1.ConditionTypeReconciled)
+			if rec == nil {
+				t.Fatalf("Reconciled condition missing: %+v", got.Conditions)
+			}
+			if rec.Status != metav1.ConditionTrue {
+				t.Errorf("Reconciled status: want True, got %s", rec.Status)
+			}
+			if rec.Reason != "ReconcileSucceeded" {
+				t.Errorf("Reconciled reason: want ReconcileSucceeded, got %q", rec.Reason)
 			}
 		})
+	}
+}
+
+// TestComputeStatus_ReconciledFalseOnApplyError pins that when the
+// reconciler passes an apply-error summary, computeStatus emits
+// Reconciled=False with Reason=ReconcileError and the summary as the
+// Message. The Ready condition is independent of this — `Ready` reflects
+// tbot pod state, `Reconciled` reflects operator-internal state.
+func TestComputeStatus_ReconciledFalseOnApplyError(t *testing.T) {
+	cr := newRemoteApp(withName("demo", "ra"), withTokenName("tok"))
+	cr.Generation = 3
+
+	readyPod := corev1.Pod{Status: corev1.PodStatus{
+		Phase:      corev1.PodRunning,
+		Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+	}}
+
+	got := computeStatus(cr, []corev1.Pod{readyPod}, nil, "reconcile Deployment: forbidden")
+
+	// Ready is independent of apply: the previously-applied tbot pod is
+	// up, so Ready stays True even though this pass failed to apply.
+	if !got.Ready {
+		t.Errorf("Ready: want true (tbot pod is Ready independent of apply), got false")
+	}
+	rec := findCond(got.Conditions, accessv1alpha1.ConditionTypeReconciled)
+	if rec == nil {
+		t.Fatalf("Reconciled condition missing: %+v", got.Conditions)
+	}
+	if rec.Status != metav1.ConditionFalse {
+		t.Errorf("Reconciled status: want False, got %s", rec.Status)
+	}
+	if rec.Reason != "ReconcileError" {
+		t.Errorf("Reconciled reason: want ReconcileError, got %q", rec.Reason)
+	}
+	if !strings.Contains(rec.Message, "reconcile Deployment: forbidden") {
+		t.Errorf("Reconciled message: want substring %q, got %q", "reconcile Deployment: forbidden", rec.Message)
 	}
 }
 
@@ -438,7 +467,3 @@ func findCond(cs []metav1.Condition, t string) *metav1.Condition {
 	}
 	return nil
 }
-
-type stubErr string
-
-func (e stubErr) Error() string { return string(e) }

@@ -1,5 +1,11 @@
 # Static join token per `RemoteApp`; `kubernetes` join method rejected for v1
 
+> **Superseded by [ADR 0004](./0004-kubernetes-join-method.md).** The
+> trade-off this ADR records was reversed: an operator-rendered
+> ServiceAccount per `RemoteApp` is strictly less operational surface
+> than a sealed-sync Secret pipeline per `RemoteApp`. The kubernetes
+> join method (with `static_jwks` trust) is now the only path.
+
 Each `RemoteApp` references its own static Teleport join token (delivered as
 a `Secret` via the platform team's existing GitOps + secret-sync pipeline)
 that is bound on Central to a dedicated `TeleportBot` whose role matches

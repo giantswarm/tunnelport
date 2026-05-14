@@ -43,10 +43,15 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        # The four `--tbot-*` flags are how Helm values flow into every
-        # tbot Deployment the operator renders. The reconciler reads them
-        # once at startup (cmd/main.go) and stamps them onto every tbot
+        # The `--tbot-*` flags are how Helm values flow into every tbot
+        # Deployment the operator renders. The reconciler reads them once
+        # at startup (cmd/main.go) and stamps them onto every tbot
         # Deployment. There is deliberately no per-RemoteApp override.
+        #
+        # `--teleport-cluster-name` / `--teleport-proxy-addr` (ADR 0005)
+        # are operator-level Teleport binding; both required at chart
+        # install via values.schema.json. An empty value fails fast at
+        # operator startup.
         args:
         - --leader-elect=true
         - --health-probe-bind-address=:{{ .Values.ports.health }}
@@ -57,6 +62,11 @@ spec:
         - --tbot-memory-request={{ .Values.tbot.resources.requests.memory }}
         - --tbot-cpu-limit={{ .Values.tbot.resources.limits.cpu }}
         - --tbot-memory-limit={{ .Values.tbot.resources.limits.memory }}
+        - --ghostunnel-image={{ .Values.tls.ghostunnelImage }}
+        - --ghostunnel-reload-interval={{ .Values.tls.reloadInterval }}
+        - --ghostunnel-listen-port={{ .Values.tls.port }}
+        - --teleport-cluster-name={{ required "teleport.clusterName is required (ADR 0005)" .Values.teleport.clusterName }}
+        - --teleport-proxy-addr={{ required "teleport.proxyAddr is required (ADR 0005)" .Values.teleport.proxyAddr }}
         {{- if .Values.tbot.insecure }}
         - --tbot-insecure=true
         {{- end }}

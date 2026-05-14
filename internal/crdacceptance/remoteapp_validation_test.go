@@ -26,6 +26,7 @@ package crdacceptance
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,11 +44,7 @@ func TestRemoteApp_AcceptsValidCR(t *testing.T) {
 		Spec: accessv1alpha1.RemoteAppSpec{
 			AppName:   "myapp",
 			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "myapp-token",
-				Key:  "token",
-			},
+			TokenName: "myapp-token",
 		},
 	}
 
@@ -65,11 +62,7 @@ func TestRemoteApp_ReplicasIsOptionalAndNotDefaultedByCRD(t *testing.T) {
 		Spec: accessv1alpha1.RemoteAppSpec{
 			AppName:   "myapp",
 			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "myapp-token",
-				Key:  "token",
-			},
+			TokenName: "myapp-token",
 		},
 	}
 
@@ -99,11 +92,7 @@ func TestRemoteApp_StatusSubresourceDoesNotBumpGeneration(t *testing.T) {
 		Spec: accessv1alpha1.RemoteAppSpec{
 			AppName:   "myapp",
 			Port:      8080,
-			ProxyAddr: "teleport.example.com:443",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "myapp-token",
-				Key:  "token",
-			},
+			TokenName: "myapp-token",
 		},
 	}
 	if err := k8sClient.Create(ctx, cr); err != nil {
@@ -145,56 +134,56 @@ func TestRemoteApp_StatusSubresourceDoesNotBumpGeneration(t *testing.T) {
 	}
 }
 
-func TestRemoteApp_RejectsMissingTokenRefFields(t *testing.T) {
+func TestRemoteApp_RejectsMissingTokenName(t *testing.T) {
+	cr := &accessv1alpha1.RemoteApp{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bad-tokenname-empty",
+			Namespace: "default",
+		},
+		Spec: accessv1alpha1.RemoteAppSpec{
+			AppName:   "myapp",
+			Port:      8080,
+			TokenName: "",
+		},
+	}
+
+	if err := k8sClient.Create(context.Background(), cr); err == nil {
+		t.Fatal("expected empty tokenName to be rejected, got nil error")
+	}
+}
+
+// TestRemoteApp_RejectsInvalidTokenName covers the DNS-1123-subdomain
+// constraint on TokenName.
+func TestRemoteApp_RejectsInvalidTokenName(t *testing.T) {
 	cases := []struct {
-		name     string
-		tokenRef accessv1alpha1.TokenRef
+		name      string
+		tokenName string
 	}{
-		{name: "missing name", tokenRef: accessv1alpha1.TokenRef{Name: "", Key: "token"}},
-		{name: "missing key", tokenRef: accessv1alpha1.TokenRef{Name: "myapp-token", Key: ""}},
+		{name: "uppercase", tokenName: "BadToken"},
+		{name: "underscore", tokenName: "bad_token"},
+		{name: "leading-dash", tokenName: "-bad"},
+		{name: "trailing-dot", tokenName: "bad."},
+		{name: "too-long", tokenName: strings.Repeat("a", 254)},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cr := &accessv1alpha1.RemoteApp{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "bad-tokenref-" + tc.name,
+					Name:      "bad-tokenname-" + tc.name,
 					Namespace: "default",
 				},
 				Spec: accessv1alpha1.RemoteAppSpec{
 					AppName:   "myapp",
 					Port:      8080,
-					ProxyAddr: "teleport.example.com:443",
-					TokenRef:  tc.tokenRef,
+					TokenName: tc.tokenName,
 				},
 			}
 
 			if err := k8sClient.Create(context.Background(), cr); err == nil {
-				t.Fatalf("expected tokenRef %+v to be rejected, got nil error", tc.tokenRef)
+				t.Fatalf("expected tokenName=%q to be rejected, got nil error", tc.tokenName)
 			}
 		})
-	}
-}
-
-func TestRemoteApp_RejectsEmptyProxyAddr(t *testing.T) {
-	cr := &accessv1alpha1.RemoteApp{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "empty-proxy",
-			Namespace: "default",
-		},
-		Spec: accessv1alpha1.RemoteAppSpec{
-			AppName:   "myapp",
-			Port:      8080,
-			ProxyAddr: "",
-			TokenRef: accessv1alpha1.TokenRef{
-				Name: "myapp-token",
-				Key:  "token",
-			},
-		},
-	}
-
-	if err := k8sClient.Create(context.Background(), cr); err == nil {
-		t.Fatal("expected empty proxyAddr to be rejected, got nil error")
 	}
 }
 
@@ -217,11 +206,7 @@ func TestRemoteApp_RejectsInvalidPort(t *testing.T) {
 				Spec: accessv1alpha1.RemoteAppSpec{
 					AppName:   "myapp",
 					Port:      tc.port,
-					ProxyAddr: "teleport.example.com:443",
-					TokenRef: accessv1alpha1.TokenRef{
-						Name: "myapp-token",
-						Key:  "token",
-					},
+					TokenName: "myapp-token",
 				},
 			}
 

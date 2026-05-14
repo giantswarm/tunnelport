@@ -39,14 +39,15 @@ spec:
     - jsonPath: .status.ready
       name: Ready
       type: boolean
-    - jsonPath: .status.conditions[?(@.type=='TokenSecretBound')].status
-      name: Token
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
     - jsonPath: .status.lastError
       name: LastError
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Reconciled")].status
+      name: Reconciled
       priority: 1
       type: string
     name: v1alpha1
@@ -74,7 +75,19 @@ spec:
           metadata:
             type: object
           spec:
-            description: RemoteAppSpec defines the desired state of a RemoteApp.
+            description: |-
+              RemoteAppSpec defines the desired state of a RemoteApp.
+
+              See ADR 0004 for the kubernetes-join semantics: tbot authenticates to
+              Teleport using the projected ServiceAccount JWT (no static-token Secret
+              on the consumer MC), and `TokenName` is the name of the Teleport
+              ProvisionToken resource pre-provisioned on Central.
+
+              The Teleport proxy host:port and cluster name (the `aud` claim Teleport's
+              `static_jwks` validator pins) are operator-level configuration, not CR
+              fields — see ADR 0005 for the rationale. A given consumer MC's RemoteApps
+              all bind to the same Teleport cluster; multi-Teleport-on-one-MC needs a
+              second operator install.
             properties:
               appName:
                 description: |-
@@ -97,17 +110,6 @@ spec:
                 x-kubernetes-validations:
                 - message: port 3001 is reserved for tbot's diagnostic endpoint
                   rule: self != 3001
-              proxyAddr:
-                description: |-
-                  ProxyAddr is the host:port of the Teleport proxy this RemoteApp connects
-                  to. We use a Pattern (not the CEL format.hostname() library) because the
-                  value is host:port — format.hostname() only validates the hostname part
-                  and would still need a separate split+port check, so a single regex is
-                  simpler. The pattern accepts lowercase RFC 1123 hostnames with at least
-                  one label, optional dotted subdomains, and a numeric port.
-                minLength: 1
-                pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$
-                type: string
               replicas:
                 description: |-
                   Replicas is the desired number of tbot pods for this RemoteApp. The
@@ -115,36 +117,31 @@ spec:
                   so absence remains observable in the API.
                 format: int32
                 type: integer
-              tokenRef:
+              tokenName:
                 description: |-
-                  TokenRef references a Secret in the same namespace holding the static
-                  join token for this RemoteApp's TeleportBot.
-                properties:
-                  key:
-                    description: Key inside the Secret holding the join token value.
-                    minLength: 1
-                    type: string
-                  name:
-                    description: Name of the Secret in the same namespace as the RemoteApp.
-                    minLength: 1
-                    type: string
-                required:
-                - key
-                - name
-                type: object
+                  TokenName is the name of the Teleport ProvisionToken on Central that
+                  this RemoteApp's tbot uses to join via the `kubernetes` join method
+                  (per ADR 0004). It is a literal token name, not a Kubernetes Secret
+                  reference — the operator delivers no static token secret on the
+                  consumer MC. Constrained to DNS-1123 subdomain shape because Teleport
+                  resource names are validated against the same conventions.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
             required:
             - appName
             - port
-            - proxyAddr
-            - tokenRef
+            - tokenName
             type: object
           status:
             description: RemoteAppStatus defines the observed state of a RemoteApp.
             properties:
               conditions:
                 description: |-
-                  Conditions report the current state of the RemoteApp. Standard types
-                  are Ready and TokenSecretBound.
+                  Conditions report the current state of the RemoteApp. The only
+                  standard type is `Ready` — the kubernetes-join model (ADR 0004) has
+                  no consumer-side token-Secret state to report.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
