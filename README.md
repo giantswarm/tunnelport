@@ -7,70 +7,155 @@ A Kubernetes operator that wraps Teleport's `tbot` + a `Service` behind a single
 Teleport-exposed app as if it were a local `Service` — no Teleport SDK in caller
 code.
 
-## What it does
+## How it works
 
-A platform engineer writes one `RemoteApp`. The operator renders a pod
-containing `tbot` (which dials Teleport and exposes an `application-tunnel`
-on `127.0.0.1`) plus a `ghostunnel` sidecar that terminates TLS in front of
-it, behind a `ClusterIP` `Service`. Workloads `curl
-https://<remoteapp-name>:8443` and traffic is tunneled to the app behind
-Teleport. The TLS server cert is a SPIFFE X.509-SVID minted by `tbot` from
-Teleport central's SPIFFE CA — callers verify it against a single
-chart-managed trust bundle Secret.
+A platform engineer writes one `RemoteApp`. The operator reconciles it into a
+`ServiceAccount`, a `ConfigMap` carrying `tbot`'s rendered config, a
+`Deployment` (one `tbot` container, one `ghostunnel` sidecar) and a
+`ClusterIP` `Service`. Workloads on the consumer MC call
+`https://<remoteapp-name>:8443` and traffic ends up at the backing app on a
+producer MC.
+
+Three concerns are independent and worth keeping separate: how packets flow,
+how `tbot` proves who it is, and how the tunnel Service authenticates itself
+to its callers.
+
+### Networking
+
+The `Service` resolves to the per-`RemoteApp` pod. Inside the pod,
+`ghostunnel` accepts the inbound TLS connection and forwards plaintext over
+`127.0.0.1:<spec.port>` to `tbot`'s `application-tunnel`. `tbot` holds an
+open mTLS application tunnel to Teleport central, which relays the request
+to a `teleport-kube-agent` (Application Service mode) on a producer MC, and
+from there to the backing service.
 
 ```
-  Consumer MC                                            Central MC         Producer MC
-  ┌────────────────────────────────────────────────┐    ┌──────────┐       ┌────────────────┐
-  │                                                │    │ Teleport │       │ teleport-kube- │
-  │  caller pod                                    │    │  proxy   │       │   agent        │
-  │     │   https://payments:8443                  │    │   +      │       │   (app mode)   │
-  │     │   ▲ verifies SVID against mounted bundle │    │  auth    │       │       │        │
-  │     ▼   │   (tunnelport-spiffe-bundle Secret)  │    │   +      │       │       ▼        │
-  │  Service (ClusterIP) — tls/8443                │    │ SPIFFE   │       │  backend app   │
-  │     │     (+ http/8080, deprecated)            │    │   CA     │       └────────────────┘
-  │     ▼                                          │    └────▲─────┘             ▲
-  │  ┌──────────── RemoteApp pod ──────────────┐   │         │ mTLS               │
-  │  │  ghostunnel ─TLS term─► tbot            │───┼─────────┴─ app-tunnel ───────┘
-  │  │   (SVID + key from      (application-   │   │         ▲
-  │  │    emptyDir, minted by   tunnel,        │   │         │ kubernetes-join:
-  │  │    tbot's wid-x509)      127.0.0.1)     │   │         │ projected SA JWT,
-  │  └─────────────────────────────────────────┘   │         │ pinned via static_jwks
-  │     ▲                                          │         │
-  │     │ owns Deployment + Service + CM + SA      │         │
-  │   RemoteApp CR  (access.giantswarm.io/v1alpha1)│         │
-  │     spec: { appName, port, tokenName }         │         │
-  │                                                │         │
-  │  ┌─ tunnelport-trust-bundle (chart singleton) ─┐         │
-  │  │   tbot ─► Secret: tunnelport-spiffe-bundle  ├─────────┘
-  │  │           svid_bundle.pem — mounted by      │   joins same way,
-  │  │           every caller pod above            │   emits the trust
-  │  └─────────────────────────────────────────────┘   bundle once per MC
-  └────────────────────────────────────────────────┘
+  Consumer MC                            Central MC         Producer MC
+  ┌────────────────────────────────┐    ┌──────────┐       ┌────────────────┐
+  │                                │    │ Teleport │       │ teleport-kube- │
+  │  caller pod                    │    │  proxy   │       │   agent        │
+  │     │                          │    │   +      │       │   (app mode)   │
+  │     │ https://payments:8443    │    │  auth    │       │       │        │
+  │     ▼                          │    └────▲─────┘       │       ▼        │
+  │  Service (ClusterIP, 8443)     │         │             │  backend app   │
+  │     │                          │         │ mTLS        └────────────────┘
+  │     ▼                          │         │ app tunnel        ▲
+  │  RemoteApp pod ────────────────┼─────────┴───────────────────┘
+  │   (tbot + ghostunnel sidecar)  │
+  └────────────────────────────────┘
 ```
 
-The Teleport cluster name + proxy address are operator-level chart values
-(`teleport.clusterName`, `teleport.proxyAddr`), not CR fields — see
-[`docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md`](./docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md).
+One `tbot` Deployment per `RemoteApp` — `tbot` is one identity per process,
+so multi-tunnel-per-`tbot` is not on the table, and the per-pod boundary
+keeps blast radius scoped to a single app. The `Service` stays `ClusterIP`
+on purpose; `LoadBalancer` / `NodePort` would defeat the local-only framing.
 
-One `tbot` Deployment per `RemoteApp` (per-app blast-radius isolation). Under
-the kubernetes-join model
-([ADR 0004](./docs/adr/0004-kubernetes-join-method.md)) the operator renders
-a per-CR `ServiceAccount`; the rendered tbot pod authenticates to Teleport
-using that SA's projected JWT, validated against the `static_jwks` pinned on
-the Teleport `ProvisionToken`. No static-token `Secret` is delivered to the
-consumer cluster.
+### Auth: how tbot joins Teleport
 
-The tunnel `Service` is fronted by a `ghostunnel` sidecar that terminates
-TLS on `8443` using a SPIFFE X.509-SVID
-([ADR 0007](./docs/adr/0007-spiffe-via-teleport-workload-identity.md)) minted
-by the same `tbot` from a Teleport `WorkloadIdentity`. A chart-managed
-singleton `tunnelport-trust-bundle` Deployment runs one extra `tbot` that
-materialises the SPIFFE trust bundle into a single Secret
-(`tunnelport-spiffe-bundle`,
-[ADR 0008](./docs/adr/0008-singleton-trust-bundle-tbot.md)); every consumer
-on the MC mounts that one Secret to verify SVIDs from any `RemoteApp`.
+`tbot` proves its identity to Teleport using the `kubernetes` join method.
+For each `RemoteApp` the operator renders a dedicated `ServiceAccount` in
+the CR's namespace, plus a projected `serviceAccountToken` volume whose
+`audience` is the Teleport cluster name. `tbot` reads that JWT, presents it
+on every join, and Teleport central's `ProvisionToken` validates the JWT
+against the consumer MC's signing keys embedded inline (`static_jwks`).
 
-See [`CONTEXT.md`](./CONTEXT.md) for the full design.
+```
+  Consumer MC                                      Central MC
+  ┌──────────────────────────────────────────┐    ┌────────────────────────┐
+  │                                          │    │                        │
+  │  ┌── RemoteApp pod ───────────────────┐  │    │  Teleport auth         │
+  │  │  tbot                              │  │    │                        │
+  │  │   reads projected SA JWT and       │  │    │  ProvisionToken        │
+  │  │   presents it as join credential   ├──┼───►│    join: kubernetes    │
+  │  │   (audience = clusterName)         │  │    │    trust: static_jwks  │
+  │  └────────────────────────────────────┘  │    │    allow: <ns>:<name>  │
+  │           ▲ uses                         │    │                        │
+  │           │                              │    │  validates JWT against │
+  │   ServiceAccount  (one per RemoteApp,    │    │  the consumer MC's     │
+  │                    rendered by operator) │    │  JWKS embedded in the  │
+  │                                          │    │  ProvisionToken        │
+  └──────────────────────────────────────────┘    └────────────────────────┘
+```
+
+Consequences worth pulling out:
+
+- No static-token `Secret` is ever delivered to the consumer cluster. The
+  operator holds no `secrets` RBAC and watches no rotating object.
+- The kubelet refreshes the projected JWT transparently; `tbot` consumes
+  the rotated token on its next join. The operator does nothing on
+  rotation.
+- `static_jwks` is chosen because consumer-MC kube-apiservers are private
+  in the GS topology, so the `in_cluster` mode (which would have Teleport
+  reach the consumer's `tokenreviews` endpoint) is not viable. Exporting
+  the consumer MC's JWKS to central is a one-off platform-team GitOps
+  step, out of scope for this operator.
+- The `ProvisionToken`'s `kubernetes.allow` list pins
+  `<cr.namespace>:<cr.name>`, so the CR name and namespace must be agreed
+  before central-side provisioning lands.
+
+The Teleport cluster name and proxy address are operator-level chart values
+(`teleport.clusterName`, `teleport.proxyAddr`), not CR fields. A given
+consumer MC therefore hosts `RemoteApp`s that all target the same Teleport
+cluster; multi-Teleport on one MC is an explicit non-goal (the answer is a
+second operator install in its own namespace).
+
+### TLS: how callers trust the tunnel
+
+The `ghostunnel` sidecar terminates TLS on `8443` using a SPIFFE X.509-SVID
+minted by `tbot`'s `workload-identity-x509` service, signed by Teleport
+central's SPIFFE CA. The SVID and its private key live in an `emptyDir`
+shared with the sidecar; `ghostunnel` watches the files and reloads on
+rotation. Callers verify the SVID against a single trust-bundle `Secret`
+(`tunnelport-spiffe-bundle`) materialised by a chart-managed singleton
+`tunnelport-trust-bundle` Deployment.
+
+```
+  Consumer MC                                            Central MC
+  ┌──────────────────────────────────────────────┐      ┌──────────────┐
+  │                                              │      │   Teleport   │
+  │  caller pod                                  │      │   SPIFFE CA  │
+  │     │  https://payments:8443                 │      │              │
+  │     │  (verifies server SVID against the     │      │  signs every │
+  │     │   svid_bundle.pem file it mounts       │      │  SVID below  │
+  │     ▼   from tunnelport-spiffe-bundle)       │      │              │
+  │  Service (ClusterIP, tls/8443)               │      └──────▲───────┘
+  │     │                                        │             │
+  │     ▼                                        │             │
+  │  ┌── RemoteApp pod ─────────────────┐        │             │
+  │  │  ghostunnel  ── presents SVID    │        │             │
+  │  │       ▲       from emptyDir      │        │             │
+  │  │       │                          │        │             │
+  │  │  tbot ── mints SVID via          │────────┼─────────────┤
+  │  │          workload-identity-x509  │        │             │
+  │  └──────────────────────────────────┘        │             │
+  │                                              │             │
+  │  ┌── tunnelport-trust-bundle ─────┐          │             │
+  │  │   (chart singleton)            │          │             │
+  │  │  tbot ─► Secret:               │──────────┼─────────────┘
+  │  │   tunnelport-spiffe-bundle     │          │
+  │  │   (svid_bundle.pem)            │          │
+  │  └────────────────────────────────┘          │
+  └──────────────────────────────────────────────┘
+```
+
+Why this shape:
+
+- Every `tbot` pod on the MC already extends transitive trust to Teleport
+  central's CA chain — the join contract makes that true. Reusing the same
+  identity authority for the tunnel cert avoids standing up a parallel CA
+  managed by cert-manager or a manual bootstrap process.
+- An SVID carries a meaningful workload identity
+  (`spiffe://<cluster>/bot/<bot-name>`) in addition to DNS SANs. Callers
+  that want to verify the SPIFFE ID, not just the chain, get richer
+  attestation for free.
+- One bundle covers every `RemoteApp` on the MC because they're all signed
+  by the same Teleport SPIFFE CA. Per-CR Secrets would carry identical
+  bytes; the singleton tbot writes the bundle once and every consumer in
+  the release namespace mounts it.
+
+A plaintext `http/8080` port is still served on the `Service` alongside
+`tls/8443` during migration; it's deprecated and a future change will drop
+it once every known caller has moved.
 
 ## Scope
 
