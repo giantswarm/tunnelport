@@ -53,6 +53,7 @@ echo "==> helm lint"
 helm lint "${CHART}" "${TELEPORT_FLAGS[@]}"
 
 echo "==> rendering default values"
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}")"
 
 echo "==> RBAC assertions"
@@ -103,6 +104,7 @@ assert "tbot.resources.limits.memory flows to --tbot-memory-limit" \
   "printf '%s' \"\${RENDERED}\" | grep -E -- '--tbot-memory-limit=256Mi'"
 
 # 3c. Overridden values flow through too — guards against accidental hardcoding.
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_OVERRIDE="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
   --set tbot.image=ghcr.io/example/tbot:v999 \
   --set tbot.resources.requests.cpu=123m \
@@ -138,6 +140,7 @@ assert "CRD has helm.sh/resource-policy: keep" \
   "printf '%s' \"\${RENDERED}\" | grep -E 'helm.sh/resource-policy:[[:space:]]+keep'"
 
 # 4c. With crds.install=false the CRD disappears.
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_NO_CRDS="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" --set crds.install=false)"
 assert "CRD suppressed with crds.install=false" \
   "! printf '%s' \"\${RENDERED_NO_CRDS}\" | grep -q '^kind: CustomResourceDefinition\$'"
