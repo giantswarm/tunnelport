@@ -92,7 +92,7 @@ tbot:
   # listen/listener field rename noted at internal/controller/remoteapp/render.go).
   # Resolve a fresh digest before each chart release with:
   #   crane digest public.ecr.aws/gravitational/tbot-distroless:18
-  image: public.ecr.aws/gravitational/tbot-distroless:18@sha256:8fa85ea36b96d6d9b1d94a78ae326f066d8525a9ae81cee366290b5d3bba5f78
+  image: public.ecr.aws/gravitational/tbot-distroless:18@sha256:ae8424668700b5b65d7cf4ba068b1eaf5e6c52900ad569af1b2a4e10c9907ee8
   # Development-only: render tbot configs with `insecure: true` so the
   # pods skip Teleport proxy TLS verification. Useful for kind-based
   # smoke tests where the proxy is reached by IP and the cert SAN does
@@ -114,7 +114,7 @@ tbot:
 tls:
   # Pinned ghostunnel release; bump deliberately. `ghostunnel/ghostunnel`
   # is the upstream image on Docker Hub.
-  ghostunnelImage: ghostunnel/ghostunnel:v1.7.3
+  ghostunnelImage: ghostunnel/ghostunnel:v1.10.0
   # Polling interval ghostunnel uses to re-read the SVID files from
   # disk. Safe at 5m because tbot's workload-identity-x509 service
   # renews every 20m by default — see ADR 0007 §"Migration shape".
