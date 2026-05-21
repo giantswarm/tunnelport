@@ -65,11 +65,11 @@ spec:
           - --health-probe-bind-address=:8081
           # ADR 0005: --teleport-cluster-name and --teleport-proxy-addr
           # are operator-level required flags; cmd/main.go exits on
-          # startup if either is empty. The kustomize-based test/e2e
-          # path (config/default) doesn't talk to a real Teleport, but
-          # the shape regex still has to pass — `example.com:443` is a
-          # placeholder of the right DNS-1123 + host:port shape. The
-          # helm chart resolves the same flags from `teleport.*` values.
+          # startup if either is empty. The kustomize path (config/default)
+          # doesn't talk to a real Teleport, but the shape regex still has
+          # to pass — `example.com:443` is a placeholder of the right
+          # DNS-1123 + host:port shape. The helm chart resolves the same
+          # flags from `teleport.*` values; real E2E lives in hack/smoke/.
           - --teleport-cluster-name=teleport.example.com
           - --teleport-proxy-addr=teleport.example.com:443
         image: controller:latest
