@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
@@ -206,17 +207,19 @@ func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
 	cmBefore := &corev1.ConfigMap{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, cmBefore)
 
-	// Mutate spec.port to a new value.
+	// Mutate spec.port to a new value. Retry on conflict because the
+	// reconciler runs concurrently and may bump status between our Get
+	// and Update, which would otherwise race with the test under fast
+	// CI envtests.
 	const newPort = int32(9090)
-	updatePort := func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		got := &accessv1alpha1.RemoteApp{}
 		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
 			return err
 		}
 		got.Spec.Port = newPort
 		return testClient.Update(ctx, got)
-	}
-	if err := updatePort(); err != nil {
+	}); err != nil {
 		t.Fatalf("update port: %v", err)
 	}
 
@@ -281,14 +284,16 @@ func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
 		t.Fatalf("initial replicas: want 1, got %v", depBefore.Spec.Replicas)
 	}
 
-	// Bump replicas to 3.
+	// Bump replicas to 3. Retry on conflict — see PortChange test for why.
 	want := int32(3)
-	got := &accessv1alpha1.RemoteApp{}
-	if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	got.Spec.Replicas = &want
-	if err := testClient.Update(ctx, got); err != nil {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		got := &accessv1alpha1.RemoteApp{}
+		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
+			return err
+		}
+		got.Spec.Replicas = &want
+		return testClient.Update(ctx, got)
+	}); err != nil {
 		t.Fatalf("update replicas: %v", err)
 	}
 
@@ -323,12 +328,15 @@ func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T
 
 	// Mutate appName. (The Teleport proxy/cluster name are operator-level
 	// flags now — ADR 0005 — so they have no per-CR mutation surface.)
-	got := &accessv1alpha1.RemoteApp{}
-	if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	got.Spec.AppName = "renamed-app"
-	if err := testClient.Update(ctx, got); err != nil {
+	// Retry on conflict — see PortChange test for why.
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		got := &accessv1alpha1.RemoteApp{}
+		if err := testClient.Get(ctx, client.ObjectKeyFromObject(cr), got); err != nil {
+			return err
+		}
+		got.Spec.AppName = "renamed-app"
+		return testClient.Update(ctx, got)
+	}); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 

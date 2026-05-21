@@ -1,8 +1,11 @@
 {
   "extends": [
-    "config:base"
+    "config:base",
+    ":semanticCommits"
   ],
   "labels": ["dependencies"],
+  "semanticCommitType": "chore",
+  "semanticCommitScope": "deps",
   "packageRules": [
     {
       "matchPackagePatterns": [".*giantswarm.*"],

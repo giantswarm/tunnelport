@@ -45,6 +45,9 @@ const (
 	LabelRoleValue         = "tbot"
 	LabelRemoteAppInstance = "tunnelport.giantswarm.io/remoteapp"
 
+	kindServiceAccount                   = "ServiceAccount"
+	capabilityAll      corev1.Capability = "ALL"
+
 	// AnnotationConfigHash is stamped on the pod template so that ConfigMap
 	// content changes (spec.appName / spec.port / spec.tokenName, or the
 	// operator-level Teleport binding from ADR 0005) cause the
@@ -155,7 +158,7 @@ func renderServiceAccount(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *corev1.S
 	return &corev1.ServiceAccount{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
-			Kind:       "ServiceAccount",
+			Kind:       kindServiceAccount,
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
@@ -215,7 +218,7 @@ const (
 
 	mountPathTbotConfig      = "/etc/tbot"
 	mountPathTbotStorage     = "/var/lib/tbot"
-	mountPathTbotJoinSAToken = "/var/run/secrets/tokens"
+	mountPathTbotJoinSAToken = "/var/run/secrets/tokens" // #nosec G101 -- filesystem path, not a credential
 	tbotJoinSATokenFileName  = "join-sa-token"
 	mountPathTbotTmp         = "/tmp"
 
@@ -378,7 +381,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 			ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
 			RunAsNonRoot:             &runAsNonRoot,
 			Capabilities: &corev1.Capabilities{
-				Drop: []corev1.Capability{"ALL"},
+				Drop: []corev1.Capability{capabilityAll},
 			},
 			SeccompProfile: &corev1.SeccompProfile{
 				Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -499,14 +502,14 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 					},
 					Containers: []corev1.Container{
 						{
-							Name:      "tbot",
+							Name:      LabelRoleValue,
 							Image:     cfg.TbotImage,
 							Resources: cfg.Resources,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 								ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
 								Capabilities: &corev1.Capabilities{
-									Drop: []corev1.Capability{"ALL"},
+									Drop: []corev1.Capability{capabilityAll},
 								},
 							},
 							// `tbot` is set explicitly so the renderer is not
@@ -514,7 +517,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							// `public.ecr.aws/gravitational/teleport-distroless`
 							// has `teleport` as its entrypoint, which would
 							// reject `start -c …` with "unexpected start".
-							Command: []string{"tbot"},
+							Command: []string{LabelRoleValue},
 							// KUBERNETES_TOKEN_PATH tells tbot to read its
 							// join JWT from the projected SA token volume
 							// (audience = cfg.TeleportClusterName, the
@@ -663,7 +666,7 @@ func renderService(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.Servic
 			Selector: labels,
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "tbot",
+					Name:       LabelRoleValue,
 					Port:       cr.Spec.Port,
 					TargetPort: intstr.FromInt(int(cr.Spec.Port)),
 					Protocol:   corev1.ProtocolTCP,

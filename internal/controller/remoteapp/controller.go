@@ -141,7 +141,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		name string
 		obj  client.Object
 	}{
-		{"ServiceAccount", renderServiceAccount(cr, r.PodDefaults)},
+		{kindServiceAccount, renderServiceAccount(cr, r.PodDefaults)},
 		{"ConfigMap", renderConfigMap(cr, r.PodDefaults)},
 		{"Deployment", renderDeployment(cr, r.PodDefaults)},
 		{"Service", renderService(cr, r.PodDefaults)},

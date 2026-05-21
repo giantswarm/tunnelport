@@ -25,4 +25,3 @@ resources:
 - remoteapp_admin_role.yaml
 - remoteapp_editor_role.yaml
 - remoteapp_viewer_role.yaml
-

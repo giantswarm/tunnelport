@@ -51,8 +51,7 @@ workflows:
           name: go-build
           binary: tunnelport
           path: ./cmd
-          pre_test_target: generate
-          test_target: test
+          test_target: test-ci
           filters:
             tags:
               only: /^v.*/
