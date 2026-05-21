@@ -38,6 +38,22 @@ import (
 // is satisfied.
 const noTbotPodsMsg = "no tbot pods"
 
+// Pod waiting/terminated reasons referenced by errorSeverity. Defining
+// these as constants both removes goconst churn and gives tests a
+// shared source-of-truth string to assert against.
+const (
+	reasonCrashLoopBackOff  = "CrashLoopBackOff"
+	reasonError             = "Error"
+	reasonContainerCreating = "ContainerCreating"
+)
+
+// RemoteApp Ready condition reasons. Kept finite and constant per
+// Kubernetes convention so automation can pattern-match on them.
+const (
+	reasonTunnelReady = "TunnelReady"
+	reasonPodNotReady = "PodNotReady"
+)
+
 // liveTbotPods returns the subset of pods that are not being torn down,
 // i.e. pods whose DeletionTimestamp is nil. Pods with DeletionTimestamp
 // set are mid-termination: their PodReady condition still reads
@@ -102,11 +118,11 @@ func errorSeverity(reason string) int {
 	switch reason {
 	case "ImagePullBackOff", "ErrImagePull", "CreateContainerConfigError":
 		return 1
-	case "CrashLoopBackOff":
+	case reasonCrashLoopBackOff:
 		return 2
-	case "Error", "OOMKilled":
+	case reasonError, "OOMKilled":
 		return 3
-	case "ContainerCreating", "PodInitializing":
+	case reasonContainerCreating, "PodInitializing":
 		return 4
 	default:
 		return 5
@@ -332,10 +348,10 @@ func boolToConditionStatus(b bool) metav1.ConditionStatus {
 // stick to a small finite set that automation can pattern-match on.
 func readyConditionReason(ready bool, lastError string) string {
 	if ready {
-		return "TunnelReady"
+		return reasonTunnelReady
 	}
 	if lastError == noTbotPodsMsg {
 		return "NoPods"
 	}
-	return "PodNotReady"
+	return reasonPodNotReady
 }

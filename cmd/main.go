@@ -237,6 +237,11 @@ func requireOrExit(name, value string, pattern *regexp.Regexp) string {
 // The Teleport binding (ADR 0005) is validated via requireOrExit — both
 // values are required and shape-checked at startup.
 func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
+	if f.ghostunnelListenPort < 1 || f.ghostunnelListenPort > 65535 {
+		setupLog.Error(nil, "invalid --ghostunnel-listen-port (must be 1-65535)",
+			"value", f.ghostunnelListenPort)
+		os.Exit(1)
+	}
 	return remoteappctrl.PodDefaults{
 		TbotImage: f.tbotImage,
 		Resources: corev1.ResourceRequirements{

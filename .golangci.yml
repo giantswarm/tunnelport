@@ -40,6 +40,16 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # gosec/goconst trip on patterns that are legitimate in tests: reading
+      # project-controlled YAML, repeated fixture literals, subprocess
+      # invocations against kubectl. Treat them as test-code noise.
+      - linters:
+          - gosec
+          - goconst
+        path: _test\.go$
+      - linters:
+          - gosec
+        path: test/utils/.*
     paths:
       - third_party$
       - builtin$
