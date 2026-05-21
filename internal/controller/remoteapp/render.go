@@ -45,7 +45,7 @@ const (
 	LabelRoleValue         = "tbot"
 	LabelRemoteAppInstance = "tunnelport.giantswarm.io/remoteapp"
 
-	kindServiceAccount = "ServiceAccount"
+	kindServiceAccount                   = "ServiceAccount"
 	capabilityAll      corev1.Capability = "ALL"
 
 	// AnnotationConfigHash is stamped on the pod template so that ConfigMap
@@ -666,7 +666,7 @@ func renderService(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.Servic
 			Selector: labels,
 			Ports: []corev1.ServicePort{
 				{
-					Name:       "tbot",
+					Name:       LabelRoleValue,
 					Port:       cr.Spec.Port,
 					TargetPort: intstr.FromInt(int(cr.Spec.Port)),
 					Protocol:   corev1.ProtocolTCP,
