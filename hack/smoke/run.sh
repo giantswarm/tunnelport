@@ -106,6 +106,7 @@ dump_diag() {
 }
 
 SMOKE_RESULT=fail
+# shellcheck disable=SC2154 # rc is assigned in the trap body via rc=$?.
 trap 'rc=$?; if [[ "$SMOKE_RESULT" != "ok" ]]; then dump_diag; fi; teardown; exit $rc' EXIT
 
 # ---------------------------------------------------------------------
@@ -113,7 +114,10 @@ trap 'rc=$?; if [[ "$SMOKE_RESULT" != "ok" ]]; then dump_diag; fi; teardown; exi
 # ---------------------------------------------------------------------
 
 step "Building operator image (${OPERATOR_IMAGE})"
-make docker-build IMG="${OPERATOR_IMAGE}" >/dev/null
+# The repo's Dockerfile is multi-stage and self-contained; call docker
+# directly rather than detouring through `make docker-build`, which the
+# devctl Makefile no longer ships.
+docker build -t "${OPERATOR_IMAGE}" . >/dev/null
 
 # Three kind clusters in parallel exhaust the default inotify limits on
 # Ubuntu hosts (max_user_watches=8192, max_user_instances=128). kube-proxy
