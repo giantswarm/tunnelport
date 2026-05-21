@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-05-21
+
 ### Changed
 
 - Replaced legacy microkit/operatorkit scaffold with kubebuilder v4 layout
@@ -149,4 +151,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI secret context — which sidesteps the original HITL gate on
   test-credentials management.
 
-[Unreleased]: https://github.com/giantswarm/tunnelport/tree/master
+[Unreleased]: https://github.com/giantswarm/tunnelport/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/giantswarm/tunnelport/releases/tag/v1.0.0

@@ -13,7 +13,7 @@ sources:
 # Both `version` and `appVersion` are rewritten by app-build-suite at
 # release time from the git tag. Keep them as `0.0.0` placeholders so the
 # unreleased chart still installs cleanly with `helm install`.
-version: 0.0.0
+version: 1.0.0
 appVersion: 0.0.0
 annotations:
   application.giantswarm.io/team: bumblebee
