@@ -218,7 +218,7 @@ const (
 
 	mountPathTbotConfig      = "/etc/tbot"
 	mountPathTbotStorage     = "/var/lib/tbot"
-	mountPathTbotJoinSAToken = "/var/run/secrets/tokens" //#nosec G101 -- filesystem path, not a credential
+	mountPathTbotJoinSAToken = "/var/run/secrets/tokens" // #nosec G101 -- filesystem path, not a credential
 	tbotJoinSATokenFileName  = "join-sa-token"
 	mountPathTbotTmp         = "/tmp"
 
@@ -517,7 +517,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							// `public.ecr.aws/gravitational/teleport-distroless`
 							// has `teleport` as its entrypoint, which would
 							// reject `start -c …` with "unexpected start".
-							Command: []string{"tbot"},
+							Command: []string{LabelRoleValue},
 							// KUBERNETES_TOKEN_PATH tells tbot to read its
 							// join JWT from the projected SA token volume
 							// (audience = cfg.TeleportClusterName, the

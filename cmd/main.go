@@ -263,7 +263,7 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 		),
 		GhostunnelImage:          f.ghostunnelImage,
 		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
-		GhostunnelListenPort:     int32(f.ghostunnelListenPort),
+		GhostunnelListenPort:     int32(f.ghostunnelListenPort), // #nosec G115 -- bounded to 1..65535 above
 	}
 }
 
