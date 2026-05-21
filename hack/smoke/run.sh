@@ -50,10 +50,11 @@ HELM_WAIT="${HELM_WAIT:-180}"
 # Operator install (ADR 0008) now waits for the singleton trust-bundle
 # tbot Deployment to be Ready as part of `helm --wait`, which means
 # the bot must reach Teleport and issue its first SVID before helm
-# returns. On CI's Ubuntu kind the first-connection retry path is
-# slower than local; 300s leaves room. The other helm installs
-# (Teleport, kube-agent) still use the shorter HELM_WAIT.
-OPERATOR_HELM_WAIT="${OPERATOR_HELM_WAIT:-300}"
+# returns. CircleCI's Ubuntu kind drops the first fresh consumer→
+# teleport bridge connections (see the pre-flight probe before the
+# operator install); tbot's exponential backoff is ~60s, so 600s
+# leaves room for ~10 attempts in the worst case.
+OPERATOR_HELM_WAIT="${OPERATOR_HELM_WAIT:-600}"
 READY_WAIT="${READY_WAIT:-180}"
 CURL_WAIT="${CURL_WAIT:-120}"
 
@@ -340,6 +341,21 @@ kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < "${SMOKE_BOT_TOKEN_FILE}" >/dev/null
 kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < "${TRUST_BUNDLE_TOKEN_FILE}" >/dev/null
+
+step "Probing consumer→teleport proxy reachability"
+# CircleCI's docker bridge intermittently drops the first fresh
+# consumer→teleport-control-plane:NodePort connections (kindnet ARP
+# race / conntrack on Ubuntu kind). The producer's reverse tunnel is
+# long-lived and survives; the trust-bundle bot opens FRESH HTTPS
+# calls and is the canary. Warm the path here so the helm install
+# that follows doesn't burn its 600s budget on a cold-start retry
+# loop. Fail loud and fast if the path is genuinely partitioned.
+kubectl --context kind-consumer run smoke-reach \
+  --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+  sh -c "for i in \$(seq 1 60); do
+           curl -sk --max-time 3 https://${TELEPORT_PROXY_ADDR}/webapi/find >/dev/null 2>&1 && exit 0
+           sleep 2
+         done; exit 1" >/dev/null
 
 step "Installing the operator on the consumer cluster"
 # teleport.clusterName matches the Teleport cluster name configured in
