@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The rendered tbot Deployment carries a readiness probe pointing at
   tbot's diag `/readyz` endpoint on a new named container port `diag`
   (3001), so pod-`Ready` reflects tunnel-up rather than process-up.
+- Regenerate `.github/workflows/zz_generated.*.yaml` via devctl to use the centralized reusable workflow, removing the Node-20 `mindsers/changelog-reader-action` dependency.
 
 ### Added
 
