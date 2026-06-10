@@ -1,0 +1,57 @@
+# Pilot for the devctl-generated .circleci/workflows.yml (dynamic config).
+# The setup workflow in .circleci/config.yml merges .circleci/custom.yml into
+# this file at pipeline runtime. Repo-specific jobs (e2e-smoke) live in
+# custom.yml -- never here.
+#
+# Not yet byte-identical to the devctl golden: go-build carries path/
+# test_target overrides and the chart goes to control-plane-catalog instead
+# of giantswarm-catalog. Once those gaps are settled in the generator, this
+# file becomes fully generated and align-files keeps it in sync.
+version: 2.1
+
+orbs:
+  architect: giantswarm/architect@7.1.0
+
+workflows:
+  build:
+    jobs:
+      - architect/go-build:
+          name: go-build
+          binary: tunnelport
+          path: ./cmd
+          test_target: test-ci
+          filters:
+            tags:
+              only: /^v.*/
+
+      # Intentionally NOT gated on e2e-smoke (custom.yml): the runtime merge
+      # appends jobs but cannot inject requires into generated jobs. e2e-smoke
+      # gates merges via the GitHub required check instead; tag publishes are
+      # not gated on e2e (accepted limitation of the custom.yml mechanism).
+      - architect/push-to-registries:
+          context: "architect"
+          name: push-to-registries
+          requires:
+            - go-build
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore:
+                - main
+
+      - architect/push-to-app-catalog:
+          context: "architect"
+          executor: "app-build-suite"
+          name: push-to-app-catalog
+          app_catalog: "control-plane-catalog"
+          app_catalog_test: "control-plane-test-catalog"
+          chart: "tunnelport"
+          requires:
+            - push-to-registries
+          filters:
+            tags:
+              only: /^v.*/
+            branches:
+              ignore:
+                - main
