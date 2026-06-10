@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI: adopt the dynamic-config setup workflow -- `.circleci/config.yml` is the generated setup config, the pipeline lives in `.circleci/workflows.yml`, and the repo-owned `e2e-smoke` job moved into `.circleci/custom.yml`, merged in at pipeline runtime. Tag publishes are no longer gated on `e2e-smoke`; e2e gates merges via the GitHub required check.
+
+### Fixed
+
+- Bump vulnerable Go module dependencies flagged by nancy.
+
 ## [1.0.0] - 2026-05-21
 
 ### Changed
