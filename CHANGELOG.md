@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-10
+
 ### Changed
 
 - CI: adopt the dynamic-config setup workflow -- `.circleci/config.yml` is the generated setup config, the pipeline lives in `.circleci/workflows.yml`, and the repo-owned `e2e-smoke` job moved into `.circleci/custom.yml`, merged in at pipeline runtime. Tag publishes are no longer gated on `e2e-smoke`; e2e gates merges via the GitHub required check.
@@ -159,5 +161,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI secret context — which sidesteps the original HITL gate on
   test-credentials management.
 
-[Unreleased]: https://github.com/giantswarm/tunnelport/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/giantswarm/tunnelport/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/giantswarm/tunnelport/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/giantswarm/tunnelport/releases/tag/v1.0.0
