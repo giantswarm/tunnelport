@@ -88,7 +88,7 @@ Operational consequences:
 | `tbot.image` | `public.ecr.aws/gravitational/teleport-distroless:16@sha256:...` | Single global tbot image for **every** rendered `RemoteApp` Deployment. **Pinned by digest** so a re-push behind the floating `:16` tag can't silently change tbot's config schema underneath the operator. RemoteApp.spec deliberately has no per-CR override. |
 | `tbot.resources.requests` / `tbot.resources.limits` | 50m/64Mi → 200m/256Mi | Cluster-wide defaults for every rendered tbot pod. Same no-per-CR-override rule. |
 | `crds.install` | `true` | Set to `false` if the CRD is delivered by a separate bootstrap chart. The chart's CRD bundle carries `helm.sh/resource-policy: keep`, so live `RemoteApp`s survive `helm uninstall`. |
-| `networkPolicy.enabled` | `true` | The operator-pod NetworkPolicy. See "NetworkPolicy responsibilities" below for the **rendered tbot pod** policy story (different concern). |
+| `networkPolicy.enabled` | `true` | The operator-pod NetworkPolicy. Scoped to the manager pod only — pods carrying a `tunnelport.giantswarm.io/role` label (the trust-bundle bot) are excluded. See "NetworkPolicy responsibilities" below for the **tbot pod** policy story (different concern). |
 
 `tbot.image` and `tbot.resources` flow into the operator manager's CLI
 flags (`--tbot-image`, `--tbot-cpu-request`, `--tbot-memory-request`,
@@ -115,22 +115,27 @@ The platform team layers their own RBAC on top of the chart. The
 operator's own ServiceAccount **only** reads `RemoteApp`s; it never
 creates them.
 
-### 2. NetworkPolicy for the rendered tbot pods
+### 2. NetworkPolicy for the tbot pods
 
 The operator renders a tbot `Deployment` + `Service` per `RemoteApp` in
-the CR's namespace. The chart **does not** render a `NetworkPolicy`
-covering those tbot pods — enforcement varies by CNI, baseline policies
-vary by org, and a chart-generated policy would interact awkwardly with
-whatever the platform team already runs.
+the CR's namespace, and the chart ships a singleton trust-bundle tbot
+(ADR 0008) in `installNamespace`. The chart **does not** render a
+`NetworkPolicy` covering any of those tbot pods — enforcement varies by
+CNI, baseline policies vary by org, the Teleport proxy port is
+install-specific, and a chart-generated policy would interact awkwardly
+with whatever the platform team already runs. (The chart's own
+default-deny policy on the manager pod explicitly excludes them via
+`tunnelport.giantswarm.io/role` — every tbot needs egress to
+`proxyAddr`, which the manager policy would deny.)
 
-The platform team writes the tbot pod policy themselves. The rendered
-tbot pods carry stable selectors so a hand-written `NetworkPolicy` can
-target them:
+The platform team writes the tbot pod policy themselves. The pods carry
+stable selectors so a hand-written `NetworkPolicy` can target them:
 
-| Label | Value |
-|---|---|
-| `tunnelport.giantswarm.io/role` | `tbot` |
-| `tunnelport.giantswarm.io/remoteapp` | `<RemoteApp name>` |
+| Label | Value | Pod |
+|---|---|---|
+| `tunnelport.giantswarm.io/role` | `tbot` | per-`RemoteApp` tbot |
+| `tunnelport.giantswarm.io/remoteapp` | `<RemoteApp name>` | per-`RemoteApp` tbot |
+| `tunnelport.giantswarm.io/role` | `trust-bundle-bot` | singleton trust-bundle tbot |
 
 A typical policy allows:
 
