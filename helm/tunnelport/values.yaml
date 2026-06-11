@@ -92,7 +92,7 @@ tbot:
   # listen/listener field rename noted at internal/controller/remoteapp/render.go).
   # Resolve a fresh digest before each chart release with:
   #   crane digest public.ecr.aws/gravitational/tbot-distroless:18
-  image: public.ecr.aws/gravitational/tbot-distroless:18@sha256:ae8424668700b5b65d7cf4ba068b1eaf5e6c52900ad569af1b2a4e10c9907ee8
+  image: public.ecr.aws/gravitational/tbot-distroless:18@sha256:a93083d1f1ede1a1e70cd1e6063eaa6f4e58a73e9ec166d469c1a6c5e947024a
   # Development-only: render tbot configs with `insecure: true` so the
   # pods skip Teleport proxy TLS verification. Useful for kind-based
   # smoke tests where the proxy is reached by IP and the cert SAN does
