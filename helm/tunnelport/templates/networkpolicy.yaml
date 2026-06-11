@@ -17,9 +17,25 @@ metadata:
   labels:
     {{- include "tunnelport.labels" . | nindent 4 }}
 spec:
+  # Manager pod only. The selector labels alone would ALSO match the
+  # chart-managed singleton trust-bundle tbot (ADR 0008), whose pod
+  # carries the same app.kubernetes.io/{name,instance} pair plus a
+  # role label — and that bot must dial the Teleport proxy on an
+  # arbitrary host:port (a random NodePort in the e2e smoke), which
+  # this policy's egress rules would deny. Excluding role-labeled pods
+  # (same exclusion as the PodDisruptionBudget) keeps this policy
+  # scoped to the manager; the trust-bundle bot's policy is the
+  # platform team's, like the rendered tbots' (see README.md).
+  # Root cause of the flaky e2e-smoke i/o timeouts (#41): kind ≥ v0.24
+  # enforces NetworkPolicy via kube-network-policies, fail-open — so
+  # the trust-bundle bot was blocked from joining whenever enforcement
+  # was active.
   podSelector:
     matchLabels:
       {{- include "tunnelport.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: tunnelport.giantswarm.io/role
+        operator: DoesNotExist
   policyTypes:
   - Ingress
   - Egress

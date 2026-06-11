@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The chart's default-deny NetworkPolicy no longer matches the singleton
+  trust-bundle tbot pod (ADR 0008). The policy's `podSelector` only carried the
+  shared `app.kubernetes.io/{name,instance}` labels, so the trust-bundle bot's
+  egress to the Teleport proxy was denied on any NetworkPolicy-enforcing CNI --
+  including kind >= v0.24, which made the `e2e-smoke` CI job flaky (pass only
+  when kindnet's fail-open enforcement raced the bot's first join). Role-labeled
+  pods are now excluded via `matchExpressions`, mirroring the
+  PodDisruptionBudget's selector (#41).
+
 ## [1.0.1] - 2026-06-10
 
 ### Changed

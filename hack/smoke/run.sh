@@ -50,10 +50,21 @@ HELM_WAIT="${HELM_WAIT:-180}"
 # Operator install (ADR 0008) now waits for the singleton trust-bundle
 # tbot Deployment to be Ready as part of `helm --wait`, which means
 # the bot must reach Teleport and issue its first SVID before helm
-# returns. CircleCI's Ubuntu kind drops the first fresh consumer→
-# teleport bridge connections (see the pre-flight probe before the
-# operator install); tbot's exponential backoff is ~60s, so 600s
-# leaves room for ~10 attempts in the worst case.
+# returns. tbot's exponential backoff is ~60s; 600s leaves room for
+# ~10 attempts in the worst case.
+#
+# History (#41): this step used to flake with persistent
+# `dial tcp <node-ip>:<nodeport>: i/o timeout` from the trust-bundle
+# tbot. Root cause was NOT the network path: the chart's default-deny
+# NetworkPolicy on the manager pod also matched the trust-bundle pod
+# (shared app.kubernetes.io/{name,instance} selector labels), and
+# kind ≥ v0.24 enforces NetworkPolicy (kube-network-policies embedded
+# in kindnetd, nfqueue, fail-open). The policy's egress allows only
+# DNS/443/6443, so the bot's dial to the random proxy NodePort
+# (30000-32767) was dropped whenever enforcement was active; runs
+# passed only when the bot's first join raced ahead of kindnet's
+# pod-IP sync (fail-open window). Fixed by excluding role-labeled
+# pods from the policy's podSelector.
 OPERATOR_HELM_WAIT="${OPERATOR_HELM_WAIT:-600}"
 READY_WAIT="${READY_WAIT:-180}"
 CURL_WAIT="${CURL_WAIT:-120}"
@@ -343,13 +354,14 @@ kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
   tctl create -f - < "${TRUST_BUNDLE_TOKEN_FILE}" >/dev/null
 
 step "Probing consumer→teleport proxy reachability"
-# CircleCI's docker bridge intermittently drops the first fresh
-# consumer→teleport-control-plane:NodePort connections (kindnet ARP
-# race / conntrack on Ubuntu kind). The producer's reverse tunnel is
-# long-lived and survives; the trust-bundle bot opens FRESH HTTPS
-# calls and is the canary. Warm the path here so the helm install
-# that follows doesn't burn its 600s budget on a cold-start retry
-# loop. Fail loud and fast if the path is genuinely partitioned.
+# Sanity gate: fail loud and fast if the consumer→teleport NodePort
+# path is genuinely partitioned, instead of burning the operator
+# install's 600s budget. Note what this probe does NOT prove: it runs
+# as an unlabeled pod, so it is not subject to the chart's
+# NetworkPolicy. The #41 flake passed this probe every time while the
+# trust-bundle tbot (which carries the chart's selector labels) was
+# egress-blocked by that policy — see the OPERATOR_HELM_WAIT comment
+# above for the full story.
 kubectl --context kind-consumer run smoke-reach \
   --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
   sh -c "for i in \$(seq 1 60); do
