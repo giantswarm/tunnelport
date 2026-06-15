@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI: bump the `giantswarm/architect` orb from `7.1.0` to `9.4.1`. Among other
+  improvements, `push-to-app-catalog` now stamps `appVersion` from the git tag
+  by default (`override_app_version`, added in `9.3.0`), so released charts no
+  longer carry the `0.0.0` placeholder appVersion. The orb now always builds
+  multi-arch (`linux/amd64,linux/arm64`) images via buildx.
+- Build: pin the Dockerfile builder stage to `$BUILDPLATFORM` so Go
+  cross-compiles natively per target arch instead of running under QEMU
+  emulation. Required by the orb's always-multi-arch buildx flow -- emulated
+  Go compilation otherwise trips the push job's no-output timeout.
+
 ## [1.0.2] - 2026-06-15
 
 ### Fixed

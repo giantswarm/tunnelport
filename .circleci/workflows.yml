@@ -10,13 +10,14 @@
 version: 2.1
 
 orbs:
-  architect: giantswarm/architect@7.1.0
+  architect: giantswarm/architect@9.4.1
 
 workflows:
   build:
     jobs:
       - architect/go-build:
           name: go-build
+          context: "architect"
           binary: tunnelport
           path: ./cmd
           test_target: test-ci
