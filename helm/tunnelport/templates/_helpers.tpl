@@ -33,9 +33,7 @@ is the operator code's responsibility, not the chart's.
 {{- define "tunnelport.labels" -}}
 helm.sh/chart: {{ include "tunnelport.chart" . }}
 {{ include "tunnelport.selectorLabels" . }}
-{{- if .Chart.AppVersion }}
-app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
-{{- end }}
+app.kubernetes.io/version: {{ .Chart.Version | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 application.giantswarm.io/team: {{ index .Chart.Annotations "application.giantswarm.io/team" | quote }}
 {{- end -}}
@@ -50,10 +48,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Manager image reference. `image.tag` falls back to .Chart.AppVersion so
-release-time ABS substitution flows through unchanged.
+Manager image reference. `image.tag` falls back to .Chart.Version, which
+app-build-suite stamps from the git tag at release time (the image push
+uses the same tag). .Chart.AppVersion is deliberately NOT used: the release
+orb pinned here does not stamp appVersion, so it stays at the 0.0.0
+placeholder and would resolve to a non-existent image tag.
 */}}
 {{- define "tunnelport.image" -}}
-{{- $tag := default .Chart.AppVersion .Values.image.tag -}}
+{{- $tag := default .Chart.Version .Values.image.tag -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.name $tag -}}
 {{- end -}}
