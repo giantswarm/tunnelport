@@ -49,10 +49,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/*
 Manager image reference. `image.tag` falls back to .Chart.Version, which
-app-build-suite stamps from the git tag at release time (the image push
-uses the same tag). .Chart.AppVersion is deliberately NOT used: the release
-orb pinned here does not stamp appVersion, so it stays at the 0.0.0
-placeholder and would resolve to a non-existent image tag.
+app-build-suite stamps from the git tag at release time and which matches
+the image tag the pipeline pushes. (.Chart.Version is the single source of
+truth for the tag; appVersion is also stamped by the release orb but is not
+relied on here.)
 */}}
 {{- define "tunnelport.image" -}}
 {{- $tag := default .Chart.Version .Values.image.tag -}}

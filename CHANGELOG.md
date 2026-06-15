@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- CI: bump the `giantswarm/architect` orb from `7.1.0` to `9.4.1`. Among other
+  improvements, `push-to-app-catalog` now stamps `appVersion` from the git tag
+  by default (`override_app_version`, added in `9.3.0`), so released charts no
+  longer carry the `0.0.0` placeholder appVersion. `go-build` also builds
+  multi-arch (`linux/amd64,linux/arm64`) Go binaries by default.
+
 ## [1.0.2] - 2026-06-15
 
 ### Fixed
