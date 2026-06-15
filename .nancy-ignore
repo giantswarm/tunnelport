@@ -5,3 +5,5 @@ CVE-2026-42506 until=2026-06-28 # golang.org/x/net@v0.47.0
 CVE-2026-25680 until=2026-06-28 # golang.org/x/net@v0.47.0
 CVE-2026-33186 until=2026-06-27 # google.golang.org/grpc@v1.72.2
 CVE-2026-39821 until=2026-06-28 # golang.org/x/net@v0.47.0
+CVE-2026-34986 until=2026-07-15 # github.com/go-jose/go-jose/v4@v4.0.4
+CVE-2025-27144 until=2026-07-15 # github.com/go-jose/go-jose/v4@v4.0.4
