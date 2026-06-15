@@ -97,3 +97,7 @@ replace golang.org/x/sys v0.38.0 => golang.org/x/sys v0.45.0
 replace go.opentelemetry.io/otel v1.36.0 => go.opentelemetry.io/otel v1.44.0
 
 replace go.opentelemetry.io/otel/sdk v1.36.0 => go.opentelemetry.io/otel/sdk v1.44.0
+
+replace github.com/moby/spdystream v0.5.0 => github.com/moby/spdystream v0.5.1
+
+replace golang.org/x/crypto v0.45.0 => golang.org/x/crypto v0.53.0
