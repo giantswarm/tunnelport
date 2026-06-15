@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-15
+
 ### Changed
 
 - CI: bump the `giantswarm/architect` orb from `7.1.0` to `9.4.1`. Among other
@@ -193,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CI secret context — which sidesteps the original HITL gate on
   test-credentials management.
 
-[Unreleased]: https://github.com/giantswarm/tunnelport/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/giantswarm/tunnelport/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/giantswarm/tunnelport/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/giantswarm/tunnelport/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/giantswarm/tunnelport/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/giantswarm/tunnelport/releases/tag/v1.0.0
