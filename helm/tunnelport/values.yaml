@@ -24,8 +24,9 @@ podDisruptionBudget:
   # to prevent a crashlooping replica from blocking drains.
   unhealthyPodEvictionPolicy: AlwaysAllow
 
-# Operator container image. `tag` falls back to .Chart.AppVersion (which
-# app-build-suite rewrites from the git tag at release time).
+# Operator container image. `tag` falls back to .Chart.Version (which
+# app-build-suite stamps from the git tag at release time, matching the
+# image tag the pipeline pushes). Leave empty to track the chart version.
 image:
   registry: gsoci.azurecr.io
   name: giantswarm/tunnelport

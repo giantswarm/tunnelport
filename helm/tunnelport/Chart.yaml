@@ -10,9 +10,11 @@ home: https://github.com/giantswarm/tunnelport
 icon: https://s.giantswarm.io/app-icons/giantswarm/1/light.svg
 sources:
   - https://github.com/giantswarm/tunnelport
-# Both `version` and `appVersion` are rewritten by app-build-suite at
-# release time from the git tag. Keep them as `0.0.0` placeholders so the
-# unreleased chart still installs cleanly with `helm install`.
+# `version` is rewritten by app-build-suite from the git tag at release
+# time; the image tag is resolved from it (see `tunnelport.image` in
+# templates/_helpers.tpl). `appVersion` is NOT stamped by the pinned
+# release orb and is kept as a `0.0.0` placeholder only so the unreleased
+# chart still installs cleanly with `helm install`.
 version: 1.0.1
 appVersion: 0.0.0
 annotations:

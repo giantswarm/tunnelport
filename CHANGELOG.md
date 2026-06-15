@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A default install of the released chart no longer lands in `ImagePullBackOff`.
+  The image tag now resolves from `.Chart.Version` (which app-build-suite stamps
+  from the git tag, matching the pushed image tag) instead of `.Chart.AppVersion`.
+  The pinned release orb (`architect@7.1.0`) does not stamp `appVersion`, so it
+  stayed at the `0.0.0` placeholder and a default install pulled the
+  non-existent `:0.0.0` image. The `app.kubernetes.io/version` label now tracks
+  `.Chart.Version` as well (#47).
 - The chart's default-deny NetworkPolicy no longer matches the singleton
   trust-bundle tbot pod (ADR 0008). The policy's `podSelector` only carried the
   shared `app.kubernetes.io/{name,instance}` labels, so the trust-bundle bot's
