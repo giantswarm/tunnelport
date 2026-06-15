@@ -15,7 +15,7 @@ sources:
 # templates/_helpers.tpl). `appVersion` is NOT stamped by the pinned
 # release orb and is kept as a `0.0.0` placeholder only so the unreleased
 # chart still installs cleanly with `helm install`.
-version: 1.0.1
+version: 1.0.2
 appVersion: 0.0.0
 annotations:
   application.giantswarm.io/team: bumblebee
