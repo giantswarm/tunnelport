@@ -1,0 +1,9 @@
+# app-test-suite (dabs.sh) configuration for the generated execute-chart-tests
+# job. tunnelport's chart is already exercised end to end by the e2e-smoke CI
+# job (hack/smoke/run.sh spins up real Teleport plus producer/consumer kind
+# clusters and asserts a live tunnel), and the operator image is not pushed on
+# branch builds, so an ATS smoke deploy on a throwaway kind cluster would only
+# duplicate weaker coverage. Skip the test scenarios here; the cluster type is
+# still declared so ATS's scenario pre-run validation passes.
+smoke-tests-cluster-type: kind
+skip-steps: [smoke, functional, upgrade]
