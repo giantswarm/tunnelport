@@ -48,6 +48,18 @@ jobs:
 workflows:
   build:
     jobs:
+      # Unit + envtest suite. The golden go-build no longer runs a make test
+      # target (the orb's test_target defaults to empty), so tunnelport's tests
+      # run here as a repo-owned job. test-ci provisions controller-runtime
+      # envtest binaries and runs `go test ./...`.
+      - architect/go-test:
+          name: go-test
+          context: architect
+          test_target: test-ci
+          filters:
+            tags:
+              only: /^v.*/
+
       - e2e-smoke:
           name: e2e-smoke
           requires:

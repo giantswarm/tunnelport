@@ -62,7 +62,7 @@ const (
 // resource requests/limits, the dev-only `insecure` flag, and the
 // MC-wide Teleport binding (cluster name + proxy host:port — ADR 0005).
 // In production these are plumbed from Helm values; the reconciler holds
-// the resolved struct directly so cmd/main.go can wire it without a
+// the resolved struct directly so main.go can wire it without a
 // controller-shape change.
 type PodDefaults struct {
 	// TbotImage is the container image reference for the tbot sidecar pod.
@@ -84,13 +84,13 @@ type PodDefaults struct {
 	// `aud` claim on every rendered tbot pod's projected SA JWT;
 	// Teleport's `static_jwks` join validator pins JWT `aud` to this
 	// exact value (`a.GetDomainName()` in `lib/auth/join_kubernetes.go`).
-	// Required at chart install time — cmd/main.go fails fast on empty
+	// Required at chart install time — main.go fails fast on empty
 	// (ADR 0005).
 	TeleportClusterName string
 
 	// TeleportProxyAddr is the host:port of the Teleport proxy every
 	// rendered tbot pod connects to. Flows into `proxy_server` in the
-	// rendered tbot.yaml. Required at chart install time — cmd/main.go
+	// rendered tbot.yaml. Required at chart install time — main.go
 	// fails fast on empty (ADR 0005).
 	TeleportProxyAddr string
 

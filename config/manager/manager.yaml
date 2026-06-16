@@ -64,7 +64,7 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           # ADR 0005: --teleport-cluster-name and --teleport-proxy-addr
-          # are operator-level required flags; cmd/main.go exits on
+          # are operator-level required flags; main.go exits on
           # startup if either is empty. The kustomize path (config/default)
           # doesn't talk to a real Teleport, but the shape regex still has
           # to pass — `example.com:443` is a placeholder of the right
@@ -75,7 +75,7 @@ spec:
         image: controller:latest
         name: manager
         env:
-        # POD_NAMESPACE scopes the leader-election Lease. cmd/main.go
+        # POD_NAMESPACE scopes the leader-election Lease. main.go
         # fails fast when this is empty, so the kustomize overlay must
         # inject it via the downward API exactly like the helm chart
         # does (helm/tunnelport/templates/deployment.yaml).
