@@ -228,7 +228,7 @@ func (r *Reconciler) applyOwned(ctx context.Context, cr *accessv1alpha1.RemoteAp
 // events. Pods are owned by the rendered ReplicaSet (transitively the
 // Deployment), so an `Owns` on Pod would not catch them — the
 // label-driven mapping is the stable seam. The manager-level cache
-// filter in cmd/main.go also restricts the Pod informer to the
+// filter in main.go also restricts the Pod informer to the
 // `tunnelport.giantswarm.io/role=tbot` label, narrowing the cache to
 // pods this operator itself rendered.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
