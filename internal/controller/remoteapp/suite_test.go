@@ -47,6 +47,16 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	// envtest assets aren't always provisioned: the golden CI go-build runs a
+	// plain `go test ./...` without them. Skip the envtest-backed suite when
+	// KUBEBUILDER_ASSETS is unset. The full suite runs in the architect/go-test
+	// CI job (make test-ci) and locally via `make test-ci`, both of which
+	// provision envtest and export KUBEBUILDER_ASSETS.
+	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
+		fmt.Fprintln(os.Stderr, "KUBEBUILDER_ASSETS unset; skipping envtest suite")
+		return
+	}
+
 	logf.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
 
 	if err := clientgoscheme.AddToScheme(testScheme); err != nil {
