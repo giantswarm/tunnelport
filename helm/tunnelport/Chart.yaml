@@ -15,7 +15,7 @@ sources:
 # The image tag is resolved from `version` (see `tunnelport.image` in
 # templates/_helpers.tpl). Kept as placeholders so the unreleased chart
 # still installs cleanly with `helm install`.
-version: 1.0.3
+version: 1.0.4
 appVersion: 0.0.0
 annotations:
   application.giantswarm.io/team: bumblebee
