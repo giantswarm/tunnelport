@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.3] - 2026-06-15
+### Fixed
+
+- Install/upgrade no longer fails with `metadata.labels: Invalid value` when the
+  chart is pulled via a Flux `OCIRepository` by digest. Flux appends the OCI
+  digest to the chart version as SemVer build metadata (e.g.
+  `1.0.3+eab5dd2094f6`), and the `+` is illegal in a Kubernetes label value, so
+  the unsanitised `app.kubernetes.io/version` label rejected every
+  operator-owned object. The label is now sanitised the same way as
+  `helm.sh/chart` (`+` -> `_`). The manager image tag, which also defaults to
+  `.Chart.Version`, now strips the build metadata (`+` is illegal in image tags
+  too; the pushed tag is the clean SemVer).
 
 ### Changed
 
