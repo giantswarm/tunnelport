@@ -33,7 +33,7 @@ is the operator code's responsibility, not the chart's.
 {{- define "tunnelport.labels" -}}
 helm.sh/chart: {{ include "tunnelport.chart" . }}
 {{ include "tunnelport.selectorLabels" . }}
-app.kubernetes.io/version: {{ .Chart.Version | quote }}
+app.kubernetes.io/version: {{ .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 application.giantswarm.io/team: {{ index .Chart.Annotations "application.giantswarm.io/team" | quote }}
 {{- end -}}
@@ -52,9 +52,11 @@ Manager image reference. `image.tag` falls back to .Chart.Version, which
 app-build-suite stamps from the git tag at release time and which matches
 the image tag the pipeline pushes. (.Chart.Version is the single source of
 truth for the tag; appVersion is also stamped by the release orb but is not
-relied on here.)
+relied on here.) Build metadata (the "+<digest>" Flux appends when pulling
+the chart by OCI digest) is stripped, since image tags cannot contain "+"
+and the pushed tag is the clean semver.
 */}}
 {{- define "tunnelport.image" -}}
-{{- $tag := default .Chart.Version .Values.image.tag -}}
+{{- $tag := default (.Chart.Version | splitList "+" | first) .Values.image.tag -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.name $tag -}}
 {{- end -}}
