@@ -370,8 +370,13 @@ func main() {
 	//
 	// The ConfigMap / Service / Deployment / ServiceAccount caches stay
 	// unscoped because `Owns(...)` already routes them via
-	// OwnerReferences. Under the kubernetes join model (ADR 0004) the
-	// operator no longer watches Secrets at all.
+	// OwnerReferences. The trust-bundle reloader's namespace-scoped
+	// Deployment List (below) deliberately rides on this same cluster-wide
+	// Deployment cache rather than adding a second, namespace-scoped one:
+	// remoteapp `Owns` tbot Deployments cluster-wide, so the cache must
+	// stay cluster-wide regardless, and Deployments are not the sensitive,
+	// fan-out-prone resource Secrets are. Only the Secret informer is
+	// pinned (next block).
 	tbotPodLabel := labels.SelectorFromSet(map[string]string{
 		"tunnelport.giantswarm.io/role": "tbot",
 	})

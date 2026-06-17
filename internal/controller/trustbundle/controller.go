@@ -37,6 +37,16 @@ limitations under the License.
 // de-duping against the consumer's existing annotation is what keeps a
 // plain renewal from triggering a restart storm.
 //
+// Watch scope: the controller watches only the trust-bundle Secret, not
+// the consumer Deployments. A freshly created (or recreated) consumer
+// already mounts the live bundle at startup, so it never has a stale
+// in-memory CA pool to correct — the annotation is purely an in-flight
+// *roll* trigger. A new consumer that happens to come up between Secret
+// writes is therefore harmless until the next Secret event stamps it
+// (which any renewal Update delivers, since its empty annotation differs
+// from the current hash). Watching Deployments too would buy nothing but
+// a larger informer, so it is deliberately omitted.
+//
 // RBAC. The reconciler reads the trust-bundle Secret and patches consumer
 // Deployments' pod-template annotation. It never writes the Secret and
 // never reads any other Secret's data.

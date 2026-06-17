@@ -23,8 +23,9 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -35,10 +36,20 @@ const (
 	testSecretName = "tunnelport-spiffe-bundle"
 )
 
-func newReconciler(objs ...client.Object) *Reconciler {
-	scheme := clientgoscheme.Scheme
+// newScheme builds a hermetic scheme with only the types these tests
+// touch, rather than mutating the process-global client-go scheme.
+func newScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	utilruntime.Must(corev1.AddToScheme(s))
+	utilruntime.Must(appsv1.AddToScheme(s))
+	return s
+}
+
+func newReconciler(t *testing.T, objs ...client.Object) *Reconciler {
+	t.Helper()
 	c := fake.NewClientBuilder().
-		WithScheme(scheme).
+		WithScheme(newScheme(t)).
 		WithObjects(objs...).
 		Build()
 	return &Reconciler{Client: c, SecretName: testSecretName, Namespace: testNamespace}
@@ -116,7 +127,7 @@ func TestBundleHash(t *testing.T) {
 // same namespace is left untouched.
 func TestReconcile_RollsConsumerStampsHash(t *testing.T) {
 	bundle := []byte("-----BEGIN CERTIFICATE-----\nrootA\n-----END CERTIFICATE-----")
-	r := newReconciler(
+	r := newReconciler(t,
 		bundleSecret(bundle),
 		consumerDeployment("dex", true, false),
 		consumerDeployment("bystander", false, false),
@@ -153,7 +164,7 @@ func TestReconcile_RollsConsumerStampsHash(t *testing.T) {
 // consumer (the ~20m tbot renewal rewrites the Secret but not the CA set).
 func TestReconcile_DeDupeNoRollOnUnchangedContent(t *testing.T) {
 	bundle := []byte("stable-ca-set")
-	r := newReconciler(
+	r := newReconciler(t,
 		bundleSecret(bundle),
 		consumerDeployment("muster", true, false),
 	)
@@ -173,7 +184,7 @@ func TestReconcile_DeDupeNoRollOnUnchangedContent(t *testing.T) {
 // TestReconcile_RollsAgainOnCAChange: when the CA set actually changes, the
 // stamped hash changes too, which is what rolls the consumer.
 func TestReconcile_RollsAgainOnCAChange(t *testing.T) {
-	r := newReconciler(
+	r := newReconciler(t,
 		bundleSecret([]byte("ca-set-v1")),
 		consumerDeployment("dex", true, false),
 	)
@@ -206,7 +217,7 @@ func TestReconcile_RollsAgainOnCAChange(t *testing.T) {
 func TestReconcile_ConsumerLabelPlacements(t *testing.T) {
 	bundle := []byte("ca")
 	want := bundleHash(bundle)
-	r := newReconciler(
+	r := newReconciler(t,
 		bundleSecret(bundle),
 		consumerDeployment("via-pod", true, false),
 		consumerDeployment("via-meta", false, true),
@@ -228,7 +239,7 @@ func TestReconcile_ConsumerLabelPlacements(t *testing.T) {
 // TestReconcile_SecretMissingIsNoOp: no trust-bundle Secret yet -> no error,
 // nothing stamped.
 func TestReconcile_SecretMissingIsNoOp(t *testing.T) {
-	r := newReconciler(
+	r := newReconciler(t,
 		consumerDeployment("dex", true, false),
 	)
 	reconcileOnce(t, r)
@@ -240,7 +251,7 @@ func TestReconcile_SecretMissingIsNoOp(t *testing.T) {
 // TestReconcile_NoBundleKeyIsNoOp: a Secret lacking svid_bundle.pem is not a
 // CA set to hash; consumers are left alone.
 func TestReconcile_NoBundleKeyIsNoOp(t *testing.T) {
-	r := newReconciler(
+	r := newReconciler(t,
 		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace, Name: testSecretName},
 			Data:       map[string][]byte{"other.pem": []byte("x")},
@@ -256,7 +267,7 @@ func TestReconcile_NoBundleKeyIsNoOp(t *testing.T) {
 // TestReconcile_IgnoresOtherSecret: an enqueue for a different Secret name is
 // ignored by the in-Reconcile guard.
 func TestReconcile_IgnoresOtherSecret(t *testing.T) {
-	r := newReconciler(
+	r := newReconciler(t,
 		bundleSecret([]byte("ca")),
 		consumerDeployment("dex", true, false),
 	)
