@@ -21,6 +21,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	rbacv1 "k8s.io/api/rbac/v1"
+	"sigs.k8s.io/yaml"
 )
 
 // TestRBAC_RoleManifestExcludesPodsLog pins ADR 0003: the operator must
@@ -79,30 +82,49 @@ func TestRBAC_RoleManifestGrantsServiceAccountsWrite(t *testing.T) {
 	}
 }
 
-// TestRBAC_RoleManifestExcludesSecretsRolesRoleBindings pins ADR 0008:
-// the per-CR trust-bundle Secret/Role/RoleBinding shape from ADR 0007 is
-// gone, so the operator's ClusterRole must NOT grant write verbs on
-// `core/secrets`, `rbac.authorization.k8s.io/roles`, or
-// `rbac.authorization.k8s.io/rolebindings`. The kubebuilder markers in
-// controller.go that previously requested those verbs were removed in
-// the same change; `make manifests` regenerates this file from those
-// markers, so this assertion catches both a marker regression and a
-// hand-edit of role.yaml.
+// TestRBAC_RoleManifestSecretsReadOnlyNoRolesRoleBindings pins the RBAC
+// posture after the trust-bundle reloader landed:
 //
-// Note: read-only grants (get;list;watch) on these resources would not
-// fail this assertion because the marker block removed write verbs only
-// when the resource itself is removed; we check resource presence
-// holistically because the operator's reconcile loop no longer touches
-// these resources at all.
-func TestRBAC_RoleManifestExcludesSecretsRolesRoleBindings(t *testing.T) {
+//   - `core/secrets`: read-only (get;list;watch) only. The reloader reads
+//     the single trust-bundle Secret to hash its CA bundle; it never writes
+//     any Secret. A write verb on secrets is forbidden.
+//   - `rbac.authorization.k8s.io/roles` and `rolebindings`: still absent
+//     entirely (ADR 0008 removed the per-CR trust-bundle Role/RoleBinding;
+//     no controller touches them).
+//
+// `make manifests` (controller-gen) regenerates config/rbac/role.yaml from
+// the kubebuilder markers, so this catches both a marker regression and a
+// hand-edit of role.yaml.
+func TestRBAC_RoleManifestSecretsReadOnlyNoRolesRoleBindings(t *testing.T) {
 	path := filepath.Join("..", "..", "..", "config", "rbac", "role.yaml")
 	body, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
-	for _, bad := range []string{"- secrets\n", "- roles\n", "- rolebindings\n"} {
-		if strings.Contains(string(body), bad) {
-			t.Errorf("%s still grants %q; ADR 0008 removed the per-CR trust-bundle objects, so no Secret/Role/RoleBinding verbs are needed.", path, strings.TrimSpace(bad))
+
+	var role rbacv1.ClusterRole
+	if err := yaml.Unmarshal(body, &role); err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+
+	writeVerbs := map[string]bool{"create": true, "update": true, "patch": true, "delete": true, "deletecollection": true}
+	sawSecrets := false
+	for _, rule := range role.Rules {
+		for _, res := range rule.Resources {
+			switch res {
+			case "roles", "rolebindings":
+				t.Errorf("%s still grants %q; ADR 0008 removed the per-CR trust-bundle Role/RoleBinding, so no verbs are needed.", path, res)
+			case "secrets":
+				sawSecrets = true
+				for _, v := range rule.Verbs {
+					if writeVerbs[v] || v == "*" {
+						t.Errorf("%s grants write verb %q on secrets; the trust-bundle reloader is read-only.", path, v)
+					}
+				}
+			}
 		}
+	}
+	if !sawSecrets {
+		t.Errorf("%s missing read access on secrets; the trust-bundle reloader needs get;list;watch.", path)
 	}
 }

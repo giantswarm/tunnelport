@@ -66,6 +66,21 @@ rules:
   - list
   - watch
 
+# Secret — read-only, and only the single trust-bundle Secret at runtime
+# (the Secret informer is namespace+name-scoped in main.go). The
+# trust-bundle reloader controller hashes the bundle's `svid_bundle.pem`
+# to decide when to roll opted-in consumer Deployments. The operator
+# never writes any Secret; ADR 0004 / CONTEXT.md keep write verbs off
+# secrets.
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
 # Owned objects rendered in the CR's namespace. The operator reconciles
 # RemoteApps cluster-wide, so these have to be cluster-scoped via the
 # ClusterRole — but the operator only ever writes them in the namespace
@@ -97,14 +112,12 @@ rules:
   - watch
 
 # ADR 0008 removed the per-CR trust-bundle Secret/Role/RoleBinding;
-# the operator no longer renders any Secret, Role, or RoleBinding. The
-# `core/secrets` and `rbac.authorization.k8s.io/roles,rolebindings`
-# grants that ADR 0007 added here have been removed accordingly.
-# Consumer trust-bundle distribution is now the chart-managed singleton
-# tbot's job (see `trust-bundle-*.yaml` templates), and that bot's
-# permissions are namespace-scoped via its own per-Secret Role —
-# the operator does not need cluster-wide write authority on these
-# resource groups.
+# the operator no longer *renders* any Secret, Role, or RoleBinding, so
+# the `rbac.authorization.k8s.io/roles,rolebindings` write grants that
+# ADR 0007 added here stay removed. Consumer trust-bundle distribution is
+# the chart-managed singleton tbot's job (see `trust-bundle-*.yaml`
+# templates). The reloader added a *read-only* `core/secrets` grant above
+# so it can hash the bundle — never a write grant.
 
 # Leader-election: leases in the operator's own namespace. controller-
 # runtime defaults to a `coordination.k8s.io/leases` lock; the

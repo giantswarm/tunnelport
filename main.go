@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -43,6 +44,7 @@ import (
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 	remoteappctrl "github.com/giantswarm/tunnelport/internal/controller/remoteapp"
+	trustbundlectrl "github.com/giantswarm/tunnelport/internal/controller/trustbundle"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -87,6 +89,9 @@ type flags struct {
 	ghostunnelImage          string
 	ghostunnelReloadInterval string
 	ghostunnelListenPort     int
+
+	trustBundleSecretName string
+	trustBundleNamespace  string
 
 	zapOpts zap.Options
 }
@@ -140,6 +145,19 @@ func parseFlags() flags {
 	flag.IntVar(&f.ghostunnelListenPort, "ghostunnel-listen-port", 8443,
 		"Port the ghostunnel sidecar listens on inside the pod; the rendered "+
 			"Service exposes it as the `tls` port with the same value.")
+	// Trust-bundle reloader (ADR 0008 follow-up). The chart-managed
+	// singleton tbot writes the SPIFFE trust bundle into this Secret; the
+	// reloader controller rolls opted-in consumer Deployments in the same
+	// namespace when the bundle's CA set changes so processes that build an
+	// in-memory CA pool at startup (e.g. Dex's Teleport OIDC connector)
+	// pick up a rotated CA. An empty secret name disables the controller —
+	// the chart leaves it empty when `trustBundle.enabled=false`.
+	flag.StringVar(&f.trustBundleSecretName, "trust-bundle-secret-name", "",
+		"Name of the trust-bundle Secret the singleton tbot writes (chart value "+
+			"trustBundle.secretName). Empty disables the trust-bundle reloader.")
+	flag.StringVar(&f.trustBundleNamespace, "trust-bundle-namespace", "",
+		"Namespace holding the trust-bundle Secret and its consumer Deployments "+
+			"(chart value installNamespace). Empty disables the trust-bundle reloader.")
 	flag.StringVar(&f.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -363,6 +381,24 @@ func main() {
 		},
 	}
 
+	// Trust-bundle reloader scoping. When enabled, the only Secret this
+	// operator ever reads is the single trust-bundle Secret, so pin the
+	// Secret informer to that one object's namespace + name. Without this
+	// the default cache would subscribe to every Secret cluster-wide — a
+	// large, sensitive informer the operator has no other use for. The
+	// reloader is disabled (and the Secret informer absent) when either
+	// flag is empty.
+	trustBundleEnabled := f.trustBundleSecretName != "" && f.trustBundleNamespace != ""
+	if trustBundleEnabled {
+		cacheOpts.ByObject[&corev1.Secret{}] = cache.ByObject{
+			Namespaces: map[string]cache.Config{
+				f.trustBundleNamespace: {
+					FieldSelector: fields.OneTermEqualSelector("metadata.name", f.trustBundleSecretName),
+				},
+			},
+		}
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Cache:                  cacheOpts,
@@ -406,6 +442,24 @@ func main() {
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up RemoteApp controller")
 		os.Exit(1)
+	}
+
+	// Trust-bundle reloader: rolls opted-in consumer Deployments in the
+	// install namespace when the trust bundle's CA set changes. Registered
+	// only when both flags are set (chart wires them from
+	// trustBundle.secretName + installNamespace, gated on
+	// trustBundle.enabled).
+	if trustBundleEnabled {
+		if err := (&trustbundlectrl.Reconciler{
+			Client:     mgr.GetClient(),
+			SecretName: f.trustBundleSecretName,
+			Namespace:  f.trustBundleNamespace,
+		}).SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to set up trust-bundle reloader controller")
+			os.Exit(1)
+		}
+		setupLog.Info("Trust-bundle reloader enabled",
+			"secret", f.trustBundleSecretName, "namespace", f.trustBundleNamespace)
 	}
 	// +kubebuilder:scaffold:builder
 
