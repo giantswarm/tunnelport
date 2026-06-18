@@ -466,7 +466,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
 												Path:              tbotJoinSATokenFileName,
 												Audience:          cfg.TeleportClusterName,
-												ExpirationSeconds: ptr(joinSATokenExpirationSeconds),
+												ExpirationSeconds: new(joinSATokenExpirationSeconds),
 											},
 										},
 									},
@@ -690,13 +690,6 @@ func renderService(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *corev1.Servic
 func configHash(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	sum := sha256.Sum256([]byte(tbotConfig(cr, cfg)))
 	return hex.EncodeToString(sum[:])
-}
-
-// ptr returns a pointer to v. The Kubernetes core types still use pointer
-// fields for optional scalars, and the local helper keeps the call sites
-// in renderDeployment readable without importing a third-party helper.
-func ptr[T any](v T) *T {
-	return &v
 }
 
 // itoa formats an int32 as a base-10 string. Used to compose ghostunnel's
