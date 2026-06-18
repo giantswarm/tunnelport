@@ -18,6 +18,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // RemoteAppSpec defines the desired state of a RemoteApp.
@@ -126,5 +127,9 @@ type RemoteAppList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&RemoteApp{}, &RemoteAppList{})
+	SchemeBuilder.Register(func(scheme *runtime.Scheme) error {
+		scheme.AddKnownTypes(GroupVersion, &RemoteApp{}, &RemoteAppList{})
+		metav1.AddToGroupVersion(scheme, GroupVersion)
+		return nil
+	})
 }
