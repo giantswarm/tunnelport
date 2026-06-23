@@ -44,7 +44,7 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
       - name: tbot
-        image: {{ .Values.tbot.image }}
+        image: {{ include "tunnelport.tbotImage" . }}
         command: ["tbot"]
         args:
         - start
@@ -108,10 +108,17 @@ spec:
       - name: config
         configMap:
           name: {{ include "tunnelport.fullname" . }}-trust-bundle
+      # A sizeLimit on each emptyDir bounds scratch growth and satisfies the
+      # `require-emptydir-requests-and-limits` Kyverno policy, which skips any
+      # emptyDir that already declares a sizeLimit (so no per-container
+      # ephemeral-storage requests/limits are needed). 50Mi is generous for
+      # tbot's small on-disk bot state and /tmp scratch.
       - name: storage
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 50Mi
       - name: tmp
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 50Mi
       - name: join-sa-token
         projected:
           sources:

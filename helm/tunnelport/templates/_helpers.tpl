@@ -60,3 +60,27 @@ and the pushed tag is the clean semver.
 {{- $tag := default (.Chart.Version | splitList "+" | first) .Values.image.tag -}}
 {{- printf "%s/%s:%s" .Values.image.registry .Values.image.name $tag -}}
 {{- end -}}
+
+{{/*
+tbot image reference. Composed from registry/name/tag so the registry can
+be overridden (e.g. to pull from a non-gsoci mirror) while keeping the
+`restrict-image-registries` Kyverno policy satisfied by default. An optional
+`digest` pins the image by content (`<repo>:<tag>@sha256:<hex>`).
+*/}}
+{{- define "tunnelport.tbotImage" -}}
+{{- $img := .Values.tbot.image -}}
+{{- $ref := printf "%s/%s:%s" $img.registry $img.name $img.tag -}}
+{{- if $img.digest }}{{- $ref = printf "%s@%s" $ref $img.digest -}}{{- end -}}
+{{- $ref -}}
+{{- end -}}
+
+{{/*
+ghostunnel sidecar image reference. Same registry/name/tag/digest shape as
+tunnelport.tbotImage.
+*/}}
+{{- define "tunnelport.ghostunnelImage" -}}
+{{- $img := .Values.tls.image -}}
+{{- $ref := printf "%s/%s:%s" $img.registry $img.name $img.tag -}}
+{{- if $img.digest }}{{- $ref = printf "%s@%s" $ref $img.digest -}}{{- end -}}
+{{- $ref -}}
+{{- end -}}

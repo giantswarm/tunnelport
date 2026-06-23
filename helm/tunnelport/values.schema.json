@@ -66,8 +66,18 @@
       "additionalProperties": false,
       "properties": {
         "image": {
-          "type": "string",
-          "description": "tbot image reference. The major version MUST match the Teleport server major — the `GenerateUserCerts` RPC contract changes across majors and a mismatched-major tbot fails first cert renewal with `ssh: no key found` (initial join still works for ~1h, so this is easy to miss in short smoke tests). SHOULD be digest-pinned (`<repo>:<tag>@sha256:<hex>`) in production so a re-push of an upstream tag cannot silently change tbot's config schema underneath the operator. Tag-only forms are accepted to keep dev/smoke workflows simple."
+          "type": "object",
+          "additionalProperties": false,
+          "description": "tbot image reference, composed as `<registry>/<name>:<tag>` with an optional `@<digest>`. Sourced from gsoci by default so rendered pods satisfy the restrict-image-registries Kyverno policy; override `registry` to pull from a different mirror. The major version MUST match the Teleport server major — the `GenerateUserCerts` RPC contract changes across majors and a mismatched-major tbot fails first cert renewal with `ssh: no key found` (initial join still works for ~1h, so this is easy to miss in short smoke tests). SHOULD stay digest-pinned in production so a re-push of an upstream tag cannot silently change tbot's config schema underneath the operator.",
+          "properties": {
+            "registry": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string", "minLength": 1 },
+            "digest": {
+              "type": "string",
+              "description": "Optional content digest (`sha256:<hex>`) appended as `@<digest>` to pin the image by content. Leave empty for tag-only refs in dev/smoke workflows."
+            }
+          }
         },
         "insecure": { "type": "boolean" },
         "resources": { "$ref": "#/definitions/resources" }
@@ -78,10 +88,19 @@
       "additionalProperties": false,
       "description": "Ghostunnel TLS-termination sidecar (ADR 0007 / slice 02). Every rendered tbot Deployment grows a ghostunnel sidecar that reads the SVID and serves it on the Service's `tls` port.",
       "properties": {
-        "ghostunnelImage": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Container image reference for the ghostunnel sidecar."
+        "image": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "ghostunnel sidecar image reference, composed as `<registry>/<name>:<tag>` with an optional `@<digest>`. Sourced from gsoci by default so the rendered sidecar satisfies the restrict-image-registries Kyverno policy; override `registry` to pull from a different mirror.",
+          "properties": {
+            "registry": { "type": "string", "minLength": 1 },
+            "name": { "type": "string", "minLength": 1 },
+            "tag": { "type": "string", "minLength": 1 },
+            "digest": {
+              "type": "string",
+              "description": "Optional content digest (`sha256:<hex>`) appended as `@<digest>` to pin the image by content."
+            }
+          }
         },
         "reloadInterval": {
           "type": "string",

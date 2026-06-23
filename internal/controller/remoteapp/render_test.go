@@ -612,6 +612,38 @@ func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.
 	}
 }
 
+// TestRenderDeployment_EmptyDirsHaveSizeLimit pins the sizeLimit on every
+// rendered emptyDir. A sizeLimit bounds scratch growth and satisfies the
+// Kyverno `require-emptydir-requests-and-limits` policy, which skips any
+// emptyDir already declaring a sizeLimit — so the ghostunnel sidecar (no
+// resource requests/limits) does not trip the policy. Regression guard for
+// giantswarm/giantswarm#36885.
+func TestRenderDeployment_EmptyDirsHaveSizeLimit(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	dep := renderDeployment(cr, fixtureConfig())
+	pod := dep.Spec.Template.Spec
+
+	want := resource.MustParse(emptyDirSizeLimitValue)
+	for _, name := range []string{"tbot-storage", "tbot-tmp", "svid"} {
+		v := volumeByName(pod.Volumes, name)
+		if v == nil {
+			t.Fatalf("missing %q volume; got: %v", name, volumeNames(pod.Volumes))
+		}
+		if v.EmptyDir == nil {
+			t.Errorf("%q must be an EmptyDir; got %+v", name, v)
+			continue
+		}
+		if v.EmptyDir.SizeLimit == nil {
+			t.Errorf("%q emptyDir must declare a sizeLimit (Kyverno require-emptydir-requests-and-limits)", name)
+			continue
+		}
+		if v.EmptyDir.SizeLimit.Cmp(want) != 0 {
+			t.Errorf("%q emptyDir sizeLimit: want %s, got %s", name, want.String(), v.EmptyDir.SizeLimit.String())
+		}
+	}
+}
+
 // TestRenderDeployment_LivenessProbe pins the kubelet-driven recovery
 // contract from ADR 0003: the rendered pod has a liveness probe on
 // tbot's diag port so a wedged listener triggers a restart, but the
