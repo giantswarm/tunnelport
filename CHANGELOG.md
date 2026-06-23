@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Tunnel pods no longer trip the `restrict-image-registries` and
+  `require-emptydir-requests-and-limits` Kyverno policies
+  (giantswarm/giantswarm#36885):
+  - The tbot and ghostunnel images are now sourced from gsoci
+    (`gsoci.azurecr.io/giantswarm/tbot-distroless`,
+    `gsoci.azurecr.io/giantswarm/ghostunnel`) instead of `public.ecr.aws`
+    and Docker Hub. `tbot.image` and `tls.image` are now structured
+    (`registry`/`name`/`tag`/`digest`) so the registry can be overridden to a
+    different mirror.
+  - Every emptyDir on the rendered tbot pods and the singleton trust-bundle
+    pod now declares a `sizeLimit` (50Mi), which bounds scratch growth and
+    excludes the volumes from the emptyDir policy — so the resource-less
+    ghostunnel sidecar no longer needs per-container ephemeral-storage entries.
+
 ## [1.0.4] - 2026-06-16
 
 ### Fixed
