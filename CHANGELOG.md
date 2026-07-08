@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `monitoring.prometheusRule.enabled` (default `true`) renders a PrometheusRule with two alerts:
+  - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
+  - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.
+
 ### Fixed
 
 - Tunnel pods no longer trip the `restrict-image-registries` and

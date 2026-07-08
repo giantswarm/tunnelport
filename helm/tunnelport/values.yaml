@@ -160,6 +160,15 @@ crds:
 networkPolicy:
   enabled: true
 
+# PrometheusRule with alerts for the tunnelport data plane: a tunnel pod
+# (tbot/ghostunnel) stuck in CrashLoopBackOff, and the operator having no
+# available replicas. Rendered into installNamespace but the expressions
+# select tunnel pods cluster-wide. Disable on installs whose MC monitoring
+# stack does not pick up in-namespace PrometheusRules.
+monitoring:
+  prometheusRule:
+    enabled: true
+
 # Ports the manager listens on. Exposed here only so `networkPolicy`
 # stays in sync with the actual flag values.
 ports:

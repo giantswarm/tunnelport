@@ -1,0 +1,33 @@
+# Interim: runs promtool unit tests + pint lint against the chart's
+# PrometheusRule. Superseded once the reusable prometheus-rules
+# validation workflow lands (see CHANGELOG / issue).
+name: prometheusrule-tests
+
+on:
+  pull_request:
+    paths:
+      - helm/tunnelport/templates/prometheusrule.yaml
+      - helm/tunnelport/tests/**
+      - .github/workflows/prometheusrule-tests.yaml
+  merge_group: {}
+
+permissions:
+  contents: read
+
+jobs:
+  promtool:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Install promtool
+        run: |
+          version=3.5.0
+          curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${version}/prometheus-${version}.linux-amd64.tar.gz" \
+            | tar -xz --strip-components=1 -C /usr/local/bin "prometheus-${version}.linux-amd64/promtool"
+      - name: Install yq
+        run: |
+          curl -sSL -o /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+      - name: promtool unit tests
+        run: helm/tunnelport/tests/run.sh
