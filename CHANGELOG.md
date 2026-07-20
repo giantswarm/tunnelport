@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the install namespace, not a cluster-wide ClusterRole grant; the operator
   holds no cluster-wide Secret read and still never writes any Secret. The
   reloader emits a `TrustBundleRolled` Event on each consumer it rolls.
+- `monitoring.prometheusRule.enabled` (default `true`) renders a PrometheusRule with two alerts:
+  - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
+  - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.
 
 ### Fixed
 

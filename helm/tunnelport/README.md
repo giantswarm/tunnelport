@@ -90,6 +90,7 @@ Operational consequences:
 | `tls.image.registry` / `tls.image.name` / `tls.image.tag` / `tls.image.digest` | `gsoci.azurecr.io/giantswarm/ghostunnel:v1.10.0@sha256:...` | ghostunnel TLS-termination sidecar image for every rendered tbot pod. Sourced from gsoci (a mirror of the upstream `ghostunnel/ghostunnel` Docker Hub image) so the sidecar satisfies `restrict-image-registries` — override `registry` to use a different mirror. |
 | `crds.install` | `true` | Set to `false` if the CRD is delivered by a separate bootstrap chart. The chart's CRD bundle carries `helm.sh/resource-policy: keep`, so live `RemoteApp`s survive `helm uninstall`. |
 | `networkPolicy.enabled` | `true` | The operator-pod NetworkPolicy. Scoped to the manager pod only — pods carrying a `tunnelport.giantswarm.io/role` label (the trust-bundle bot) are excluded. See "NetworkPolicy responsibilities" below for the **tbot pod** policy story (different concern). |
+| `monitoring.prometheusRule.enabled` | `true` | Renders a `PrometheusRule` (`TunnelPortTunnelCrashLooping`, `TunnelPortOperatorDown`) into `installNamespace`. The crashloop expression selects tunnel pods cluster-wide by container name, so it covers every `RemoteApp` namespace. Disable where the MC monitoring stack does not pick up in-namespace `PrometheusRule`s. |
 
 `tbot.image` and `tbot.resources` flow into the operator manager's CLI
 flags (`--tbot-image`, `--tbot-cpu-request`, `--tbot-memory-request`,
