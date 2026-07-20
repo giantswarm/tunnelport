@@ -397,6 +397,23 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 				Type: corev1.SeccompProfileTypeRuntimeDefault,
 			},
 		},
+		// TCPSocket on the tls listen port: ghostunnel exposes no health
+		// endpoint, and it can only accept connections once tbot has written
+		// the SVID into the shared emptyDir. Probing the port makes pod-Ready
+		// reflect the tunnel actually terminating TLS, not just the ghostunnel
+		// process being up — so a missing/failed SVID keeps the pod NotReady
+		// instead of silently serving nothing.
+		ReadinessProbe: &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromString(servicePortNameTLS),
+				},
+			},
+			InitialDelaySeconds: 5,
+			PeriodSeconds:       10,
+			TimeoutSeconds:      2,
+			FailureThreshold:    3,
+		},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      volumeNameSVID,

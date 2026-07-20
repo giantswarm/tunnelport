@@ -30,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
   - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.
 
+### Changed
+
+- The rendered ghostunnel sidecar now carries a TCPSocket readiness probe on
+  its `tls` listen port (8443). A tunnel pod stays NotReady until ghostunnel is
+  actually accepting TLS connections (which requires tbot to have written the
+  SVID), instead of reporting Ready with a broken tunnel.
+
 ### Fixed
 
 - Tunnel pods no longer trip the `restrict-image-registries` and
