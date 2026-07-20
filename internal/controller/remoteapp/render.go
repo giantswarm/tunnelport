@@ -28,6 +28,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -278,6 +279,15 @@ const (
 	// container (slice 02 / ADR 0007).
 	ghostunnelContainerName = "ghostunnel"
 
+	// emptyDirSizeLimitValue bounds every emptyDir the rendered pod mounts.
+	// A sizeLimit both caps scratch growth and satisfies the Kyverno
+	// `require-emptydir-requests-and-limits` policy: that policy skips any
+	// emptyDir which already declares a sizeLimit, so the ghostunnel sidecar
+	// (which carries no resource requests/limits) and the tbot container do
+	// not need per-container ephemeral-storage entries. 50Mi is generous for
+	// tbot's small on-disk state (bot DB, the SVID PEM trio, /tmp scratch).
+	emptyDirSizeLimitValue = "50Mi"
+
 	// servicePortNameTLS is the Service port name fronting the ghostunnel
 	// sidecar. The plaintext port keeps its existing name `tbot` for
 	// selector / NetworkPolicy backward compatibility.
@@ -466,7 +476,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 											ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
 												Path:              tbotJoinSATokenFileName,
 												Audience:          cfg.TeleportClusterName,
-												ExpirationSeconds: ptr(joinSATokenExpirationSeconds),
+												ExpirationSeconds: new(joinSATokenExpirationSeconds),
 											},
 										},
 									},
@@ -476,7 +486,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 						{
 							Name: volumeNameTbotStorage,
 							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
+								EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: emptyDirSizeLimit()},
 							},
 						},
 						{
@@ -485,7 +495,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							// of the rootfs immutable.
 							Name: volumeNameTbotTmp,
 							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
+								EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: emptyDirSizeLimit()},
 							},
 						},
 						{
@@ -496,7 +506,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							// here on every renewal.
 							Name: volumeNameSVID,
 							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
+								EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: emptyDirSizeLimit()},
 							},
 						},
 					},
@@ -692,15 +702,16 @@ func configHash(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// ptr returns a pointer to v. The Kubernetes core types still use pointer
-// fields for optional scalars, and the local helper keeps the call sites
-// in renderDeployment readable without importing a third-party helper.
-func ptr[T any](v T) *T {
-	return &v
-}
-
 // itoa formats an int32 as a base-10 string. Used to compose ghostunnel's
 // `host:port` args without dragging fmt.Sprintf into the renderer hot path.
 func itoa(v int32) string {
 	return strconv.FormatInt(int64(v), 10)
+}
+
+// emptyDirSizeLimit returns a fresh *resource.Quantity for the emptyDir
+// sizeLimit. A new pointer per call keeps the rendered volumes independent
+// (no shared mutable Quantity across the pod's three emptyDirs).
+func emptyDirSizeLimit() *resource.Quantity {
+	q := resource.MustParse(emptyDirSizeLimitValue)
+	return &q
 }

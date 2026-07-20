@@ -85,15 +85,25 @@ tbot:
   # internal/controller/remoteapp/render.go where Command: ["tbot"] is
   # set explicitly.
   #
+  # Sourced from gsoci (`gsoci.azurecr.io/giantswarm/tbot-distroless`, a
+  # mirror of `public.ecr.aws/gravitational/tbot-distroless`) so the
+  # rendered pods satisfy the `restrict-image-registries` Kyverno policy.
+  # Override `registry` to pull from a different mirror.
+  #
   # Pinned to the v18 line to track GS's Teleport server (v18.7+) — the
   # `GenerateUserCerts` RPC contract changed across the v16→v18 jump
   # and a mismatched-major tbot fails renewal with `ssh: no key found`.
   # Pinned by digest so a re-push behind the floating `:18` tag cannot
   # silently change tbot's config schema underneath us (see the
   # listen/listener field rename noted at internal/controller/remoteapp/render.go).
-  # Resolve a fresh digest before each chart release with:
-  #   crane digest public.ecr.aws/gravitational/tbot-distroless:18
-  image: public.ecr.aws/gravitational/tbot-distroless:18@sha256:a93083d1f1ede1a1e70cd1e6063eaa6f4e58a73e9ec166d469c1a6c5e947024a
+  # The digest is preserved across the gsoci mirror (skopeo copies the
+  # manifest verbatim). Resolve a fresh digest before each chart release with:
+  #   crane digest gsoci.azurecr.io/giantswarm/tbot-distroless:18
+  image:
+    registry: gsoci.azurecr.io
+    name: giantswarm/tbot-distroless
+    tag: "18"
+    digest: sha256:0d94fd0d9910f32f76914d4a5699b7b89b23e211de39298fc1b4305c8c153755
   # Development-only: render tbot configs with `insecure: true` so the
   # pods skip Teleport proxy TLS verification. Useful for kind-based
   # smoke tests where the proxy is reached by IP and the cert SAN does
@@ -113,9 +123,17 @@ tbot:
 # rendered Service's `tls` port. These values flow into the operator
 # manager's CLI flags (`--ghostunnel-image`, etc.).
 tls:
-  # Pinned ghostunnel release; bump deliberately. `ghostunnel/ghostunnel`
-  # is the upstream image on Docker Hub.
-  ghostunnelImage: ghostunnel/ghostunnel:v1.10.0
+  # Pinned ghostunnel release; bump deliberately. Sourced from gsoci
+  # (`gsoci.azurecr.io/giantswarm/ghostunnel`, a mirror of the upstream
+  # `ghostunnel/ghostunnel` Docker Hub image) so the rendered sidecar
+  # satisfies the `restrict-image-registries` Kyverno policy. Override
+  # `registry` to pull from a different mirror. Digest-pinned and
+  # preserved across the mirror (skopeo copies the manifest verbatim).
+  image:
+    registry: gsoci.azurecr.io
+    name: giantswarm/ghostunnel
+    tag: v1.10.0
+    digest: sha256:ab209cc0c8eb7020a826ea8052aade2b77d7d9ce3724fab7ec34aba5cdf2e153
   # Polling interval ghostunnel uses to re-read the SVID files from
   # disk. Safe at 5m because tbot's workload-identity-x509 service
   # renews every 20m by default — see ADR 0007 §"Migration shape".
