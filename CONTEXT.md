@@ -243,9 +243,12 @@ consumer-side-only and never talks to Central. See ADR 0004.
   namespace** — no cross-namespace references.
 - RBAC: cluster-scoped read on `RemoteApp`; namespace-scoped write on the
   rendered resource types (including `serviceaccounts`) via a single
-  ClusterRole. The only `secrets` grant is **read-only** (`get;list;watch`)
-  for the trust-bundle reloader; the operator never gets a write verb on
-  `secrets`.
+  ClusterRole. `secrets` is **not** on that ClusterRole: the trust-bundle
+  reloader's only `secrets` grant is **read-only** (`get;list;watch`) and
+  **namespace-scoped** via a separate `Role` in the install namespace
+  (`<release>-trust-bundle-reader`, rendered only when
+  `trustBundle.enabled`). The operator holds no cluster-wide Secret read and
+  never gets a write verb on `secrets`.
 - The chart ships the operator and CRD only. It does **not** create
   `RoleBinding`s granting create-`RemoteApp` to anyone — that's an explicit
   per-cluster decision the platform team makes via their own RBAC.
