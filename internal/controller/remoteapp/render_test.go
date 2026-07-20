@@ -774,6 +774,51 @@ func TestRenderDeployment_HasGhostunnelSidecar(t *testing.T) {
 	}
 }
 
+// TestRenderDeployment_GhostunnelReadinessProbe pins the TCPSocket
+// readiness probe on the ghostunnel sidecar. ghostunnel exposes no health
+// endpoint and can only accept connections once tbot has written the SVID,
+// so probing the tls listen port makes pod-Ready reflect the tunnel
+// actually terminating TLS rather than just the process being up.
+func TestRenderDeployment_GhostunnelReadinessProbe(t *testing.T) {
+	cr := fixtureRemoteApp()
+	cfg := fixtureConfig()
+
+	dep := renderDeployment(cr, cfg)
+	containers := dep.Spec.Template.Spec.Containers
+	if len(containers) != 2 || containers[1].Name != "ghostunnel" {
+		t.Fatalf("expected ghostunnel as second container; got %v", containerNames(containers))
+	}
+	gt := containers[1]
+
+	if gt.ReadinessProbe == nil {
+		t.Fatal("ghostunnel must have a readinessProbe")
+	}
+	rp := gt.ReadinessProbe
+	if rp.TCPSocket == nil {
+		t.Fatalf("ghostunnel readinessProbe must use TCPSocket; got %+v", rp)
+	}
+	if rp.HTTPGet != nil {
+		t.Errorf("ghostunnel readinessProbe must not declare HTTPGet (ghostunnel has no health endpoint); got %+v", rp.HTTPGet)
+	}
+	if rp.TCPSocket.Port.StrVal != servicePortNameTLS {
+		t.Errorf("ghostunnel readinessProbe TCPSocket port: want %q, got %q", servicePortNameTLS, rp.TCPSocket.Port.StrVal)
+	}
+	// The probed named port must exist on the container and map to the tls listen port.
+	var tlsPort *corev1.ContainerPort
+	for i := range gt.Ports {
+		if gt.Ports[i].Name == servicePortNameTLS {
+			tlsPort = &gt.Ports[i]
+			break
+		}
+	}
+	if tlsPort == nil {
+		t.Fatalf("ghostunnel must expose a %q container port for the probe to target; got %v", servicePortNameTLS, gt.Ports)
+	}
+	if tlsPort.ContainerPort != tlsListenPortDefault {
+		t.Errorf("ghostunnel %q port: want %d, got %d", servicePortNameTLS, tlsListenPortDefault, tlsPort.ContainerPort)
+	}
+}
+
 func containerNames(cs []corev1.Container) []string {
 	out := make([]string, len(cs))
 	for i := range cs {
