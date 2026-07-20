@@ -1,0 +1,48 @@
+{{- if .Values.monitoring.prometheusRule.enabled -}}
+# Alerts for the tunnelport data plane. The rule object lives in
+# installNamespace, but its expressions select tunnel pods cluster-wide:
+# the operator renders tbot+ghostunnel into each RemoteApp's own
+# namespace, so a namespace-scoped rule cannot see them. The crashloop
+# expr keys on the two container names (constants in the operator's
+# renderer) rather than a pod label, since kube-state-metrics exposes
+# `container` directly but pod labels only via a kube_pod_labels join.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+spec:
+  groups:
+    - name: tunnelport
+      rules:
+        - alert: TunnelPortTunnelCrashLooping
+          annotations:
+            description: '{{`Tunnel container {{ $labels.container }} in {{ $labels.namespace }}/{{ $labels.pod }} is in CrashLoopBackOff; the SPIFFE/ghostunnel tunnel is down.`}}'
+            runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-tunnel-crashlooping/
+          expr: |-
+            kube_pod_container_status_waiting_reason{container=~"ghostunnel|tbot", reason="CrashLoopBackOff"} == 1
+          for: 10m
+          labels:
+            area: platform
+            cancel_if_kube_state_metrics_down: "true"
+            cancel_if_outside_working_hours: "false"
+            severity: notify
+            team: bumblebee
+            topic: tunnelport
+        - alert: TunnelPortOperatorDown
+          annotations:
+            description: '{{`The tunnelport operator deployment {{ $labels.namespace }}/{{ $labels.deployment }} has no available replicas; RemoteApp tunnels will not reconcile.`}}'
+            runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-operator-down/
+          expr: |-
+            kube_deployment_status_replicas_available{namespace="{{ .Values.installNamespace }}", deployment="{{ include "tunnelport.fullname" . }}"} == 0
+          for: 15m
+          labels:
+            area: platform
+            cancel_if_kube_state_metrics_down: "true"
+            cancel_if_outside_working_hours: "false"
+            severity: notify
+            team: bumblebee
+            topic: tunnelport
+{{- end }}

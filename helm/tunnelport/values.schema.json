@@ -129,6 +129,20 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "monitoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "PrometheusRule with alerts for the tunnelport data plane (tunnel-pod CrashLoopBackOff, operator with no available replicas). Rendered into installNamespace; the expressions select tunnel pods cluster-wide.",
+      "properties": {
+        "prometheusRule": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" }
+          }
+        }
+      }
+    },
     "ports": {
       "type": "object",
       "additionalProperties": false,
