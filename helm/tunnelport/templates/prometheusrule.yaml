@@ -1,4 +1,4 @@
-{{- if and .Values.monitoring.prometheusRule.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/PrometheusRule") -}}
+{{- if .Values.monitoring.prometheusRule.enabled -}}
 # Alerts for the tunnelport data plane. The rule object lives in
 # installNamespace, but its expressions select tunnel pods cluster-wide:
 # the operator renders tbot+ghostunnel into each RemoteApp's own
