@@ -69,6 +69,12 @@ OPERATOR_HELM_WAIT="${OPERATOR_HELM_WAIT:-600}"
 READY_WAIT="${READY_WAIT:-180}"
 CURL_WAIT="${CURL_WAIT:-120}"
 
+# prometheus-operator release supplying the PrometheusRule CRD. The chart
+# renders a PrometheusRule whenever monitoring.prometheusRule.enabled is
+# true and fails the install if the CRD is absent, so the bare kind
+# consumer must have it before the operator install below.
+PROMETHEUS_OPERATOR_VERSION="${PROMETHEUS_OPERATOR_VERSION:-v0.83.0}"
+
 TMP=/tmp
 PRODUCER_TOKEN_FILE="${TMP}/smoke-producer-agent-token"
 TELEPORT_VALUES_FILE="${TMP}/smoke-teleport-values.yaml"
@@ -368,6 +374,13 @@ kubectl --context kind-consumer run smoke-reach \
            curl -sk --max-time 3 https://${TELEPORT_PROXY_ADDR}/webapi/find >/dev/null 2>&1 && exit 0
            sleep 2
          done; exit 1" >/dev/null
+
+step "Installing the PrometheusRule CRD on the consumer cluster"
+# The chart ships a PrometheusRule (monitoring.prometheusRule.enabled
+# defaults to true) with no CRD-capability gate, so the install fails
+# unless monitoring.coreos.com/v1 is registered first.
+kubectl --context kind-consumer apply --server-side -f \
+  "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROMETHEUS_OPERATOR_VERSION}/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml" >/dev/null
 
 step "Installing the operator on the consumer cluster"
 # teleport.clusterName matches the Teleport cluster name configured in
