@@ -49,7 +49,11 @@ limitations under the License.
 //
 // RBAC. The reconciler reads the trust-bundle Secret and patches consumer
 // Deployments' pod-template annotation. It never writes the Secret and
-// never reads any other Secret's data.
+// never reads any other Secret's data. The secrets marker below drives the
+// generated config/rbac/role.yaml (kustomize/dev path); the production Helm
+// chart binds this read as a namespace-scoped Role in the install namespace
+// (`<release>-trust-bundle-reader`), not a cluster-wide grant — keep it that
+// way, the reloader only ever reads one Secret in one namespace.
 //
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;patch
@@ -66,6 +70,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -126,6 +131,13 @@ type Reconciler struct {
 	// Deployment selection are scoped to it; the controller never
 	// touches objects in any other namespace.
 	Namespace string
+
+	// Recorder emits a Kubernetes Event against a consumer Deployment when
+	// a CA-set change rolls it, so the roll is visible via `kubectl
+	// describe`/`kubectl get events` without log-diving. Optional: a nil
+	// Recorder disables event emission (used by unit tests that do not
+	// assert on events).
+	Recorder events.EventRecorder
 }
 
 // Reconcile reads the trust-bundle Secret, hashes its `svid_bundle.pem`
@@ -183,6 +195,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		rolled++
 		logger.Info("rolled trust-bundle consumer on CA-set change",
 			"deployment", dep.Name, "hash", hash)
+		if r.Recorder != nil {
+			r.Recorder.Eventf(dep, nil, corev1.EventTypeNormal, "TrustBundleRolled", "Roll",
+				"rolled on trust-bundle CA-set change; svid_bundle.pem hash %s", hash)
+		}
 	}
 
 	if rolled > 0 {

@@ -459,6 +459,7 @@ func main() {
 			Client:     mgr.GetClient(),
 			SecretName: f.trustBundleSecretName,
 			Namespace:  f.trustBundleNamespace,
+			Recorder:   mgr.GetEventRecorder("trust-bundle-reloader"),
 		}).SetupWithManager(mgr); err != nil {
 			setupLog.Error(err, "Failed to set up trust-bundle reloader controller")
 			os.Exit(1)

@@ -21,8 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ~20m tbot renewal does not trigger a restart, while a real CA rotation rolls
   each consumer exactly once. This gives processes that build an in-memory CA
   pool at startup (e.g. Dex's Teleport OIDC connector) the restart they need
-  to follow Teleport CA rotation. Requires a new **read-only** `core/secrets`
-  (`get;list;watch`) RBAC grant; the operator still never writes any Secret.
+  to follow Teleport CA rotation. Requires a new **read-only**,
+  **namespace-scoped** `core/secrets` (`get;list;watch`) grant — a `Role` in
+  the install namespace, not a cluster-wide ClusterRole grant; the operator
+  holds no cluster-wide Secret read and still never writes any Secret. The
+  reloader emits a `TrustBundleRolled` Event on each consumer it rolls.
 
 ### Fixed
 

@@ -264,6 +264,37 @@ func TestReconcile_NoBundleKeyIsNoOp(t *testing.T) {
 	}
 }
 
+// fakeRecorder captures Eventf calls so a test can assert an Event is
+// emitted without a running event broadcaster. It satisfies
+// events.EventRecorder.
+type fakeRecorder struct{ reasons []string }
+
+func (f *fakeRecorder) Eventf(_, _ runtime.Object, _, reason, _, _ string, _ ...any) {
+	f.reasons = append(f.reasons, reason)
+}
+
+// TestReconcile_EmitsEventOnRoll: a roll emits exactly one TrustBundleRolled
+// Event; a de-duped reconcile on unchanged content emits none.
+func TestReconcile_EmitsEventOnRoll(t *testing.T) {
+	rec := &fakeRecorder{}
+	r := newReconciler(t,
+		bundleSecret([]byte("ca-set")),
+		consumerDeployment("dex", true, false),
+	)
+	r.Recorder = rec
+
+	reconcileOnce(t, r)
+	if len(rec.reasons) != 1 || rec.reasons[0] != "TrustBundleRolled" {
+		t.Fatalf("expected one TrustBundleRolled event, got %v", rec.reasons)
+	}
+
+	// Same content -> de-dupe -> no roll -> no additional event.
+	reconcileOnce(t, r)
+	if len(rec.reasons) != 1 {
+		t.Errorf("de-duped reconcile emitted an extra event: %v", rec.reasons)
+	}
+}
+
 // TestReconcile_IgnoresOtherSecret: an enqueue for a different Secret name is
 // ignored by the in-Reconcile guard.
 func TestReconcile_IgnoresOtherSecret(t *testing.T) {
