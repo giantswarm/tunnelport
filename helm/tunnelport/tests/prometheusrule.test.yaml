@@ -1,0 +1,100 @@
+---
+# promtool unit tests for templates/prometheusrule.yaml.
+# `rule_files` points at the rendered+extracted rule groups that
+# tests/run.sh produces (helm template | yq '.spec'). Run via:
+#   helm/tunnelport/tests/run.sh
+rule_files:
+  - 'rendered.rules.yaml'
+
+tests:
+  # ghostunnel stuck in CrashLoopBackOff -> fires after 10m
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{cluster_id="gazelle", installation="gazelle", namespace="agentic-platform", pod="dex-finch-59ddd757f9-h68qn", container="ghostunnel", reason="CrashLoopBackOff"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelCrashLooping
+        eval_time: 5m
+        exp_alerts: []
+      - alertname: TunnelPortTunnelCrashLooping
+        eval_time: 15m
+        exp_alerts:
+          - exp_labels:
+              area: platform
+              cancel_if_kube_state_metrics_down: "true"
+              cancel_if_outside_working_hours: "false"
+              cluster_id: gazelle
+              installation: gazelle
+              namespace: agentic-platform
+              pod: dex-finch-59ddd757f9-h68qn
+              container: ghostunnel
+              reason: CrashLoopBackOff
+              severity: notify
+              team: bumblebee
+              topic: tunnelport
+            exp_annotations:
+              description: 'Tunnel container ghostunnel in agentic-platform/dex-finch-59ddd757f9-h68qn is in CrashLoopBackOff; the SPIFFE/ghostunnel tunnel is down.'
+              runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-tunnel-crashlooping/
+
+  # tbot crashlooping in a different namespace -> also fires (namespace-agnostic)
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{cluster_id="gazelle", installation="gazelle", namespace="mcp-kubernetes", pod="mcp-kubernetes-tunnel-abc", container="tbot", reason="CrashLoopBackOff"}'
+        values: "1+0x30"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelCrashLooping
+        eval_time: 15m
+        exp_alerts:
+          - exp_labels:
+              area: platform
+              cancel_if_kube_state_metrics_down: "true"
+              cancel_if_outside_working_hours: "false"
+              cluster_id: gazelle
+              installation: gazelle
+              namespace: mcp-kubernetes
+              pod: mcp-kubernetes-tunnel-abc
+              container: tbot
+              reason: CrashLoopBackOff
+              severity: notify
+              team: bumblebee
+              topic: tunnelport
+            exp_annotations:
+              description: 'Tunnel container tbot in mcp-kubernetes/mcp-kubernetes-tunnel-abc is in CrashLoopBackOff; the SPIFFE/ghostunnel tunnel is down.'
+              runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-tunnel-crashlooping/
+
+  # operator deployment with no available replicas -> fires after 15m
+  - interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", deployment="tunnelport"}'
+        values: "0+0x30"
+    alert_rule_test:
+      - alertname: TunnelPortOperatorDown
+        eval_time: 10m
+        exp_alerts: []
+      - alertname: TunnelPortOperatorDown
+        eval_time: 20m
+        exp_alerts:
+          - exp_labels:
+              area: platform
+              cancel_if_kube_state_metrics_down: "true"
+              cancel_if_outside_working_hours: "false"
+              cluster_id: gazelle
+              installation: gazelle
+              namespace: tunnelport-system
+              deployment: tunnelport
+              severity: notify
+              team: bumblebee
+              topic: tunnelport
+            exp_annotations:
+              description: 'The tunnelport operator deployment tunnelport-system/tunnelport has no available replicas; RemoteApp tunnels will not reconcile.'
+              runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-operator-down/
+
+  # healthy tunnel (waiting reason present but not CrashLoopBackOff) -> does not fire
+  - interval: 1m
+    input_series:
+      - series: 'kube_pod_container_status_waiting_reason{cluster_id="gazelle", installation="gazelle", namespace="agentic-platform", pod="kubernetes-tunnel-xyz", container="ghostunnel", reason="ContainerCreating"}'
+        values: "1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelCrashLooping
+        eval_time: 15m
+        exp_alerts: []
