@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Trust-bundle reloader controller. When `trustBundle.enabled` is set, the
+  operator watches the chart-managed trust-bundle Secret
+  (`trustBundle.secretName`) and rolls opted-in consumer Deployments in the
+  install namespace when the SPIFFE trust bundle's CA set changes. Consumers
+  opt in with the `tunnelport.giantswarm.io/trust-bundle-consumer: "true"`
+  label (on the Deployment metadata or its pod template); the controller
+  stamps a content-addressed `tunnelport.giantswarm.io/trust-bundle-hash`
+  annotation onto their pod template via Server-Side Apply. The hash is over
+  the `svid_bundle.pem` content (not the Secret resourceVersion), so a plain
+  ~20m tbot renewal does not trigger a restart, while a real CA rotation rolls
+  each consumer exactly once. This gives processes that build an in-memory CA
+  pool at startup (e.g. Dex's Teleport OIDC connector) the restart they need
+  to follow Teleport CA rotation. Requires a new **read-only**,
+  **namespace-scoped** `core/secrets` (`get;list;watch`) grant — a `Role` in
+  the install namespace, not a cluster-wide ClusterRole grant; the operator
+  holds no cluster-wide Secret read and still never writes any Secret. The
+  reloader emits a `TrustBundleRolled` Event on each consumer it rolls.
 - `monitoring.prometheusRule.enabled` (default `true`) renders a PrometheusRule with two alerts:
   - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
   - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.

@@ -66,6 +66,12 @@ rules:
   - list
   - watch
 
+# Secret access is NOT granted here. The trust-bundle reloader reads only
+# the single trust-bundle Secret in the install namespace, so that grant
+# is a namespace-scoped Role (see the `-trust-bundle-reader` Role below),
+# never a cluster-wide ClusterRole grant. The operator holds no cluster-
+# wide Secret read and never writes any Secret (ADR 0004 / CONTEXT.md).
+
 # Owned objects rendered in the CR's namespace. The operator reconciles
 # RemoteApps cluster-wide, so these have to be cluster-scoped via the
 # ClusterRole — but the operator only ever writes them in the namespace
@@ -97,14 +103,13 @@ rules:
   - watch
 
 # ADR 0008 removed the per-CR trust-bundle Secret/Role/RoleBinding;
-# the operator no longer renders any Secret, Role, or RoleBinding. The
-# `core/secrets` and `rbac.authorization.k8s.io/roles,rolebindings`
-# grants that ADR 0007 added here have been removed accordingly.
-# Consumer trust-bundle distribution is now the chart-managed singleton
-# tbot's job (see `trust-bundle-*.yaml` templates), and that bot's
-# permissions are namespace-scoped via its own per-Secret Role —
-# the operator does not need cluster-wide write authority on these
-# resource groups.
+# the operator no longer *renders* any Secret, Role, or RoleBinding, so
+# the `rbac.authorization.k8s.io/roles,rolebindings` write grants that
+# ADR 0007 added here stay removed. Consumer trust-bundle distribution is
+# the chart-managed singleton tbot's job (see `trust-bundle-*.yaml`
+# templates). The reloader's *read-only* `core/secrets` grant is a
+# namespace-scoped Role (below), never a ClusterRole grant — never a
+# write verb, never cluster-wide.
 
 # Leader-election: leases in the operator's own namespace. controller-
 # runtime defaults to a `coordination.k8s.io/leases` lock; the
@@ -150,6 +155,48 @@ subjects:
 - kind: ServiceAccount
   name: {{ include "tunnelport.fullname" . }}
   namespace: {{ .Values.installNamespace }}
+{{- if .Values.trustBundle.enabled }}
+---
+# Trust-bundle reader — namespace-scoped read-only Secret access for the
+# trust-bundle reloader. The reloader reads exactly one Secret
+# (`trustBundle.secretName`) in the install namespace to hash its
+# `svid_bundle.pem` and roll opted-in consumer Deployments; scoping this
+# to a Role (not the manager ClusterRole) keeps the operator off any
+# cluster-wide Secret read. Rendered only when trustBundle.enabled, matching
+# the reloader flags in the Deployment template.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle-reader
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle-reader
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tunnelport.fullname" . }}-trust-bundle-reader
+subjects:
+- kind: ServiceAccount
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+{{- end }}
 ---
 # Metrics-reader ClusterRole — bound to the Prometheus ServiceAccount on
 # each consumer MC out-of-band (one decision per cluster). Defining the

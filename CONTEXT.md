@@ -52,8 +52,12 @@ projected `serviceAccountToken` volume with the right audience.
 
 The SA JWT is auto-rotated by the kubelet's projected-token mechanism;
 tbot consumes it transparently. The operator does **not** observe or
-manage any rotating secret, surfaces no `TokenSecretBound`-style
-condition, and never reads `Secret.Data` of any object on the cluster.
+manage any rotating secret and surfaces no `TokenSecretBound`-style
+condition. It reads exactly one Secret — the chart-managed singleton
+trust-bundle Secret (`trustBundle.secretName`) — and only its
+`svid_bundle.pem` content, to drive the trust-bundle reloader (see
+"Reconciliation on rotation"). It never reads any other Secret's data
+and never writes any Secret.
 
 JWKS export from each consumer MC to Central is a platform-team GitOps
 step — out of scope for the operator. The smoke harness exports the
@@ -86,7 +90,7 @@ on the next join; the operator does not observe or trigger anything on
 JWT rotation, because the pod-side credential lifecycle is the kubelet's
 concern.
 
-The only Deployment-roll trigger the operator stamps onto the pod
+The Deployment-roll trigger the operator stamps onto each *tbot* pod
 template is `tunnelport.giantswarm.io/config-hash` — a SHA-256 of the
 rendered `tbot.yaml`. Anything that changes the on-disk tbot config
 (`spec.appName`, `spec.port`, `spec.tokenName`, or the operator-level
@@ -96,6 +100,25 @@ because nothing on the consumer side "rotates" in a way that needs
 operator-driven roll. A change to either operator-level flag rolls
 *every* RemoteApp's tbot pods on the next reconcile pass — accepted
 as the standard blast-radius cost of MC-wide config (ADR 0005).
+
+A second, separate controller — the **trust-bundle reloader** — owns an
+analogous trigger for trust-bundle *consumers* (Dex, muster, ...). The
+chart-managed singleton tbot rewrites the trust-bundle Secret every
+renewal (~20m), but the SPIFFE trust-domain bundle's CA set only changes
+on an actual Teleport CA rotation. The reloader hashes the Secret's
+`svid_bundle.pem` *content* (not its resourceVersion) and stamps
+`tunnelport.giantswarm.io/trust-bundle-hash` onto the pod template of
+every Deployment in the install namespace that opts in via the
+`tunnelport.giantswarm.io/trust-bundle-consumer: "true"` label (honoured
+on either the Deployment metadata or the pod template). De-duping on the
+content hash is what keeps a plain renewal from triggering a restart
+storm; only a real CA-set change rolls the consumers. This supplies the
+restart that processes building an in-memory CA pool at startup (Dex's
+Teleport OIDC connector reads `rootCAs` once at connector open) need to
+pick up a rotated CA. The controller is enabled by `trustBundle.enabled`
+(wired via `--trust-bundle-secret-name` / `--trust-bundle-namespace`);
+when disabled it is never registered and the operator's Secret informer
+is absent entirely.
 
 ### Cert cache
 
@@ -220,7 +243,12 @@ consumer-side-only and never talks to Central. See ADR 0004.
   namespace** — no cross-namespace references.
 - RBAC: cluster-scoped read on `RemoteApp`; namespace-scoped write on the
   rendered resource types (including `serviceaccounts`) via a single
-  ClusterRole. **Does not** grant any verbs on `secrets`.
+  ClusterRole. `secrets` is **not** on that ClusterRole: the trust-bundle
+  reloader's only `secrets` grant is **read-only** (`get;list;watch`) and
+  **namespace-scoped** via a separate `Role` in the install namespace
+  (`<release>-trust-bundle-reader`, rendered only when
+  `trustBundle.enabled`). The operator holds no cluster-wide Secret read and
+  never gets a write verb on `secrets`.
 - The chart ships the operator and CRD only. It does **not** create
   `RoleBinding`s granting create-`RemoteApp` to anyone — that's an explicit
   per-cluster decision the platform team makes via their own RBAC.

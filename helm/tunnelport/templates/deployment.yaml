@@ -70,6 +70,13 @@ spec:
         {{- if .Values.tbot.insecure }}
         - --tbot-insecure=true
         {{- end }}
+        {{- if .Values.trustBundle.enabled }}
+        # Trust-bundle reloader: roll opted-in consumer Deployments in
+        # this namespace when the bundle's CA set changes. Both flags
+        # empty (trustBundle.enabled=false) disable the controller.
+        - --trust-bundle-secret-name={{ .Values.trustBundle.secretName }}
+        - --trust-bundle-namespace={{ .Values.installNamespace }}
+        {{- end }}
         ports:
         - name: metrics
           containerPort: {{ .Values.ports.metrics }}
