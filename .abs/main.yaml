@@ -1,0 +1,14 @@
+# app-build-suite (dabs.sh) configuration for the generated build-chart job.
+#
+# The HelmTemplateValidator step (added in app-build-suite 1.7.0, which the repo
+# picked up via the architect orb 9.5.5 -> 9.6.0 bump in #76) renders the chart
+# with `helm template` using the chart's default values only. tunnelport's chart
+# cannot render that way by design -- `teleport.clusterName`/`teleport.proxyAddr`
+# (ADR 0005) and `trustBundle.tokenName` (ADR 0008) are install-specific and
+# guarded with helm's `required` so a misconfigured install fails fast rather
+# than deploying against the wrong Teleport cluster.
+#
+# abs supports exactly this case: point the validator at a values file rather
+# than inventing chart defaults or dropping the guards. The path is relative to
+# the repo root (abs's working directory).
+helm-template-extra-values: .abs/validation-values.yaml
