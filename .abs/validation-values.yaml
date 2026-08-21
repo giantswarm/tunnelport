@@ -1,0 +1,23 @@
+# Values used ONLY by app-build-suite's HelmTemplateValidator build step
+# (`helm template abs-validation ./helm/tunnelport --include-crds`). Wired up
+# via `helm-template-extra-values` in .abs/main.yaml.
+#
+# The chart deliberately cannot render from its own values.yaml alone: the
+# Teleport binding (ADR 0005) and the singleton trust-bundle bot's join token
+# (ADR 0008) are per-installation facts with no defensible default, so the
+# templates gate them with helm's `required` to fail `helm install` fast and
+# directionally instead of deploying something silently pointed at the wrong
+# Teleport cluster. See the `teleport:` block in helm/tunnelport/values.yaml.
+#
+# These placeholders exist purely so the validator has something to render, and
+# are NOT defaults: they are never packaged into the chart, never merged into
+# values.yaml, and must not be treated as an example of a working install. Real
+# values come from the installation's values overlay. clusterName/proxyAddr match
+# the placeholders helm/tunnelport/tests/run.sh already renders with; tokenName is
+# named after this step because nothing constrains its shape.
+teleport:
+  clusterName: teleport.example.com
+  proxyAddr: teleport.example.com:443
+
+trustBundle:
+  tokenName: abs-validation
