@@ -4,7 +4,7 @@
 # runs the builder stage under QEMU emulation for each non-native arch
 # (e.g. arm64 on an amd64 host), which compiles Go painfully slowly and
 # trips the multi-arch push job's no-output timeout.
-FROM --platform=$BUILDPLATFORM golang:1.26 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
