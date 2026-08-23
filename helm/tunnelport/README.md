@@ -29,7 +29,8 @@ Teleport-exposed app as if it were a local Service.
 | resources.requests.memory | string | `"64Mi"` |  |
 | resources.limits.cpu | string | `"200m"` |  |
 | resources.limits.memory | string | `"256Mi"` |  |
-| teleport | object | `{}` |  |
+| teleport.clusterName | string | `""` | Teleport cluster name (the `Cluster:` line from `tctl status` on Central). Used as the `aud` claim on every rendered tbot pod's projected ServiceAccount JWT — Teleport's `static_jwks` validator pins JWT `aud` to this exact value. DNS-1123 subdomain shape, e.g. teleport.example.com. Required at install time (ADR 0005). |
+| teleport.proxyAddr | string | `""` | host:port of the Teleport proxy every rendered tbot pod connects to, e.g. teleport.example.com:443. Flows into `proxy_server` in the rendered tbot.yaml. Required at install time (ADR 0005). |
 | tbot.image.registry | string | `"gsoci.azurecr.io"` |  |
 | tbot.image.name | string | `"giantswarm/tbot-distroless"` |  |
 | tbot.image.tag | string | `"18"` |  |
