@@ -1,212 +1,360 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "additionalProperties": false,
-  "properties": {
-    "installNamespace": {
-      "type": "string"
-    },
-    "replicaCount": {
-      "type": "integer",
-      "minimum": 1,
-      "description": "Number of operator replicas. Default 2 — leader election keeps one active and one hot standby so node drains and chart upgrades don't gap reconciles. Set to 1 only when scheduling pressure forces it; pair with podDisruptionBudget.enabled=false."
-    },
-    "podDisruptionBudget": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "minAvailable": { "type": ["integer", "string"] },
-        "unhealthyPodEvictionPolicy": {
-          "type": "string",
-          "enum": ["IfHealthyBudget", "AlwaysAllow"]
-        }
-      }
-    },
-    "image": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "registry": { "type": "string" },
-        "name": { "type": "string" },
-        "tag": { "type": "string" },
-        "pullPolicy": {
-          "type": "string",
-          "enum": ["Always", "IfNotPresent", "Never"]
-        }
-      }
-    },
-    "imagePullSecret": {
-      "type": "string"
-    },
-    "teleport": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Teleport binding for this consumer MC (ADR 0005). The operator fails fast at startup if either field is empty; the templates/deployment.yaml `required` helm function gates `helm install` with a clearer error than a JSON Schema violation. Schema-level `required:` on the two fields is intentionally absent so `ct lint` accepts the default values.yaml empty block — pattern + minLength still gate any supplied value, and the operator's startup regex check is the authoritative contract.",
-      "properties": {
-        "clusterName": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
-          "description": "Teleport cluster name (the `Cluster:` line from `tctl status` on Central). Used as the `aud` claim on every rendered tbot pod's projected SA JWT."
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+        "affinity": {
+            "type": "object",
+            "additionalProperties": false
         },
-        "proxyAddr": {
-          "type": "string",
-          "minLength": 1,
-          "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9.]*[a-z0-9])?)*:[0-9]+$",
-          "description": "host:port of the Teleport proxy every rendered tbot pod connects to."
-        }
-      }
-    },
-    "resources": {
-      "$ref": "#/definitions/resources"
-    },
-    "tbot": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "image": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "tbot image reference, composed as `<registry>/<name>:<tag>` with an optional `@<digest>`. Sourced from gsoci by default so rendered pods satisfy the restrict-image-registries Kyverno policy; override `registry` to pull from a different mirror. The major version MUST match the Teleport server major — the `GenerateUserCerts` RPC contract changes across majors and a mismatched-major tbot fails first cert renewal with `ssh: no key found` (initial join still works for ~1h, so this is easy to miss in short smoke tests). SHOULD stay digest-pinned in production so a re-push of an upstream tag cannot silently change tbot's config schema underneath the operator.",
-          "properties": {
-            "registry": { "type": "string", "minLength": 1 },
-            "name": { "type": "string", "minLength": 1 },
-            "tag": { "type": "string", "minLength": 1 },
-            "digest": {
-              "type": "string",
-              "description": "Optional content digest (`sha256:<hex>`) appended as `@<digest>` to pin the image by content. Leave empty for tag-only refs in dev/smoke workflows."
+        "crds": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "install": {
+                    "type": "boolean"
+                }
             }
-          }
         },
-        "insecure": { "type": "boolean" },
-        "resources": { "$ref": "#/definitions/resources" }
-      }
-    },
-    "tls": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Ghostunnel TLS-termination sidecar (ADR 0007 / slice 02). Every rendered tbot Deployment grows a ghostunnel sidecar that reads the SVID and serves it on the Service's `tls` port.",
-      "properties": {
+        "global": {
+            "type": [
+                "object",
+                "null"
+            ],
+            "description": "Global values shared between all subcharts",
+            "$comment": "Added automatically by 'helm schema' to allow this chart to be used as a Helm dependency, as the `additionalProperties` setting would otherwise collide with Helm's special 'global' values key."
+        },
         "image": {
-          "type": "object",
-          "additionalProperties": false,
-          "description": "ghostunnel sidecar image reference, composed as `<registry>/<name>:<tag>` with an optional `@<digest>`. Sourced from gsoci by default so the rendered sidecar satisfies the restrict-image-registries Kyverno policy; override `registry` to pull from a different mirror.",
-          "properties": {
-            "registry": { "type": "string", "minLength": 1 },
-            "name": { "type": "string", "minLength": 1 },
-            "tag": { "type": "string", "minLength": 1 },
-            "digest": {
-              "type": "string",
-              "description": "Optional content digest (`sha256:<hex>`) appended as `@<digest>` to pin the image by content."
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "name": {
+                    "type": "string"
+                },
+                "pullPolicy": {
+                    "type": "string"
+                },
+                "registry": {
+                    "type": "string"
+                },
+                "tag": {
+                    "type": "string"
+                }
             }
-          }
         },
-        "reloadInterval": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Go-duration value for ghostunnel's --timed-reload flag. 5m is safe with tbot's default 20m SVID renewal cadence."
+        "imagePullSecret": {
+            "type": "string"
         },
-        "port": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 65535,
-          "description": "TLS port the rendered Service exposes and the ghostunnel sidecar listens on inside the pod."
+        "installNamespace": {
+            "type": "string"
+        },
+        "monitoring": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "prometheusRule": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        }
+                    }
+                }
+            }
+        },
+        "networkPolicy": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "nodeSelector": {
+            "type": "object",
+            "additionalProperties": false
+        },
+        "podDisruptionBudget": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "minAvailable": {
+                    "type": "integer"
+                },
+                "unhealthyPodEvictionPolicy": {
+                    "type": "string"
+                }
+            }
+        },
+        "podSecurityContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "fsGroup": {
+                    "type": "integer"
+                },
+                "runAsGroup": {
+                    "type": "integer"
+                },
+                "runAsNonRoot": {
+                    "type": "boolean"
+                },
+                "runAsUser": {
+                    "type": "integer"
+                },
+                "seccompProfile": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "ports": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "health": {
+                    "type": "integer"
+                },
+                "metrics": {
+                    "type": "integer"
+                }
+            }
+        },
+        "replicaCount": {
+            "type": "integer"
+        },
+        "resources": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "limits": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "cpu": {
+                            "type": "string"
+                        },
+                        "memory": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "requests": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "cpu": {
+                            "type": "string"
+                        },
+                        "memory": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "securityContext": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "allowPrivilegeEscalation": {
+                    "type": "boolean"
+                },
+                "capabilities": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "drop": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                },
+                "readOnlyRootFilesystem": {
+                    "type": "boolean"
+                },
+                "runAsNonRoot": {
+                    "type": "boolean"
+                },
+                "seccompProfile": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "type": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "tbot": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "image": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "digest": {
+                            "type": "string"
+                        },
+                        "name": {
+                            "type": "string"
+                        },
+                        "registry": {
+                            "type": "string"
+                        },
+                        "tag": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "insecure": {
+                    "type": "boolean"
+                },
+                "resources": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "limits": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "cpu": {
+                                    "type": "string"
+                                },
+                                "memory": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "requests": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "cpu": {
+                                    "type": "string"
+                                },
+                                "memory": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "teleport": {
+            "type": "object",
+            "additionalProperties": false
+        },
+        "tls": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "image": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "digest": {
+                            "type": "string"
+                        },
+                        "name": {
+                            "type": "string"
+                        },
+                        "registry": {
+                            "type": "string"
+                        },
+                        "tag": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "port": {
+                    "type": "integer"
+                },
+                "reloadInterval": {
+                    "type": "string"
+                }
+            }
+        },
+        "tolerations": {
+            "type": "array"
+        },
+        "trustBundle": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "credentialTTL": {
+                    "type": "string"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "renewalInterval": {
+                    "type": "string"
+                },
+                "resources": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "limits": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "cpu": {
+                                    "type": "string"
+                                },
+                                "memory": {
+                                    "type": "string"
+                                }
+                            }
+                        },
+                        "requests": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "cpu": {
+                                    "type": "string"
+                                },
+                                "memory": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    }
+                },
+                "secretName": {
+                    "type": "string"
+                },
+                "tokenName": {
+                    "type": "string"
+                },
+                "workloadIdentityLabels": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "trust-bundle": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
         }
-      }
-    },
-    "crds": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "install": { "type": "boolean" }
-      }
-    },
-    "networkPolicy": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "enabled": { "type": "boolean" }
-      }
-    },
-    "monitoring": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "PrometheusRule with alerts for the tunnelport data plane (tunnel-pod CrashLoopBackOff, operator with no available replicas). Rendered into installNamespace; the expressions select tunnel pods cluster-wide.",
-      "properties": {
-        "prometheusRule": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "enabled": { "type": "boolean" }
-          }
-        }
-      }
-    },
-    "ports": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "metrics": { "type": "integer", "minimum": 1, "maximum": 65535 },
-        "health": { "type": "integer", "minimum": 1, "maximum": 65535 }
-      }
-    },
-    "podSecurityContext": {
-      "type": "object"
-    },
-    "securityContext": {
-      "type": "object"
-    },
-    "nodeSelector": {
-      "type": "object"
-    },
-    "tolerations": {
-      "type": "array"
-    },
-    "affinity": {
-      "type": "object"
-    },
-    "trustBundle": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Singleton trust-bundle tbot (ADR 0008). One chart-managed tbot Deployment writes the SPIFFE trust bundle into a single Secret in installNamespace; consumers co-deployed in this namespace mount that Secret.",
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "secretName": { "type": "string", "minLength": 1 },
-        "tokenName": {
-          "type": "string",
-          "description": "Teleport-central ProvisionToken name admitting the singleton bot via kubernetes-join. Empty disables a meaningful install — the chart's template uses helm `required` to fail install when trustBundle.enabled and tokenName is empty."
-        },
-        "workloadIdentityLabels": {
-          "type": "object",
-          "description": "Selector labels matching the Teleport-central WorkloadIdentity resource. Default key is `trust-bundle` (distinct from per-CR `remoteapp:` selectors).",
-          "additionalProperties": {
-            "type": "array",
-            "items": { "type": "string", "minLength": 1 }
-          }
-        },
-        "credentialTTL": { "type": "string", "minLength": 1 },
-        "renewalInterval": { "type": "string", "minLength": 1 },
-        "resources": { "$ref": "#/definitions/resources" }
-      }
     }
-  },
-  "definitions": {
-    "resources": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "requests": { "$ref": "#/definitions/resourceQuantities" },
-        "limits": { "$ref": "#/definitions/resourceQuantities" }
-      }
-    },
-    "resourceQuantities": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "cpu": { "type": ["string", "number"] },
-        "memory": { "type": ["string", "number"] }
-      }
-    }
-  }
 }
