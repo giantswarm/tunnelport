@@ -56,22 +56,24 @@ resources:
 # named here; multi-Teleport-cluster on a single consumer MC needs a
 # second operator install in its own namespace.
 #
-# The empty `{}` default lets `ct lint` accept the chart's own
+# The empty-string defaults let `ct lint` accept the chart's own
 # values.yaml — `helm install` without `-f`/`--set` still fails fast
 # at template render time via the `required` helm function (with a
-# clearer message than a JSON Schema violation). Uncomment-and-fill
-# in your values overlay or pass via `--set`:
-#
-#   teleport:
-#     # Teleport cluster name (the `Cluster:` line from `tctl status` on
-#     # Central). Used as the `aud` claim on every rendered tbot pod's
-#     # projected ServiceAccount JWT — Teleport's `static_jwks` validator
-#     # pins JWT `aud` to this exact value. DNS-1123 subdomain shape.
-#     clusterName: teleport.example.com
-#     # host:port of the Teleport proxy every rendered tbot pod connects
-#     # to. Flows into `proxy_server` in the rendered tbot.yaml.
-#     proxyAddr: teleport.example.com:443
-teleport: {}
+# clearer message than a JSON Schema violation). The keys must exist
+# here (not a bare `teleport: {}`) so the generated values.schema.json
+# knows them — the schema sets additionalProperties: false. Fill them
+# in your values overlay or pass via `--set`.
+teleport:
+  # -- Teleport cluster name (the `Cluster:` line from `tctl status` on
+  # Central). Used as the `aud` claim on every rendered tbot pod's
+  # projected ServiceAccount JWT — Teleport's `static_jwks` validator
+  # pins JWT `aud` to this exact value. DNS-1123 subdomain shape,
+  # e.g. teleport.example.com. Required at install time (ADR 0005).
+  clusterName: ""
+  # -- host:port of the Teleport proxy every rendered tbot pod connects
+  # to, e.g. teleport.example.com:443. Flows into `proxy_server` in the
+  # rendered tbot.yaml. Required at install time (ADR 0005).
+  proxyAddr: ""
 
 # Per-tbot-Deployment defaults. These flow into the operator manager's
 # CLI flags (`--tbot-image`, `--tbot-cpu-request`, etc.) which the
