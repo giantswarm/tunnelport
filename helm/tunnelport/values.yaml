@@ -170,6 +170,11 @@ networkPolicy:
 monitoring:
   prometheusRule:
     enabled: true
+    # Extra labels for the PrometheusRule resource. On Giant Swarm
+    # installations this must carry observability.giantswarm.io/tenant, which
+    # Mimir's rule_selector matches on; a rule without it is never loaded into
+    # the ruler.
+    labels: {}  # @schema additionalProperties: true
 
 # Ports the manager listens on. Exposed here only so `networkPolicy`
 # stays in sync with the actual flag values.

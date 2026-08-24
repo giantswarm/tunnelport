@@ -92,6 +92,10 @@
                     "properties": {
                         "enabled": {
                             "type": "boolean"
+                        },
+                        "labels": {
+                            "type": "object",
+                            "additionalProperties": true
                         }
                     }
                 }

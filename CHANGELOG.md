@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `monitoring.prometheusRule.enabled` (default `true`) renders a PrometheusRule with two alerts:
   - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
   - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.
+- `monitoring.prometheusRule.labels`, merged into the PrometheusRule's labels.
+  Giant Swarm installations set `observability.giantswarm.io/tenant` here;
+  Mimir's `rule_selector` matches on that label, and a rule without it is never
+  loaded into the ruler.
 
 ### Changed
 
