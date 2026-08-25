@@ -275,6 +275,11 @@ const (
 	// `tls.port` value overrides this at install time.
 	tlsListenPortDefault int32 = 8443
 
+	// tbotContainerName is the name of the tbot container in the rendered
+	// tunnel pod. Same string as LabelRoleValue, named separately because
+	// status.go ranks container statuses by it.
+	tbotContainerName = LabelRoleValue
+
 	// ghostunnelContainerName is the name of the TLS-terminating sidecar
 	// container (slice 02 / ADR 0007).
 	ghostunnelContainerName = "ghostunnel"
@@ -529,7 +534,7 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 					},
 					Containers: []corev1.Container{
 						{
-							Name:      LabelRoleValue,
+							Name:      tbotContainerName,
 							Image:     cfg.TbotImage,
 							Resources: cfg.Resources,
 							SecurityContext: &corev1.SecurityContext{

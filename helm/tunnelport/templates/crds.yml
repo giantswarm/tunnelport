@@ -42,6 +42,14 @@ spec:
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
+    - jsonPath: .status.conditions[?(@.type=="IdentityIssued")].status
+      name: Identity
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="TunnelServing")].status
+      name: Serving
+      priority: 1
+      type: string
     - jsonPath: .status.lastError
       name: LastError
       priority: 1

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `RemoteApp.status.conditions` gains `IdentityIssued` and `TunnelServing`, one
+  per role in the tunnel, so the Teleport join and the TLS listener are both
+  visible (giantswarm/giantswarm#37445). `IdentityIssued=False` with
+  `TunnelServing=False` means the join is the cause and TLS the symptom. Both
+  show as `Identity` and `Serving` columns in
+  `kubectl get remoteapp -o wide`.
+
 - `monitoring.prometheusRule.enabled` (default `true`) renders a PrometheusRule with two alerts:
   - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
   - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.
@@ -25,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   SVID), instead of reporting Ready with a broken tunnel.
 
 ### Fixed
+
+- `RemoteApp.status.lastError` now describes the `tbot` container when both
+  containers of a tunnel pod are unready. Kubelet orders container statuses
+  alphabetically, so the status reported `ghostunnel`, which only exits because
+  tbot never wrote the SVID (giantswarm/giantswarm#37445).
 
 - Tunnel pods no longer trip the `restrict-image-registries` and
   `require-emptydir-requests-and-limits` Kyverno policies
