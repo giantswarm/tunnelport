@@ -49,7 +49,7 @@ Teleport-exposed app as if it were a local Service.
 | crds.install | bool | `true` |  |
 | networkPolicy.enabled | bool | `true` |  |
 | monitoring.prometheusRule.enabled | bool | `true` |  |
-| monitoring.prometheusRule.labels | object | `{}` |  |
+| monitoring.prometheusRule.labels."observability.giantswarm.io/tenant" | string | `"giantswarm"` |  |
 | ports.metrics | int | `8443` |  |
 | ports.health | int | `8081` |  |
 | podSecurityContext.runAsNonRoot | bool | `true` |  |

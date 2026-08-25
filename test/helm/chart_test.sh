@@ -16,6 +16,8 @@
 #      `helm.sh/resource-policy: keep`.
 #   5. Every rendered object carries a non-empty
 #      `application.giantswarm.io/team` label, which alert routing needs.
+#   6. The PrometheusRule carries `observability.giantswarm.io/tenant`,
+#      which the Mimir ruler selects on.
 #
 # We use `grep` on the rendered YAML rather than yq so the test runs in
 # any CI image with bash + helm.
@@ -161,6 +163,33 @@ echo "==> imagePullSecrets assertion"
 assert "manager pod references gsoci-pull-secret by default" \
   "printf '%s' \"\${RENDERED}\" \
     | awk '/kind: Deployment/{flag=1} flag && /imagePullSecrets:/{found=1} flag && found && /name: gsoci-pull-secret/{print; exit 0}; END{exit !found}'"
+
+echo "==> tenant label assertions"
+# Mimir's rule_selector matches on observability.giantswarm.io/tenant. Without
+# it the PrometheusRule is created and its alerts never evaluate, which is a
+# failure no amount of `kubectl get prometheusrule` reveals. The default lives
+# in monitoring.prometheusRule.labels, so helm's map merge is what preserves it
+# for an installation that sets some other label.
+assert "PrometheusRule carries the giantswarm tenant label by default" \
+  "printf '%s' \"\${RENDERED}\" | grep -E 'observability.giantswarm.io/tenant:[[:space:]]+\"?giantswarm\"?'"
+
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_TENANT_OVERRIDE="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
+  --set 'monitoring.prometheusRule.labels.observability\.giantswarm\.io/tenant=customer')"
+assert "an explicit tenant label overrides the default" \
+  "printf '%s' \"\${RENDERED_TENANT_OVERRIDE}\" | grep -E 'observability.giantswarm.io/tenant:[[:space:]]+\"?customer\"?'"
+
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_EXTRA_LABEL="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
+  --set monitoring.prometheusRule.labels.foo=bar)"
+assert "an unrelated extra label does not displace the tenant default" \
+  "printf '%s' \"\${RENDERED_EXTRA_LABEL}\" | grep -E 'observability.giantswarm.io/tenant:[[:space:]]+\"?giantswarm\"?'"
+
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_NO_TENANT="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
+  --set 'monitoring.prometheusRule.labels.observability\.giantswarm\.io/tenant=null')"
+assert "setting the tenant key to null drops the label" \
+  "! printf '%s' \"\${RENDERED_NO_TENANT}\" | grep -F 'observability.giantswarm.io/tenant:'"
 
 echo "==> team label assertions"
 # Alert routing keys on application.giantswarm.io/team, so an empty value is as

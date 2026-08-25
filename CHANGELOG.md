@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `TunnelPortTunnelCrashLooping`: a tunnel container (`tbot` or `ghostunnel`) is in CrashLoopBackOff.
   - `TunnelPortOperatorDown`: the operator Deployment has no available replicas.
 - `monitoring.prometheusRule.labels`, merged into the PrometheusRule's labels.
-  Giant Swarm installations set `observability.giantswarm.io/tenant` here;
-  Mimir's `rule_selector` matches on that label, and a rule without it is never
-  loaded into the ruler.
+  It defaults to `observability.giantswarm.io/tenant: giantswarm`. Mimir's
+  `rule_selector` matches on that label, and a rule without it is never loaded
+  into the ruler (giantswarm/giantswarm#37445). Override the key to route to
+  another tenant, or set it to `null` to drop the label.
 
 ### Changed
 
