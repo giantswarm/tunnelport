@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     pod now declares a `sizeLimit` (50Mi), which bounds scratch growth and
     excludes the volumes from the emptyDir policy — so the resource-less
     ghostunnel sidecar no longer needs per-container ephemeral-storage entries.
+- Every rendered object now carries `application.giantswarm.io/team: bumblebee`.
+  It rendered as `""` on every released chart, so the two alerts had no owner
+  for routing (giantswarm/giantswarm#37445). `Chart.yaml` now carries the
+  ownership annotation under the `io.giantswarm.application.team` key that the
+  packaged chart keeps.
+- `test/helm/chart_test.sh` renders again and runs in CI as the `chart-test`
+  job.
 
 ## [1.0.4] - 2026-06-16
 
