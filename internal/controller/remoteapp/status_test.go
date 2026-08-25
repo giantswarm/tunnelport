@@ -345,6 +345,247 @@ func TestSummarizeStatus_PicksHighestSeverityRegardlessOfOrder(t *testing.T) {
 	}
 }
 
+// A tunnel pod runs tbot plus the ghostunnel sidecar, and kubelet orders
+// ContainerStatuses alphabetically, so "ghostunnel" precedes "tbot". When
+// both are unready, lastError must name tbot: ghostunnel exits only because
+// tbot never wrote the SVID. Pins giantswarm/giantswarm#37445 item 3.
+
+// tunnelPod builds a two-container tunnel pod whose statuses arrive in
+// kubelet's alphabetical order, each container waiting with the given reason.
+// An empty reason marks that container Ready.
+func tunnelPod(name, ghostunnelReason, tbotReason string) corev1.Pod {
+	container := func(cName, reason string, restarts int32) corev1.ContainerStatus {
+		if reason == "" {
+			return corev1.ContainerStatus{
+				Name: cName, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}
+		}
+		return corev1.ContainerStatus{
+			Name: cName, Ready: false, RestartCount: restarts,
+			State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{
+					Reason:  reason,
+					Message: "back-off 5m0s restarting failed container=" + cName,
+				},
+			},
+			LastTerminationState: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{Reason: "Error", ExitCode: 1},
+			},
+		}
+	}
+	return corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				container("ghostunnel", ghostunnelReason, 2474),
+				container("tbot", tbotReason, 2470),
+			},
+		},
+	}
+}
+
+func TestSummarizePodError_PrefersTbotOverSidecar(t *testing.T) {
+	tests := []struct {
+		name             string
+		ghostunnelReason string
+		tbotReason       string
+		wantContainer    string
+	}{
+		{
+			name:             "both unready names tbot",
+			ghostunnelReason: reasonCrashLoopBackOff,
+			tbotReason:       reasonCrashLoopBackOff,
+			wantContainer:    "tbot",
+		},
+		{
+			name:             "tbot unready alone names tbot",
+			ghostunnelReason: "",
+			tbotReason:       reasonCrashLoopBackOff,
+			wantContainer:    "tbot",
+		},
+		{
+			name:             "sidecar unready alone names the sidecar",
+			ghostunnelReason: reasonCrashLoopBackOff,
+			tbotReason:       "",
+			wantContainer:    "ghostunnel",
+		},
+		{
+			name:             "tbot wins even with a lower-severity reason",
+			ghostunnelReason: "ImagePullBackOff",
+			tbotReason:       reasonContainerCreating,
+			wantContainer:    "tbot",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := tunnelPod("mcp-kubernetes-garm-6f9cdfd5b-5fdzc", tc.ghostunnelReason, tc.tbotReason)
+
+			got := summarizePodError(&pod)
+			want := "container=" + tc.wantContainer
+			if !strings.Contains(got, want) {
+				t.Errorf("summarizePodError: want substring %q in %q", want, got)
+			}
+			// The restart counts differ per container, so the count in the
+			// message is a second, independent check on which one was picked.
+			if tc.wantContainer == "tbot" && !strings.Contains(got, "2470 restarts") {
+				t.Errorf("summarizePodError: want tbot's restart count in %q", got)
+			}
+		})
+	}
+}
+
+// The severity ranking reads the same tbot-first order. With ghostunnel at
+// the higher-severity reason, the ranked reason must still be tbot's.
+func TestPodErrorReason_PrefersTbotOverSidecar(t *testing.T) {
+	pod := tunnelPod("mcp-kubernetes-garm-6f9cdfd5b-5fdzc", "ImagePullBackOff", reasonCrashLoopBackOff)
+
+	if got, want := podErrorReason(&pod), reasonCrashLoopBackOff; got != want {
+		t.Errorf("podErrorReason: got %q, want %q", got, want)
+	}
+}
+
+// A pod with neither container named tbot must still summarise, rather than
+// fall through to the phase-level branch.
+func TestSummarizePodError_NoTbotContainerStillSummarises(t *testing.T) {
+	pod := corev1.Pod{
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "ghostunnel", Ready: false,
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{Reason: reasonCrashLoopBackOff},
+				},
+			}},
+		},
+	}
+
+	if got := summarizePodError(&pod); !strings.Contains(got, reasonCrashLoopBackOff) {
+		t.Errorf("summarizePodError: want %q in %q", reasonCrashLoopBackOff, got)
+	}
+}
+
+// The two per-role conditions exist so both halves of a tunnel failure are
+// visible at once. The ordering they encode is what #37445 item 3 was about:
+// the TLS listener cannot bind without the SVID, so IdentityIssued=False
+// alongside TunnelServing=False means the join is the cause.
+
+func conditionByType(conds []metav1.Condition, t string) *metav1.Condition {
+	for i := range conds {
+		if conds[i].Type == t {
+			return &conds[i]
+		}
+	}
+	return nil
+}
+
+func TestComputeStatus_PerRoleConditions(t *testing.T) {
+	cr := newRemoteApp()
+
+	tests := []struct {
+		name            string
+		pods            []corev1.Pod
+		wantIdentity    metav1.ConditionStatus
+		wantServing     metav1.ConditionStatus
+		wantIdentityMsg string
+		wantServingMsg  string
+	}{
+		{
+			name:            "both containers crashlooping blames the join",
+			pods:            []corev1.Pod{tunnelPod("p", reasonCrashLoopBackOff, reasonCrashLoopBackOff)},
+			wantIdentity:    metav1.ConditionFalse,
+			wantServing:     metav1.ConditionFalse,
+			wantIdentityMsg: "2470 restarts",
+			wantServingMsg:  "2474 restarts",
+		},
+		{
+			name:            "identity up and the listener down is a real TLS fault",
+			pods:            []corev1.Pod{tunnelPod("p", reasonCrashLoopBackOff, "")},
+			wantIdentity:    metav1.ConditionTrue,
+			wantServing:     metav1.ConditionFalse,
+			wantIdentityMsg: "usable identity",
+			wantServingMsg:  "2474 restarts",
+		},
+		{
+			name:            "identity down while the listener still serves",
+			pods:            []corev1.Pod{tunnelPod("p", "", reasonCrashLoopBackOff)},
+			wantIdentity:    metav1.ConditionFalse,
+			wantServing:     metav1.ConditionTrue,
+			wantIdentityMsg: "2470 restarts",
+			wantServingMsg:  "accepting connections",
+		},
+		{
+			name:            "no pods reports both as false",
+			pods:            nil,
+			wantIdentity:    metav1.ConditionFalse,
+			wantServing:     metav1.ConditionFalse,
+			wantIdentityMsg: noTbotPodsMsg,
+			wantServingMsg:  noTbotPodsMsg,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := computeStatus(cr, tc.pods, nil, "")
+
+			identity := conditionByType(got.Conditions, accessv1alpha1.ConditionTypeIdentityIssued)
+			serving := conditionByType(got.Conditions, accessv1alpha1.ConditionTypeTunnelServing)
+			if identity == nil || serving == nil {
+				t.Fatalf("want both per-role conditions, got %v", got.Conditions)
+			}
+			if identity.Status != tc.wantIdentity {
+				t.Errorf("IdentityIssued: got %q, want %q (message %q)", identity.Status, tc.wantIdentity, identity.Message)
+			}
+			if serving.Status != tc.wantServing {
+				t.Errorf("TunnelServing: got %q, want %q (message %q)", serving.Status, tc.wantServing, serving.Message)
+			}
+			if !strings.Contains(identity.Message, tc.wantIdentityMsg) {
+				t.Errorf("IdentityIssued message: want %q in %q", tc.wantIdentityMsg, identity.Message)
+			}
+			if !strings.Contains(serving.Message, tc.wantServingMsg) {
+				t.Errorf("TunnelServing message: want %q in %q", tc.wantServingMsg, serving.Message)
+			}
+		})
+	}
+}
+
+// A pod that has not created its containers yet reports neither role, which
+// is Unknown rather than False: the operator has nothing to say, and that is
+// not the same as a failure.
+func TestComputeStatus_PerRoleConditionsUnknownBeforeContainerStatuses(t *testing.T) {
+	pod := corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodPending,
+			Conditions: []corev1.PodCondition{
+				{Type: corev1.PodReady, Status: corev1.ConditionFalse},
+			},
+		},
+	}
+
+	got := computeStatus(newRemoteApp(), []corev1.Pod{pod}, nil, "")
+	for _, ct := range []string{
+		accessv1alpha1.ConditionTypeIdentityIssued,
+		accessv1alpha1.ConditionTypeTunnelServing,
+	} {
+		cond := conditionByType(got.Conditions, ct)
+		if cond == nil {
+			t.Fatalf("%s: condition missing", ct)
+		}
+		if cond.Status != metav1.ConditionUnknown {
+			t.Errorf("%s: got %q, want Unknown (message %q)", ct, cond.Status, cond.Message)
+		}
+	}
+}
+
 // computeStatus is the pure end-to-end synthesis: pods → full
 // RemoteAppStatus. Driven from a table; pins the exact Reason strings
 // automation pattern-matches on. Per ADR 0004 computeStatus emits two
