@@ -171,15 +171,9 @@ monitoring:
   prometheusRule:
     enabled: true
     # Labels for the PrometheusRule resource, merged over the chart's common
-    # labels. Mimir's rule_selector matches on
-    # observability.giantswarm.io/tenant: a rule without it is accepted by the
-    # API server and never loaded into the ruler, so its alerts never evaluate.
-    # `giantswarm` is the tenant Giant Swarm management clusters route platform
-    # alerts to. Override the key to route elsewhere, or set it to null to drop
-    # the label on installs whose ruler does not select on it.
-    # skipProperties keeps the tenant key out of the generated schema:
-    # additionalProperties already admits any label, and pinning one key's type
-    # would put an installation-specific label in the chart's contract.
+    # labels. On Giant Swarm installations this must carry 
+    # observability.giantswarm.io/tenant, which Mimir's rule_selector matches on; 
+    # a rule without it is never loaded into the ruler.
     labels:  # @schema additionalProperties: true;skipProperties: true
       observability.giantswarm.io/tenant: giantswarm
 
