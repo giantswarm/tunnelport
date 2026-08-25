@@ -45,6 +45,11 @@ Capture the JSON exactly as returned. This value is reused for every
 re-apply all tokens together if the consumer cluster ever rotates its
 service-account signing keys.
 
+For an app that already has a token because another consumer reaches it,
+merge these keys into that token's existing key set rather than
+authoring a second token. See "A second consumer reaching the same app"
+in Step 2c.
+
 > The JWKS is non-secret. It's a public verification key set; treat it
 > the same way you'd treat any OIDC discovery document.
 
@@ -166,17 +171,22 @@ trustBundle:
   tokenName: tunnelport-trust-bundle-token
 ```
 
-## Step 2 — Provision per-RemoteApp resources (once per tunnel)
+## Step 2 — Provision per-app resources (once per app, not once per consumer)
 
-Every `RemoteApp` CR on a consumer cluster requires its **own** Teleport
-bot, role, provision token, and `WorkloadIdentity`. The naming below
-assumes a CR named `<app>` deployed in namespace `<ns>`; substitute as
-appropriate.
+Every app reached by a `RemoteApp` needs its **own** Teleport bot, role,
+provision token, and `WorkloadIdentity`. The naming below assumes a CR
+named `<app>` deployed in namespace `<ns>`; substitute as appropriate.
+
+The unit is the app, not the CR. Two consumer clusters reaching the same
+app share one set of these four objects, and the token carries one JWKS
+key per consumer. Section 2c covers that case. Run Step 2 once per app,
+then only Step 0 and the 2c merge for each further consumer.
 
 Per-app isolation is deliberate: a leaked credential from one
 RemoteApp's `tbot` pod reaches only that one Teleport application.
-Sharing a bot across RemoteApps would widen blast radius without
-operational benefit.
+Sharing a bot across *apps* would widen blast radius without operational
+benefit. Sharing one across consumers of the *same* app does not: they
+already reach the same Teleport application by design.
 
 ### 2a. Role
 
@@ -262,6 +272,54 @@ spec:
 The token name (`<app>-bot-token`) is what the consumer-side platform
 engineer puts in `RemoteApp.spec.tokenName`.
 
+#### A second consumer reaching the same app
+
+One token serves every consumer of one app. A `static_jwks` token is
+**not** pinned to a single consumer cluster: `jwks` is a key set, and
+Teleport picks the key by the `kid` in the presented ServiceAccount
+token. So do not create a per-consumer token, and do not edit the
+existing token's `jwks` in place to the new consumer's document, which
+would break the consumer already using it.
+
+Instead, merge the new consumer's keys into the `keys` array and add one
+`allow` rule for its service account:
+
+```yaml
+kind: token
+version: v2
+metadata:
+  name: <app>-bot-token
+spec:
+  roles: [Bot]
+  bot_name: <app>-bot
+  join_method: kubernetes
+  kubernetes:
+    type: static_jwks
+    static_jwks:
+      jwks: |
+        {"keys":[
+          {"kid":"<consumer-1 kid>", ...},
+          {"kid":"<consumer-2 kid>", ...}
+        ]}
+    allow:
+      - service_account: "<ns>:<app>"        # consumer 1
+      - service_account: "<ns>:<app>"        # consumer 2, same ns and CR name
+```
+
+The `allow` rules are identical when both consumers install into the
+same namespace and name the CR the same, which is the normal case. Keep
+both entries anyway: the list is what you edit when a consumer leaves,
+and a single entry gives no hint that two clusters depend on it.
+
+The bot, role and `WorkloadIdentity` are reusable as they are. The
+`dns_sans` and the `remoteapp:` selector already match, because both
+consumers render the same Service name in the same namespace.
+
+Getting this wrong is silent for weeks. `tbot` keeps running on a cached
+bot identity and only has to re-join when its pod is recreated, so a
+token that admits the wrong cluster does not fail until the next pod
+restart. Run the Step 3 JWKS check before you hand the CR over.
+
 ### 2d. WorkloadIdentity
 
 The SVID this bot mints **is** presented as a server cert on the
@@ -317,6 +375,25 @@ Check:
   exactly. A mismatch here is the most frequent join failure cause and
   surfaces consumer-side as `tbot` `CrashLoopBackOff` with a join error
   in the pod logs.
+
+### The token admits this consumer's signing key
+
+The token's JWKS must contain the consumer cluster's current
+service-account signing key. Compare the two key sets directly:
+
+```sh
+tctl get token/<app>-bot-token --format=json \
+  | jq -r '.[0].spec.kubernetes.static_jwks.jwks | fromjson.keys[].kid'
+kubectl --context <consumer> get --raw /openid/v1/jwks | jq -r '.keys[].kid'
+```
+
+Every `kid` from the consumer must appear in the token's list. Run it
+once per consumer that references the token.
+
+This is the check whose absence cost five weeks in
+giantswarm/giantswarm#37445: a token carrying only the *other* consumer's
+key looks correct in `tctl get`, `allow.service_account` matches, the
+role and `WorkloadIdentity` are right, and the tunnel still cannot join.
 
 ### Bot and role are wired
 
