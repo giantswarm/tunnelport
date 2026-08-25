@@ -29,13 +29,18 @@ Common labels stamped on every operator-owned object the chart renders.
 These describe the *operator*; rendered tbot pods get a different label
 set (see CONTEXT.md / README.md "Pod labels for NetworkPolicy"), which
 is the operator code's responsibility, not the chart's.
+
+The team label reads the `io.giantswarm.application.team` annotation, which is
+the key `app-build-suite` keeps when it packages the chart. The literal
+fallback covers a source tree whose Chart.yaml uses the other spelling: the
+lookup returns an empty string there, and an empty team label routes nowhere.
 */}}
 {{- define "tunnelport.labels" -}}
 helm.sh/chart: {{ include "tunnelport.chart" . }}
 {{ include "tunnelport.selectorLabels" . }}
 app.kubernetes.io/version: {{ .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-application.giantswarm.io/team: {{ index .Chart.Annotations "application.giantswarm.io/team" | quote }}
+application.giantswarm.io/team: {{ index .Chart.Annotations "io.giantswarm.application.team" | default "bumblebee" | quote }}
 {{- end -}}
 
 {{/*

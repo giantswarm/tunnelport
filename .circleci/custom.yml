@@ -13,6 +13,28 @@
 # manage. This job is the e2e signal on PRs and gates merges as a GitHub
 # required check.
 jobs:
+  # Chart assertions (test/helm/chart_test.sh): RBAC shape, value flow, CRD
+  # gating, and the team label. helm is the only dependency, so this runs in a
+  # plain container rather than the e2e machine executor.
+  chart-test:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+    environment:
+      HELM_VERSION: v3.16.0
+    steps:
+      - checkout
+      - run:
+          name: Install helm
+          command: |
+            set -euxo pipefail
+            curl -sSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz -C /tmp
+            sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+            helm version --short
+      - run:
+          name: Run chart assertions
+          command: bash test/helm/chart_test.sh
+
   e2e-smoke:
     machine:
       # Latest Ubuntu LTS image with Docker preinstalled. kind needs
@@ -56,6 +78,12 @@ workflows:
           name: go-test
           context: architect
           test_target: test-ci
+          filters:
+            tags:
+              only: /^v.*/
+
+      - chart-test:
+          name: chart-test
           filters:
             tags:
               only: /^v.*/

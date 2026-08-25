@@ -14,6 +14,8 @@
 #      manager Deployment's CLI flags.
 #   4. CRD bundle is gated on `crds.install` and carries
 #      `helm.sh/resource-policy: keep`.
+#   5. Every rendered object carries a non-empty
+#      `application.giantswarm.io/team` label, which alert routing needs.
 #
 # We use `grep` on the rendered YAML rather than yq so the test runs in
 # any CI image with bash + helm.
@@ -47,6 +49,7 @@ assert() {
 TELEPORT_FLAGS=(
   --set teleport.clusterName=teleport.example.com
   --set teleport.proxyAddr=teleport.example.com:443
+  --set trustBundle.tokenName=chart-test
 )
 
 echo "==> helm lint"
@@ -90,8 +93,10 @@ assert "secrets rule has only read verbs" "
 echo "==> tbot value flow assertions"
 
 # 3a. Default tbot.image flows through to a --tbot-image flag on the manager.
+# Registry and name only: the tag and digest move on every renovate bump, and
+# pinning them here buys nothing the values.yaml does not already state.
 assert "default tbot.image flows to --tbot-image" \
-  "printf '%s' \"\${RENDERED}\" | grep -E -- '--tbot-image=public.ecr.aws/gravitational/tbot-distroless:18'"
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--tbot-image=gsoci[.]azurecr[.]io/giantswarm/tbot-distroless:'"
 
 # 3b. tbot.resources.requests.cpu flows.
 assert "tbot.resources.requests.cpu flows to --tbot-cpu-request" \
@@ -106,11 +111,14 @@ assert "tbot.resources.limits.memory flows to --tbot-memory-limit" \
 # 3c. Overridden values flow through too — guards against accidental hardcoding.
 # shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_OVERRIDE="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
-  --set tbot.image=ghcr.io/example/tbot:v999 \
+  --set tbot.image.registry=ghcr.io \
+  --set tbot.image.name=example/tbot \
+  --set tbot.image.tag=v999 \
+  --set tbot.image.digest= \
   --set tbot.resources.requests.cpu=123m \
   --set tbot.resources.limits.memory=999Mi)"
 assert "overridden tbot.image flows" \
-  "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-image=ghcr.io/example/tbot:v999'"
+  "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-image=ghcr.io/example/tbot:v999\$'"
 assert "overridden tbot.resources.requests.cpu flows" \
   "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-cpu-request=123m'"
 assert "overridden tbot.resources.limits.memory flows" \
@@ -133,7 +141,7 @@ echo "==> CRD bundle assertions"
 
 # 4a. CRD is rendered by default.
 assert "CRD rendered with crds.install=true (default)" \
-  "printf '%s' \"\${RENDERED}\" | grep -q '^kind: CustomResourceDefinition\$'"
+  "printf '%s' \"\${RENDERED}\" | grep '^kind: CustomResourceDefinition\$'"
 
 # 4b. CRD carries helm.sh/resource-policy: keep.
 assert "CRD has helm.sh/resource-policy: keep" \
@@ -143,20 +151,52 @@ assert "CRD has helm.sh/resource-policy: keep" \
 # shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_NO_CRDS="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" --set crds.install=false)"
 assert "CRD suppressed with crds.install=false" \
-  "! printf '%s' \"\${RENDERED_NO_CRDS}\" | grep -q '^kind: CustomResourceDefinition\$'"
+  "! printf '%s' \"\${RENDERED_NO_CRDS}\" | grep '^kind: CustomResourceDefinition\$'"
 
 # 4d. The other resources still render with crds.install=false.
 assert "Deployment still renders with crds.install=false" \
-  "printf '%s' \"\${RENDERED_NO_CRDS}\" | grep -q '^kind: Deployment\$'"
+  "printf '%s' \"\${RENDERED_NO_CRDS}\" | grep '^kind: Deployment\$'"
 
 echo "==> imagePullSecrets assertion"
 assert "manager pod references gsoci-pull-secret by default" \
   "printf '%s' \"\${RENDERED}\" \
     | awk '/kind: Deployment/{flag=1} flag && /imagePullSecrets:/{found=1} flag && found && /name: gsoci-pull-secret/{print; exit 0}; END{exit !found}'"
 
-echo "==> Chart annotation assertion"
-assert "Chart.yaml carries application.giantswarm.io/team: bumblebee" \
-  "grep -E 'application.giantswarm.io/team:[[:space:]]+bumblebee' \"${CHART}/Chart.yaml\""
+echo "==> team label assertions"
+# Alert routing keys on application.giantswarm.io/team, so an empty value is as
+# bad as a missing one. `team_values` prints the label's value once per rendered
+# object, with any surrounding quotes stripped, so the assertions below care
+# about the value and not about how the template chose to quote it.
+team_values() {
+  printf '%s' "$1" \
+    | sed -n 's|^[[:space:]]*application\.giantswarm\.io/team:[[:space:]]*||p' \
+    | sed -e 's|^"\(.*\)"$|\1|' -e "s|^'\(.*\)'$|\1|"
+}
+
+# The Chart.yaml annotation feeds both the app catalog and the label helper, so
+# assert the annotation and the rendered label separately: the two use different
+# key spellings and app-build-suite rewrites one of them at package time.
+assert "Chart.yaml carries io.giantswarm.application.team: bumblebee" \
+  "grep -E 'io.giantswarm.application.team:[[:space:]]+bumblebee' \"${CHART}/Chart.yaml\""
+
+assert "every rendered object carries team=bumblebee" \
+  "team_values \"\${RENDERED}\" | grep -c . >/dev/null && ! team_values \"\${RENDERED}\" | grep -v '^bumblebee\$'"
+
+# Which of the two annotation spellings a chart tree carries depends on whether
+# app-build-suite has packaged it. Render a copy carrying the other spelling and
+# assert the label still lands: an annotation lookup that resolves in only one
+# of the two trees renders an empty label in the other, and an empty team label
+# routes nowhere.
+OTHER_SPELLING="$(mktemp -d)"
+trap 'rm -rf "${OTHER_SPELLING}"' EXIT
+cp -r "${CHART}" "${OTHER_SPELLING}/tunnelport"
+sed -i 's|io.giantswarm.application.team: bumblebee|application.giantswarm.io/team: bumblebee|' \
+  "${OTHER_SPELLING}/tunnelport/Chart.yaml"
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_OTHER="$(helm template tunnelport "${OTHER_SPELLING}/tunnelport" "${TELEPORT_FLAGS[@]}")"
+
+assert "team label survives the other annotation spelling" \
+  "team_values \"\${RENDERED_OTHER}\" | grep -c . >/dev/null && ! team_values \"\${RENDERED_OTHER}\" | grep -v '^bumblebee\$'"
 
 echo
 echo "==> summary: ${PASS} passed, ${FAIL} failed"
