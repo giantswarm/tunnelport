@@ -47,11 +47,17 @@ const (
 	reasonContainerCreating = "ContainerCreating"
 )
 
-// RemoteApp Ready condition reasons. Kept finite and constant per
-// Kubernetes convention so automation can pattern-match on them.
+// RemoteApp condition reasons. Kept finite and constant per Kubernetes
+// convention so automation can pattern-match on them.
 const (
 	reasonTunnelReady = "TunnelReady"
 	reasonPodNotReady = "PodNotReady"
+	reasonNoPods      = "NoPods"
+
+	reasonIdentityIssued    = "IdentityIssued"
+	reasonIdentityNotIssued = "IdentityNotIssued"
+	reasonTunnelServing     = "TunnelServing"
+	reasonTunnelNotServing  = "TunnelNotServing"
 )
 
 // liveTbotPods returns the subset of pods that are not being torn down,
@@ -129,16 +135,39 @@ func errorSeverity(reason string) int {
 	}
 }
 
-// podErrorReason extracts the canonical reason string used for severity
-// ranking. Mirrors summarizePodError's source-of-truth: a Waiting
-// container's Reason wins; a Terminated container's Reason is next; the
-// pod Phase is the fallback. Empty string means "nothing to rank on".
-func podErrorReason(pod *corev1.Pod) string {
+// unreadyContainers returns the pod's unready container statuses with the
+// tbot container first. A tunnel pod runs tbot plus the ghostunnel sidecar,
+// and ghostunnel cannot bind its TLS listener until tbot has written the
+// SVID, so when both are unready tbot holds the cause and ghostunnel only
+// the symptom. Kubelet orders ContainerStatuses alphabetically, which puts
+// ghostunnel first and would otherwise send every reader of status.lastError
+// to investigate TLS instead of the Teleport join.
+func unreadyContainers(pod *corev1.Pod) []*corev1.ContainerStatus {
+	out := make([]*corev1.ContainerStatus, 0, len(pod.Status.ContainerStatuses))
+	tbot := -1
 	for i := range pod.Status.ContainerStatuses {
 		cs := &pod.Status.ContainerStatuses[i]
 		if cs.Ready {
 			continue
 		}
+		if cs.Name == tbotContainerName {
+			tbot = len(out)
+		}
+		out = append(out, cs)
+	}
+	if tbot > 0 {
+		out[0], out[tbot] = out[tbot], out[0]
+	}
+	return out
+}
+
+// podErrorReason extracts the canonical reason string used for severity
+// ranking. Mirrors summarizePodError's source-of-truth: it walks the same
+// tbot-first container order, a Waiting container's Reason wins, a
+// Terminated container's Reason is next, and the pod Phase is the
+// fallback. Empty string means "nothing to rank on".
+func podErrorReason(pod *corev1.Pod) string {
+	for _, cs := range unreadyContainers(pod) {
 		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
 			return cs.State.Waiting.Reason
 		}
@@ -161,24 +190,27 @@ func podErrorReason(pod *corev1.Pod) string {
 // guard anyway) are skipped; if everything is empty, fall back to the
 // lexicographically-first pod's summary so the choice is still stable.
 func pickWorstSummary(pods []corev1.Pod) string {
-	idx := make([]int, len(pods))
-	for i := range pods {
-		idx[i] = i
-	}
-	sort.SliceStable(idx, func(a, b int) bool {
-		pa, pb := &pods[idx[a]], &pods[idx[b]]
-		sa, sb := errorSeverity(podErrorReason(pa)), errorSeverity(podErrorReason(pb))
-		if sa != sb {
-			return sa < sb
-		}
-		return pa.Name < pb.Name
-	})
-	for _, i := range idx {
-		if msg := summarizePodError(&pods[i]); msg != "" {
+	ordered := append([]corev1.Pod(nil), pods...)
+	sortBySeverityThenName(ordered)
+	for i := range ordered {
+		if msg := summarizePodError(&ordered[i]); msg != "" {
 			return msg
 		}
 	}
-	return summarizePodError(&pods[idx[0]])
+	return summarizePodError(&ordered[0])
+}
+
+// sortBySeverityThenName orders pods in place by errorSeverity, ties broken
+// on pod name, so every caller that has to choose one pod out of many
+// chooses the same one.
+func sortBySeverityThenName(pods []corev1.Pod) {
+	sort.SliceStable(pods, func(a, b int) bool {
+		sa, sb := errorSeverity(podErrorReason(&pods[a])), errorSeverity(podErrorReason(&pods[b]))
+		if sa != sb {
+			return sa < sb
+		}
+		return pods[a].Name < pods[b].Name
+	})
 }
 
 // summarizePodError turns a single pod's k8s-visible state into a one-
@@ -189,6 +221,9 @@ func pickWorstSummary(pods []corev1.Pod) string {
 //   - "ContainerCreating: <volume mount message>"
 //   - "Failed: Evicted"
 //   - "" when Ready.
+//
+// The string describes one container: tbot when tbot is unready, otherwise
+// the sidecar. See unreadyContainers for why.
 func summarizePodError(pod *corev1.Pod) string {
 	if pod == nil {
 		return noTbotPodsMsg
@@ -198,13 +233,9 @@ func summarizePodError(pod *corev1.Pod) string {
 	}
 
 	// Container-level state is the most informative input we have when
-	// the pod is unready. Walk the container statuses and build a
-	// summary from the first one that's not Ready.
-	for i := range pod.Status.ContainerStatuses {
-		cs := &pod.Status.ContainerStatuses[i]
-		if cs.Ready {
-			continue
-		}
+	// the pod is unready. Walk the unready containers, tbot first, and
+	// build a summary from the first one that yields anything.
+	for _, cs := range unreadyContainers(pod) {
 		if msg := containerWaitingSummary(cs); msg != "" {
 			return msg
 		}
@@ -278,6 +309,90 @@ func containerTerminatedSummary(cs *corev1.ContainerStatus) string {
 	return fmt.Sprintf("Terminated: %s (%d)", t.Reason, t.ExitCode)
 }
 
+// summarizeRole reports whether one named container is ready on any live
+// pod, and if not, the summary of that container's state on the pod ranked
+// worst by pickWorstSummary's ordering. It mirrors summarizeStatus's
+// at-least-one-ready roll-up so the per-role conditions and the Ready
+// condition cannot disagree about which pods exist.
+//
+// The empty string as the second return means "no pod carries a container by
+// this name", which is distinct from "the container is unready": a pod that
+// has not created its containers yet reports neither.
+func summarizeRole(pods []corev1.Pod, container string) (bool, string) {
+	live := liveTbotPods(pods)
+	if len(live) == 0 {
+		return false, noTbotPodsMsg
+	}
+
+	var unready []corev1.Pod
+	for i := range live {
+		cs := findContainerStatus(&live[i], container)
+		if cs == nil {
+			continue
+		}
+		if cs.Ready {
+			return true, ""
+		}
+		unready = append(unready, live[i])
+	}
+	if len(unready) == 0 {
+		return false, ""
+	}
+
+	sortBySeverityThenName(unready)
+	for i := range unready {
+		cs := findContainerStatus(&unready[i], container)
+		if msg := containerWaitingSummary(cs); msg != "" {
+			return false, msg
+		}
+		if msg := containerTerminatedSummary(cs); msg != "" {
+			return false, msg
+		}
+	}
+	return false, "not ready"
+}
+
+// findContainerStatus returns the pod's status entry for one container name,
+// or nil when the pod carries no container by that name.
+func findContainerStatus(pod *corev1.Pod, container string) *corev1.ContainerStatus {
+	for i := range pod.Status.ContainerStatuses {
+		if pod.Status.ContainerStatuses[i].Name == container {
+			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
+// roleCondition builds one per-role condition from summarizeRole's output.
+// A role whose container is absent from every pod yields Status=Unknown
+// rather than False: the operator has nothing to report, which is not the
+// same as a failure.
+func roleCondition(condType string, generation int64, ready bool, summary, trueReason, falseReason, readyMessage string) metav1.Condition {
+	cond := metav1.Condition{
+		Type:               condType,
+		ObservedGeneration: generation,
+	}
+	switch {
+	case ready:
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = trueReason
+		cond.Message = readyMessage
+	case summary == "":
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = falseReason
+		cond.Message = "no container status yet"
+	case summary == noTbotPodsMsg:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonNoPods
+		cond.Message = summary
+	default:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = falseReason
+		cond.Message = summary
+	}
+	return cond
+}
+
 // computeStatus derives the full RemoteAppStatus from k8s-visible inputs.
 // Pure: no I/O, no logging. meta.SetStatusCondition uses metav1.Now() for
 // LastTransitionTime — that's library-imposed and stripped by statusEqual.
@@ -312,6 +427,24 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditio
 		readyCond.Message = "tbot tunnel ready"
 	}
 	meta.SetStatusCondition(&conditions, readyCond)
+
+	// Per-role conditions, so a reader sees the join and the TLS listener at
+	// once instead of only whichever one lastError had room for.
+	identityReady, identitySummary := summarizeRole(pods, tbotContainerName)
+	meta.SetStatusCondition(&conditions, roleCondition(
+		accessv1alpha1.ConditionTypeIdentityIssued, cr.Generation,
+		identityReady, identitySummary,
+		reasonIdentityIssued, reasonIdentityNotIssued,
+		"tbot reports a usable identity",
+	))
+
+	servingReady, servingSummary := summarizeRole(pods, ghostunnelContainerName)
+	meta.SetStatusCondition(&conditions, roleCondition(
+		accessv1alpha1.ConditionTypeTunnelServing, cr.Generation,
+		servingReady, servingSummary,
+		reasonTunnelServing, reasonTunnelNotServing,
+		"TLS listener is accepting connections",
+	))
 
 	reconciledCond := metav1.Condition{
 		Type:               accessv1alpha1.ConditionTypeReconciled,
@@ -351,7 +484,7 @@ func readyConditionReason(ready bool, lastError string) string {
 		return reasonTunnelReady
 	}
 	if lastError == noTbotPodsMsg {
-		return "NoPods"
+		return reasonNoPods
 	}
 	return reasonPodNotReady
 }

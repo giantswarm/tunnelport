@@ -104,6 +104,8 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="Port",type=integer,JSONPath=`.spec.port`
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:printcolumn:name="Identity",type=string,JSONPath=`.status.conditions[?(@.type=="IdentityIssued")].status`,priority=1
+// +kubebuilder:printcolumn:name="Serving",type=string,JSONPath=`.status.conditions[?(@.type=="TunnelServing")].status`,priority=1
 // +kubebuilder:printcolumn:name="LastError",type=string,JSONPath=`.status.lastError`,priority=1
 // +kubebuilder:printcolumn:name="Reconciled",type=string,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`,priority=1
 

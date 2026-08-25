@@ -29,6 +29,8 @@ func TestConditionTypes(t *testing.T) {
 	}{
 		{got: ConditionTypeReady, want: "Ready"},
 		{got: ConditionTypeReconciled, want: "Reconciled"},
+		{got: ConditionTypeIdentityIssued, want: "IdentityIssued"},
+		{got: ConditionTypeTunnelServing, want: "TunnelServing"},
 	}
 
 	for _, c := range cases {

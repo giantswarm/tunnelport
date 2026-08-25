@@ -31,4 +31,29 @@ const (
 	// (Reconciled=False) while the tunnel is still serving traffic from a
 	// previously-successful apply (Ready=True).
 	ConditionTypeReconciled = "Reconciled"
+
+	// ConditionTypeIdentityIssued reports whether tbot holds a usable
+	// Teleport identity. It is named for the role rather than the container,
+	// so swapping which container performs the join does not rename a piece
+	// of the API.
+	//
+	// The source is the tbot container's readiness, whose probe is wired to
+	// tbot's diag endpoint. That is k8s-visible state, which is the only
+	// input ADR 0003 permits status to derive from: the ADR rejected
+	// conditions of this shape when they would come from parsing tbot's
+	// logs, not the conditions themselves. So this asserts what the probe
+	// reports, and never that a credential was seen on disk.
+	ConditionTypeIdentityIssued = "IdentityIssued"
+
+	// ConditionTypeTunnelServing reports whether the TLS listener that
+	// fronts the tunnel accepts connections. Also named for the role: the
+	// sidecar that terminates TLS today is ghostunnel (ADR 0007), and the
+	// condition outlives that choice.
+	//
+	// It is distinct from IdentityIssued because the two fail in a fixed
+	// order. The listener cannot bind without the SVID, so
+	// IdentityIssued=False with TunnelServing=False means the join is the
+	// cause and TLS is the symptom, while IdentityIssued=True with
+	// TunnelServing=False is a genuine TLS-side fault.
+	ConditionTypeTunnelServing = "TunnelServing"
 )
