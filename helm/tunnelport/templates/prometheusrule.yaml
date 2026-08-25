@@ -6,6 +6,11 @@
 # expr keys on the two container names (constants in the operator's
 # renderer) rather than a pod label, since kube-state-metrics exposes
 # `container` directly but pod labels only via a kube_pod_labels join.
+#
+# `monitoring.prometheusRule.labels` defaults to carrying
+# `observability.giantswarm.io/tenant`. Mimir's `rule_selector` matches on it:
+# a rule without it is accepted by the API server and never loaded into the
+# ruler, so the alerts below silently never evaluate.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
