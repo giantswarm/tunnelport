@@ -12,10 +12,17 @@ clusterName: smoke.tunnelport.local
 # publicAddr is what the proxy advertises to clients (kube-agent, tbot)
 # for reverse-tunnel reconnects. Without it the proxy hands out
 # "smoke.tunnelport.local:443" and peer kind clusters cannot resolve
-# that name. Replace via `helm upgrade --set` after the
-# teleport-control-plane node IP is discovered (see runbook step 2).
-# The placeholder here keeps the chart installable on first try; the
-# runbook re-installs with the real IP.
+# that name.
+#
+# This placeholder MUST be substituted before the chart is installed —
+# it is never installed as-is. run.sh (and the runbook) compute
+# "<control-plane container IP>:<pinned NodePort>" up front and sed it
+# in, so the proxy comes up advertising the real address on its first
+# and only start. A proxy that ever runs with the placeholder
+# registers a proxy heartbeat carrying it; the heartbeat outlives the
+# pod by its announce TTL, and the producer's app agent then derives
+# smoke-app's public address from whichever heartbeat it happens to
+# read. That was the ~50% e2e-smoke flake in #92.
 publicAddr:
   - "REPLACE_WITH_TELEPORT_PROXY_ADDR"
 
@@ -27,19 +34,21 @@ proxyListenerMode: multiplex
 # back to a self-signed CA which Teleport regenerates on install.
 acme: false
 
-# Expose the proxy as NodePort so peer kind clusters can reach it on
-# the kind Docker network via the control-plane node container's IP.
-# (LoadBalancer is the chart default, but kind has no LB controller —
-# the Service would sit Pending forever.)
+# Peer kind clusters reach the proxy over the kind Docker network via
+# the control-plane node container's IP and a NodePort — but NOT this
+# Service's. The chart offers no nodePort knob: it splices
+# `service.spec` into the Service and then emits its own hardcoded
+# `ports:` list, so a `service.spec.ports` here renders a duplicate
+# YAML key and the chart's copy (no nodePort) wins. The port would be
+# auto-assigned, hence unknowable until after the install — which is
+# exactly what forced the old two-pass install and the flake in #92.
+#
+# So the proxy's ingress path is hack/smoke/teleport/proxy-nodeport.yaml,
+# a Service we own on a pinned port, and the chart's Service is
+# ClusterIP. (LoadBalancer is the chart default, but kind has no LB
+# controller — the Service would sit Pending forever.)
 service:
-  type: NodePort
-  spec:
-    ports:
-      - name: tls
-        port: 443
-        targetPort: 3080
-        nodePort: 30443
-        protocol: TCP
+  type: ClusterIP
 
 # Single-replica auth + proxy is enough for smoke; the chart's default
 # storage backend (sqlite on a PVC) is fine because we tear the cluster

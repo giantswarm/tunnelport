@@ -70,14 +70,43 @@ TBOT_MAJOR="$(helm template ./helm/tunnelport |
 TELEPORT_CHART_VERSION="$(helm search repo teleport/teleport-cluster --versions -o json |
   jq -r --arg M "${TBOT_MAJOR}" '[.[] | select(.version | startswith($M+"."))] | first | .version')"
 
-# First install — uses the placeholder publicAddr in helm-values.yaml.
-# We come back in step 2 with the real proxy address.
+# Discover the proxy address BEFORE installing the chart. Both halves
+# are already known at this point: the IP because the kind node
+# container exists, and the port because we pin it ourselves in
+# proxy-nodeport.yaml (the chart has no nodePort knob — see that file).
+TELEPORT_PROXY_IP=$(docker inspect teleport-control-plane \
+  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
+TELEPORT_PROXY_NODEPORT=$(sed -n \
+  's/^[[:space:]]*nodePort:[[:space:]]*\([0-9]\{1,\}\)[[:space:]]*$/\1/p' \
+  hack/smoke/teleport/proxy-nodeport.yaml | head -1)
+TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${TELEPORT_PROXY_NODEPORT}"
+echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
+
+# The pinned NodePort Service goes in first, so the port is reserved
+# and the proxy's ingress path exists before any proxy pod does.
+kubectl --context kind-teleport create namespace teleport
+kubectl --context kind-teleport apply -f hack/smoke/teleport/proxy-nodeport.yaml
+
+# One install, with the real publicAddr already substituted. Do NOT
+# install helm-values.yaml unsubstituted and fix it up afterwards: a
+# proxy that boots with the REPLACE_WITH_TELEPORT_PROXY_ADDR
+# placeholder registers a proxy heartbeat carrying it, the heartbeat
+# outlives the pod by its announce TTL, and step 5's app agent then
+# derives smoke-app's public address from whichever heartbeat it
+# reads. That was the ~50% flake in #92.
+sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
+  hack/smoke/teleport/helm-values.yaml > /tmp/teleport-values.yaml
+
 helm --kube-context kind-teleport upgrade --install teleport-cluster \
   teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
-  --create-namespace --namespace teleport \
-  --values hack/smoke/teleport/helm-values.yaml \
+  --namespace teleport --values /tmp/teleport-values.yaml \
   --wait --timeout 5m
 ```
+
+Keep `TELEPORT_PROXY_ADDR` in scope; later steps reference it in
+`sed` calls. If you start a new shell, re-run the `docker inspect` +
+`sed` pair — the IP is stable for the lifetime of the kind cluster but
+does not survive a recreate, and the port is a constant.
 
 What's happening: the chart deploys split auth + proxy `Deployments`
 with `proxyListenerMode=multiplex`, so every Teleport protocol shares
@@ -87,44 +116,37 @@ is why the consumer's tbot (`--tbot-insecure=true`) and the producer's
 kube-agent (`insecureSkipProxyTLSVerify: true`) skip TLS verification
 in step 5+.
 
-The proxy is exposed via a `NodePort` Service so peer kind clusters
-can reach it on the kind-teleport node container's IP within the
-`kind` Docker network.
+The proxy is exposed via the `NodePort` Service applied above, so peer
+kind clusters can reach it on the kind-teleport node container's IP
+within the `kind` Docker network. The chart's own proxy Service stays
+`ClusterIP`.
 
-## 2. Network setup: discover the proxy address, then re-apply with publicAddr
+## 2. Network setup: verify what the proxy advertises
 
 The proxy advertises a `publicAddr` to clients for reverse-tunnel
 reconnects. Without overriding it, the proxy hands out
 `smoke.tunnelport.local:443` — a name peer kind clusters cannot
-resolve — and kube-agent / tbot fail with DNS errors. We discover the
-real address and re-apply the chart with it.
+resolve — and kube-agent / tbot fail with DNS errors. Step 1
+substituted the discovered address; these two checks confirm it took,
+and they are worth running by hand because everything downstream
+derives its address from them.
 
 ```bash
-# Discover the kind container's IP on the `kind` Docker network.
-TELEPORT_PROXY_IP=$(docker inspect teleport-control-plane \
-  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
+# 1. Our Service's selector still matches the chart's proxy pods.
+#    Empty output here means upstream renamed a label.
+kubectl --context kind-teleport -n teleport get endpoints \
+  teleport-proxy-nodeport -o jsonpath='{.subsets[*].addresses[*].ip}'
 
-# The proxy's NodePort is auto-assigned by Kubernetes; read it back.
-NODEPORT=$(kubectl --context kind-teleport -n teleport get svc \
-  teleport-cluster -o jsonpath='{.spec.ports[0].nodePort}')
-
-TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${NODEPORT}"
-echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
-
-# Re-apply the chart with publicAddr set to the discovered address.
-sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
-  hack/smoke/teleport/helm-values.yaml > /tmp/teleport-values.yaml
-
-helm --kube-context kind-teleport upgrade teleport-cluster \
-  teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
-  --namespace teleport --values /tmp/teleport-values.yaml \
-  --wait --timeout 3m
+# 2. Every proxy heartbeat in the auth backend advertises the real
+#    address and none carries the placeholder. Teleport lowercases it.
+AUTH_POD=$(kubectl --context kind-teleport -n teleport get pods \
+  -l app.kubernetes.io/component=auth -o jsonpath='{.items[0].metadata.name}')
+kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+  tctl get proxies | grep -E 'name:|public_addr'
 ```
 
-Keep `TELEPORT_PROXY_ADDR` in scope; later steps reference it in
-`sed` calls. If you start a new shell, re-run the `docker inspect` +
-`kubectl get svc` pair — the IP and NodePort are stable for the
-lifetime of the kind cluster but do not survive a recreate.
+The second command must show `${TELEPORT_PROXY_IP}` and must not show
+`replace_with_teleport_proxy_addr`. `run.sh` asserts both.
 
 ## 3. Provision the producer agent token
 
@@ -363,13 +385,17 @@ The most common smoke-test failures:
   is unset in step 6b's `helm install`. Re-run with `--set
   tbot.insecure=true`. (The kube-agent has the equivalent
   `insecureSkipProxyTLSVerify: true` baked into its values file.)
-- *"failed to dial: dial tcp: lookup smoke.tunnelport.local"* — step 2
-  was skipped or its `helm upgrade` did not pick up the discovered
-  proxy address. The proxy is still advertising
-  `smoke.tunnelport.local:443` as `publicAddr`. Re-run step 2,
-  observing that `/tmp/teleport-values.yaml` contains the discovered
-  IP+nodeport, then `kubectl rollout restart` the kube-agent and
-  consumer's tbot Deployment.
+- *"failed to dial: dial tcp: lookup smoke.tunnelport.local"* — the
+  `sed` in step 1 did not substitute, so the proxy is still
+  advertising `smoke.tunnelport.local:443` as `publicAddr`. Check that
+  `/tmp/teleport-values.yaml` contains the discovered IP+nodeport.
+- *"no application smoke-app at smoke-app.replace_with_teleport_proxy_addr
+  found"* in the producer's kube-agent — a proxy booted with the
+  unsubstituted placeholder at some point and its heartbeat is still
+  in the auth backend. Do not try to patch around it by rolling the
+  proxy: a roll adds a heartbeat rather than replacing the stale one.
+  Tear the teleport cluster down and redo step 1 as a single
+  substituted install. This was #92.
 - *"role smoke-app-tunnel not found"* — step 4a was skipped or the
   role file failed to apply. `tctl get roles | grep smoke` on the
   auth pod.
