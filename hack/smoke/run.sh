@@ -60,7 +60,7 @@ HELM_WAIT="${HELM_WAIT:-180}"
 # (shared app.kubernetes.io/{name,instance} selector labels), and
 # kind ≥ v0.24 enforces NetworkPolicy (kube-network-policies embedded
 # in kindnetd, nfqueue, fail-open). The policy's egress allows only
-# DNS/443/6443, so the bot's dial to the random proxy NodePort
+# DNS/443/6443, so the bot's dial to the proxy NodePort
 # (30000-32767) was dropped whenever enforcement was active; runs
 # passed only when the bot's first join raced ahead of kindnet's
 # pod-IP sync (fail-open window). Fixed by excluding role-labeled
@@ -173,7 +173,7 @@ echo "All three kind clusters ready."
 step "Loading operator image into consumer cluster"
 kind load docker-image "${OPERATOR_IMAGE}" --name consumer >/dev/null
 
-step "Installing Teleport (first pass — placeholder publicAddr)"
+step "Installing Teleport"
 helm repo add teleport https://charts.releases.teleport.dev >/dev/null 2>&1 || true
 helm repo update >/dev/null
 
@@ -209,28 +209,105 @@ if [ -z "${TELEPORT_CHART_VERSION}" ]; then
   echo "Resolved TELEPORT_CHART_VERSION=${TELEPORT_CHART_VERSION} from chart's tbot.image major ${TBOT_MAJOR}."
 fi
 
-helm --kube-context kind-teleport upgrade --install teleport-cluster \
-  teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
-  --create-namespace --namespace teleport \
-  --values hack/smoke/teleport/helm-values.yaml \
-  --wait --timeout "${HELM_WAIT}s" >/dev/null
-
-step "Discovering proxy address and re-applying with publicAddr"
+# Single-phase install (#92). The proxy must never run with the
+# unsubstituted REPLACE_WITH_TELEPORT_PROXY_ADDR placeholder, not even
+# briefly: a proxy registers its advertised address as a proxy
+# heartbeat in the auth backend, and that heartbeat outlives the pod by
+# its announce TTL. The producer's app agent then derives smoke-app's
+# address in Teleport's FindPublicAddr (lib/srv/app/watcher.go), which
+# reads `GetProxies()` and takes **servers[0]** — the *first* proxy in
+# the list, not the newest. So one placeholder-serving proxy start is
+# enough to register smoke-app at
+# `smoke-app.replace_with_teleport_proxy_addr` and fail the curl
+# assertion minutes later, depending only on list order: a coin flip.
+#
+# Note this rules out the obvious-looking fixes. `helm upgrade --wait`
+# already rolls the proxy (the chart puts a `checksum/config`
+# annotation on the Deployment), so the running pod was never the
+# problem — the stale backend entry was. And rolling the proxy again
+# cannot help: a roll *adds* a heartbeat, it does not evict the stale
+# one.
+#
+# So both halves of TELEPORT_PROXY_ADDR are resolved BEFORE the install:
+#   - the IP: the kind node container already exists (created above), so
+#     `docker inspect` works.
+#   - the port: pinned by hack/smoke/teleport/proxy-nodeport.yaml, a
+#     Service we own, because the chart has no nodePort knob (see the
+#     comments in that file and in helm-values.yaml). It is applied
+#     below, before the chart, so kube reserves the port for us.
+#
+# That manifest is the single source of truth for the port; read it back
+# rather than restating it here, so the two can never drift.
+TELEPORT_PROXY_NODEPORT="$(sed -n 's/^[[:space:]]*nodePort:[[:space:]]*\([0-9]\{1,\}\)[[:space:]]*$/\1/p' \
+  hack/smoke/teleport/proxy-nodeport.yaml | head -1)"
+if ! printf '%s' "${TELEPORT_PROXY_NODEPORT}" | grep -qE '^[0-9]+$'; then
+  warn "Could not read the pinned nodePort from hack/smoke/teleport/proxy-nodeport.yaml (got: '${TELEPORT_PROXY_NODEPORT}')."
+  exit 1
+fi
 TELEPORT_PROXY_IP="$(docker inspect teleport-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')"
-NODEPORT="$(kubectl --context kind-teleport -n teleport get svc teleport-cluster -o jsonpath='{.spec.ports[0].nodePort}')"
-TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${NODEPORT}"
+TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${TELEPORT_PROXY_NODEPORT}"
 echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
+
+# The namespace and the pinned Service come first so the proxy's
+# ingress path exists before any proxy pod does. `helm --wait` below
+# then covers both. The Service selects the chart's proxy pods, so it
+# sits Endpoint-less until they are Ready — asserted right after.
+kubectl --context kind-teleport create namespace teleport \
+  --dry-run=client -o yaml | kubectl --context kind-teleport apply -f - >/dev/null
+kubectl --context kind-teleport apply -f hack/smoke/teleport/proxy-nodeport.yaml >/dev/null
 
 sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
   hack/smoke/teleport/helm-values.yaml > "${TELEPORT_VALUES_FILE}"
-helm --kube-context kind-teleport upgrade teleport-cluster \
+helm --kube-context kind-teleport upgrade --install teleport-cluster \
   teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
   --namespace teleport --values "${TELEPORT_VALUES_FILE}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
+step "Asserting the proxy is reachable on the pinned NodePort"
+# Endpoints on our Service prove its selector still matches the chart's
+# proxy pods. If upstream ever renames those labels this is where it
+# surfaces, instead of as an i/o timeout from a peer cluster's tbot.
+PROXY_ENDPOINTS=""
+for _ in $(seq 1 30); do
+  PROXY_ENDPOINTS="$(kubectl --context kind-teleport -n teleport get endpoints teleport-proxy-nodeport \
+    -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || true)"
+  [[ -n "${PROXY_ENDPOINTS}" ]] && break
+  sleep 2
+done
+if [[ -z "${PROXY_ENDPOINTS}" ]]; then
+  warn "Service teleport-proxy-nodeport has no endpoints after 60s — its selector no longer matches the chart's proxy pods."
+  kubectl --context kind-teleport -n teleport get pods \
+    -l app.kubernetes.io/component=proxy --show-labels >&2 || true
+  exit 1
+fi
+echo "teleport-proxy-nodeport endpoints: ${PROXY_ENDPOINTS}"
+
 step "Provisioning Teleport role, WorkloadIdentity, bot, and producer agent token via tctl"
 AUTH_POD="$(kubectl --context kind-teleport -n teleport get pods \
   -l app.kubernetes.io/component=auth -o jsonpath='{.items[0].metadata.name}')"
+
+# Guard the #92 invariant at its source, before anything derives an
+# address from it: every proxy heartbeat in the auth backend advertises
+# the address we substituted, and none carries the placeholder. Teleport
+# lowercases it, hence -i.
+PROXIES_LAST=""
+PROXIES_OK=0
+for _ in $(seq 1 30); do
+  PROXIES_LAST="$(kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+    tctl get proxies 2>/dev/null || true)"
+  if printf '%s' "${PROXIES_LAST}" | grep -qF "${TELEPORT_PROXY_IP}" &&
+     ! printf '%s' "${PROXIES_LAST}" | grep -qi 'replace_with_teleport_proxy_addr'; then
+    PROXIES_OK=1
+    break
+  fi
+  sleep 2
+done
+if [[ "${PROXIES_OK}" -ne 1 ]]; then
+  warn "No proxy heartbeat advertising ${TELEPORT_PROXY_ADDR}, or one still carries the publicAddr placeholder (#92)."
+  printf '%s\n' "${PROXIES_LAST}" | grep -E 'name:|public_addr' >&2 || true
+  exit 1
+fi
+echo "All proxy heartbeats advertise ${TELEPORT_PROXY_IP}."
 
 # Roles first — bot creation references them; the per-RemoteApp role
 # also gates SVID issuance for the per-RemoteApp WorkloadIdentity
@@ -282,22 +359,42 @@ helm --kube-context kind-producer upgrade --install teleport-kube-agent \
   --values "${KUBE_AGENT_VALUES_FILE}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
-step "Verifying smoke-app registered with Teleport"
+step "Verifying smoke-app registered with Teleport at the expected public address"
 # Heartbeat-based registration; appears in app_servers, not the static `apps`.
+#
+# Assert the ADDRESS, not just the name (#92). smoke-app sets no
+# explicit public_addr, so Teleport derives one as
+# `DefaultAppPublicAddr(appName, addr.Host())` — literally
+# "<app>.<host of the proxy's advertised address>", port stripped.
+# A proxy serving the placeholder therefore still registers a perfectly
+# well-named `smoke-app`, just at
+# `smoke-app.replace_with_teleport_proxy_addr`. Grepping for the name
+# alone passed on exactly those runs, and the real fault surfaced three
+# minutes later as an opaque `timed out waiting for the condition on
+# jobs/smoke-curl`.
+EXPECTED_APP_ADDR="smoke-app.${TELEPORT_PROXY_IP}"
+APP_SERVERS_LAST=""
 APP_SERVERS_OK=0
 for _ in $(seq 1 30); do
-  if kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-      tctl get app_servers 2>/dev/null | grep -q 'name: smoke-app'; then
+  APP_SERVERS_LAST="$(kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+    tctl get app_servers 2>/dev/null || true)"
+  if printf '%s' "${APP_SERVERS_LAST}" | grep -q 'name: smoke-app' &&
+     printf '%s' "${APP_SERVERS_LAST}" | grep -qF "${EXPECTED_APP_ADDR}"; then
     APP_SERVERS_OK=1
     break
   fi
   sleep 2
 done
 if [[ "${APP_SERVERS_OK}" -ne 1 ]]; then
-  warn "smoke-app did not register as an app_server within 60s"
+  if printf '%s' "${APP_SERVERS_LAST}" | grep -qi 'replace_with_teleport_proxy_addr'; then
+    warn "smoke-app registered at the publicAddr placeholder instead of ${EXPECTED_APP_ADDR} — the #92 regression is back."
+  else
+    warn "smoke-app did not register as an app_server at ${EXPECTED_APP_ADDR} within 60s"
+  fi
+  printf '%s\n' "${APP_SERVERS_LAST}" | grep -E 'name:|public_addr|uri:' >&2 || true
   exit 1
 fi
-echo "smoke-app present in app_servers."
+echo "smoke-app present in app_servers at ${EXPECTED_APP_ADDR}."
 
 step "Exporting consumer cluster JWKS and creating the kubernetes-join bot tokens"
 # ADR 0004 / ADR 0008: both kubernetes-join tokens carry the consumer
@@ -385,7 +482,7 @@ kubectl --context kind-consumer apply --server-side -f \
 step "Installing the operator on the consumer cluster"
 # teleport.clusterName matches the Teleport cluster name configured in
 # hack/smoke/teleport/helm-values.yaml; teleport.proxyAddr is the
-# kind-discovered NodePort proxy address (ADR 0005).
+# kind node container IP plus the pinned proxy NodePort (ADR 0005).
 # trustBundle.tokenName names the ProvisionToken created above —
 # without it the singleton tbot the chart ships fails to join (ADR 0008).
 helm --kube-context kind-consumer upgrade --install tunnelport \

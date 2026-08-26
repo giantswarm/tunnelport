@@ -1,0 +1,51 @@
+# Pinned NodePort Service for the Teleport proxy.
+#
+# Why this exists instead of a `nodePort:` in helm-values.yaml: the
+# teleport-cluster chart splices `service.spec` into the Service and
+# THEN emits its own hardcoded `ports:` list
+# (templates/proxy/service.yaml). A `service.spec.ports` in our values
+# therefore renders a duplicate `ports` YAML key, and the chart's copy
+# — which has no `nodePort` — is the one that survives parsing. The
+# chart exposes no other nodePort knob, so the proxy's NodePort is
+# always auto-assigned from the ephemeral range.
+#
+# The smoke needs the opposite: a port known BEFORE the chart is
+# installed, so `publicAddr` can be correct on the very first (and
+# only) install. A proxy that ever comes up advertising the
+# `REPLACE_WITH_TELEPORT_PROXY_ADDR` placeholder registers a proxy
+# heartbeat carrying it, that heartbeat outlives the pod by its
+# announce TTL, and the producer's app agent derives `smoke-app`'s
+# public address from whichever heartbeat it reads — a coin flip
+# between the placeholder and the real address. See #92.
+#
+# So we own the ingress path: the chart's own Service is ClusterIP
+# (helm-values.yaml) and this one is the single NodePort peer kind
+# clusters dial, on a port we choose.
+#
+# The selector is the chart's proxy selector
+# (`teleport-cluster.proxy.selectorLabels`) with `.Release.Name` =
+# teleport-cluster. run.sh asserts this Service has endpoints after
+# the install, so a chart-side label change fails loudly there rather
+# than as a mystery connection timeout later.
+apiVersion: v1
+kind: Service
+metadata:
+  name: teleport-proxy-nodeport
+  namespace: teleport
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: teleport-cluster
+    app.kubernetes.io/instance: teleport-cluster
+    app.kubernetes.io/component: proxy
+  ports:
+    # 30443 is arbitrary but must stay inside kube's node-port range
+    # (30000-32767). run.sh reads this value back out of this file to
+    # build TELEPORT_PROXY_ADDR, so this line is the only place the
+    # port is defined — change it here and nowhere else.
+    # targetPort 3080 is the proxy pod's multiplexed TLS listener.
+    - name: tls
+      port: 443
+      targetPort: 3080
+      nodePort: 30443
+      protocol: TCP

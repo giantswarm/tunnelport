@@ -12,10 +12,12 @@
 # hack/smoke/teleport/tokens.yaml.
 authToken: REPLACE_WITH_PRODUCER_AGENT_TOKEN
 
-# REPLACE: the Teleport proxy address discovered in step "Network
-# setup" of the runbook. Format: "<ip>:443" — for example,
-# "172.18.0.4:443". The teleport-cluster proxyListenerMode=multiplex
-# lets every Teleport protocol share this one port.
+# REPLACE: the Teleport proxy address resolved in step 1 of the
+# runbook — the kind control-plane container's IP plus the NodePort
+# pinned in hack/smoke/teleport/proxy-nodeport.yaml. Format
+# "<ip>:<nodeport>", for example "172.18.0.4:30443". The
+# teleport-cluster proxyListenerMode=multiplex lets every Teleport
+# protocol share this one port.
 proxyAddr: REPLACE_WITH_TELEPORT_PROXY_ADDR
 
 # Self-signed CA on the smoke control plane — skip cert verification
