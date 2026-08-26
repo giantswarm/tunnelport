@@ -282,11 +282,6 @@ func requireOrExit(name, value string, pattern *regexp.Regexp) string {
 // The Teleport binding (ADR 0005) is validated via requireOrExit — both
 // values are required and shape-checked at startup.
 func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
-	if f.ghostunnelListenPort < 1 || f.ghostunnelListenPort > 65535 {
-		setupLog.Error(nil, "invalid --ghostunnel-listen-port (must be 1-65535)",
-			"value", f.ghostunnelListenPort)
-		os.Exit(1)
-	}
 	return remoteappctrl.PodDefaults{
 		TbotImage: f.tbotImage,
 		Resources: corev1.ResourceRequirements{
@@ -308,8 +303,24 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 		),
 		GhostunnelImage:          f.ghostunnelImage,
 		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
-		GhostunnelListenPort:     int32(f.ghostunnelListenPort), // #nosec G115 -- bounded to 1..65535 above
+		GhostunnelListenPort:     ghostunnelListenPortOrExit(f),
 	}
+}
+
+// ghostunnelListenPortOrExit validates --ghostunnel-listen-port and returns it
+// as the int32 both the renderer and the TLS verifier need.
+//
+// Shared rather than checked inline in buildReconcilerConfig because both
+// callers cast the same flag, and whichever one ran first would otherwise be
+// doing an unvalidated conversion — the kind of ordering dependency that is
+// correct today and silently wrong after the next edit to main().
+func ghostunnelListenPortOrExit(f flags) int32 {
+	if f.ghostunnelListenPort < 1 || f.ghostunnelListenPort > 65535 {
+		setupLog.Error(nil, "invalid --ghostunnel-listen-port (must be 1-65535)",
+			"value", f.ghostunnelListenPort)
+		os.Exit(1)
+	}
+	return int32(f.ghostunnelListenPort) // #nosec G115 -- bounded to 1..65535 above
 }
 
 // buildVerifyConfig translates the verification flags into the
@@ -347,7 +358,7 @@ func buildVerifyConfig(f flags) remoteappctrl.VerifyConfig {
 		// value the renderer stamps onto the ghostunnel container and the
 		// Service, so the probe can never target a port nothing listens
 		// on.
-		TLSPort: int32(f.ghostunnelListenPort), // #nosec G115 -- bounded to 1..65535 by buildReconcilerConfig
+		TLSPort: ghostunnelListenPortOrExit(f),
 	}
 }
 

@@ -548,6 +548,11 @@ func probeTLS(ctx context.Context, addr, serverName string, roots *x509.CertPool
 		v.Detail = describeHandshakeError(serverName, err)
 		return v
 	}
+	// Close the TLS layer rather than only the socket, so the peer gets a
+	// close_notify instead of a reset. The deferred conn.Close above is
+	// still the safety net; this just keeps ghostunnel from logging a
+	// broken connection for every probe of every tunnel, forever.
+	_ = tlsConn.Close()
 	v.Result = ResultVerified
 	return v
 }
