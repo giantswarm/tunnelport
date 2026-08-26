@@ -60,6 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `test/helm/chart_test.sh` renders again and runs in CI as the `chart-test`
   job.
 
+- The `e2e-smoke` job is no longer flaky (#92). It failed on roughly half of all
+  runs, on unchanged content, because `hack/smoke/run.sh` installed the
+  teleport-cluster chart twice — first with `publicAddr` left as its
+  `REPLACE_WITH_TELEPORT_PROXY_ADDR` placeholder, since the proxy's NodePort was
+  not knowable until the Service existed. A proxy registers its advertised
+  address as a heartbeat that outlives the pod, and Teleport derives an app's
+  public address from the *first* proxy in that list, so `smoke-app` registered
+  at either the real address or the placeholder depending on list order. The
+  smoke now pins the proxy's NodePort in a Service it owns and installs the
+  chart once, with the address already substituted. It also asserts the address
+  `smoke-app` registered at, instead of only its name, so a recurrence fails at
+  that step rather than three minutes later as an opaque curl timeout.
+
 ## [1.0.4] - 2026-06-16
 
 ### Fixed
