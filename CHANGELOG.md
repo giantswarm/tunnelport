@@ -35,7 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `monitoring.podMonitor.enabled` (default `true`) renders a PodMonitor for the
   manager pods. Until now the chart rendered no Service and no ServiceMonitor,
   so every `tunnelport_*` metric was served and never collected — a
-  PrometheusRule over metrics nobody scrapes cannot fire.
+  PrometheusRule over metrics nobody scrapes cannot fire. Confirmed against a
+  live installation: no `tunnelport_*` series existed in Mimir at all.
+- `monitoring.podMonitor.labels`, merged into the PodMonitor's labels and
+  defaulting to `observability.giantswarm.io/tenant: giantswarm`. Giant Swarm's
+  monitoring agent selects PodMonitors by a label on the PodMonitor object —
+  either that tenant label, or `application.giantswarm.io/team` via a selector
+  its own config calls legacy. The chart's common labels satisfy the legacy
+  path, so this is about being on the supported selector rather than about
+  working at all; a PodMonitor matching neither is created and silently never
+  scraped.
 - Three alerts on the PrometheusRule:
   - `TunnelPortTunnelCertificateInvalid`: a tunnel has served a certificate that
     fails verification for 20m (`for:` long enough to ride out a rollout and an

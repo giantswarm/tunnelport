@@ -56,7 +56,7 @@ Teleport-exposed app as if it were a local Service.
 | monitoring.podMonitor.enabled | bool | `true` |  |
 | monitoring.podMonitor.interval | string | `"60s"` |  |
 | monitoring.podMonitor.scrapeTimeout | string | `"30s"` |  |
-| monitoring.podMonitor.labels | object | `{}` |  |
+| monitoring.podMonitor.labels."observability.giantswarm.io/tenant" | string | `"giantswarm"` |  |
 | monitoring.prometheusRule.enabled | bool | `true` |  |
 | monitoring.prometheusRule.labels."observability.giantswarm.io/tenant" | string | `"giantswarm"` |  |
 | ports.metrics | int | `8080` |  |

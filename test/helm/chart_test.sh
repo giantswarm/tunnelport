@@ -199,8 +199,15 @@ assert "an unrelated extra label does not displace the tenant default" \
 # shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_NO_TENANT="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
   --set 'monitoring.prometheusRule.labels.observability\.giantswarm\.io/tenant=null')"
-assert "setting the tenant key to null drops the label" \
-  "! printf '%s' \"\${RENDERED_NO_TENANT}\" | grep -F 'observability.giantswarm.io/tenant:'"
+# Scoped to the PrometheusRule: the PodMonitor carries the same label from its
+# own value, so a whole-render grep would now be answering a different
+# question than the one this assertion is about.
+assert "setting the tenant key to null drops the label from the PrometheusRule" \
+  "! printf '%s' \"\${RENDERED_NO_TENANT}\" | awk '
+      /kind: PrometheusRule/ { pr=1 }
+      pr && /observability.giantswarm.io\\/tenant:/ { found=1 }
+      pr && /^spec:/ { pr=0 }
+      END { exit !found }'"
 
 echo "==> team label assertions"
 # Alert routing keys on application.giantswarm.io/team, so an empty value is as
@@ -265,6 +272,28 @@ assert "manager binds the metrics port from .Values.ports.metrics" \
 # permanently-down target. Same exclusion as the NetworkPolicy and PDB.
 assert "PodMonitor excludes the trust-bundle bot" \
   "printf '%s' \"\${RENDERED}\" | awk '/kind: PodMonitor/{f=1} f && /operator: DoesNotExist/{found=1} END{exit !found}'"
+
+# The monitoring agent selects PodMonitors by a label on the PodMonitor
+# object: `observability.giantswarm.io/tenant In [<tenant>]`, or
+# `application.giantswarm.io/team Exists` via a selector its own config calls
+# legacy. A PodMonitor matching neither is created and silently never
+# scraped, which is indistinguishable from a broken exporter.
+assert "PodMonitor carries the giantswarm tenant label by default" \
+  "printf '%s' \"\${RENDERED}\" | awk '
+      /kind: PodMonitor/ { pm=1 }
+      pm && /observability.giantswarm.io\\/tenant:[[:space:]]+\"?giantswarm\"?/ { found=1 }
+      pm && /^spec:/ { pm=0 }
+      END { exit !found }'"
+
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_PM_TENANT="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
+  --set 'monitoring.podMonitor.labels.observability\.giantswarm\.io/tenant=customer')"
+assert "an explicit PodMonitor tenant label overrides the default" \
+  "printf '%s' \"\${RENDERED_PM_TENANT}\" | awk '
+      /kind: PodMonitor/ { pm=1 }
+      pm && /observability.giantswarm.io\\/tenant:[[:space:]]+\"?customer\"?/ { found=1 }
+      pm && /^spec:/ { pm=0 }
+      END { exit !found }'"
 
 # shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_NO_PODMONITOR="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \

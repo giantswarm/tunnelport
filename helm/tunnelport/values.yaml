@@ -215,9 +215,25 @@ monitoring:
     enabled: true
     interval: 60s
     scrapeTimeout: 30s
-    # Extra labels on the PodMonitor, for stacks whose podMonitorSelector
-    # matches on something.
-    labels: {}  # @schema additionalProperties: true;skipProperties: true
+    # Labels for the PodMonitor resource, merged over the chart's common
+    # labels. On Giant Swarm installations the monitoring agent selects
+    # PodMonitors by a label on the PodMonitor *object*, with two
+    # alternatives (verified against alloy-metrics' rendered config on a
+    # live MC):
+    #
+    #   observability.giantswarm.io/tenant In [<tenant>]      -- current
+    #   application.giantswarm.io/team Exists                 -- "legacy",
+    #     and only when observability.giantswarm.io/tenant is absent
+    #
+    # The chart's common labels already carry the team label, so the
+    # PodMonitor would be discovered either way today — but via the path
+    # the agent's own config calls legacy. Setting the tenant explicitly
+    # puts it on the supported selector and makes the tenant a decision
+    # rather than a fallback. Same value, same reason, as
+    # prometheusRule.labels below; a PodMonitor matching neither selector
+    # is created and silently never scraped.
+    labels:  # @schema additionalProperties: true;skipProperties: true
+      observability.giantswarm.io/tenant: giantswarm
 
   # PrometheusRule with alerts for the tunnelport data plane: a tunnel pod
   # (tbot/ghostunnel) stuck in CrashLoopBackOff, the operator having no
