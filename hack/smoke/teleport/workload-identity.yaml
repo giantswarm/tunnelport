@@ -3,9 +3,29 @@
 # SVID against this resource and writes svid.pem, svid_key.pem, and
 # svid_bundle.pem to the emptyDir shared with the ghostunnel sidecar.
 #
-# The DNS SANs match the ClusterIP Service the operator renders for
-# the RemoteApp (smoke-app.smoke.svc.*) so a stock Go crypto/tls
-# client verifying ServerName accepts the SVID as a server cert.
+# The DNS SANs are TEMPLATED off the joining pod's ServiceAccount
+# rather than written out literally. The operator renders the tunnel's
+# ServiceAccount as `<cr.name>` in `<cr.namespace>` and the ClusterIP
+# Service under the same name, so
+# `{{ join.kubernetes.service_account.name }}.{{ ...namespace }}`
+# always reproduces the Service's own DNS name — here
+# `smoke-app.smoke.svc.*` — and a stock Go crypto/tls client verifying
+# ServerName accepts the SVID as a server cert.
+#
+# Templating (not hardcoding) is deliberate: a literal SAN silently
+# stops matching if the RemoteApp is ever moved to another namespace,
+# and nothing on either side detects the drift — the tunnel comes up,
+# ghostunnel serves happily, and every caller fails hostname
+# verification. Deriving the SAN from the join attributes makes that
+# class of breakage impossible.
+#
+# The SAN stays pinned despite being dynamic: `join.kubernetes.*` is
+# attested by Teleport from the ServiceAccount JWT presented at join
+# time, and every `allow` entry on the ProvisionToken names the same
+# `<ns>:<sa>` pair (see the security checklist in ONBOARDING.md), so
+# there is only one value the template can ever resolve to. Repeated
+# identical entries are fine — a token shared by several consumers of
+# one app has one per consumer; two *different* identities would not be.
 #
 # Issuance is gated by the role's workload_identity_labels match
 # (see role.yaml). Per ADR 0007's posture, every WorkloadIdentity
@@ -25,6 +45,6 @@ spec:
     id: /bot/smoke-bot
     x509:
       dns_sans:
-        - smoke-app.smoke.svc.cluster.local
-        - smoke-app.smoke.svc
-        - smoke-app.smoke
+        - "{{ join.kubernetes.service_account.name }}.{{ join.kubernetes.service_account.namespace }}.svc.cluster.local"
+        - "{{ join.kubernetes.service_account.name }}.{{ join.kubernetes.service_account.namespace }}.svc"
+        - "{{ join.kubernetes.service_account.name }}.{{ join.kubernetes.service_account.namespace }}"
