@@ -21,7 +21,8 @@ spec:
   # chart-managed singleton trust-bundle tbot (ADR 0008), whose pod
   # carries the same app.kubernetes.io/{name,instance} pair plus a
   # role label — and that bot must dial the Teleport proxy on an
-  # arbitrary host:port (a random NodePort in the e2e smoke), which
+  # arbitrary host:port (a NodePort in the e2e smoke, so outside the
+  # DNS/443/6443 the egress rules allow), which
   # this policy's egress rules would deny. Excluding role-labeled pods
   # (same exclusion as the PodDisruptionBudget) keeps this policy
   # scoped to the manager; the trust-bundle bot's policy is the

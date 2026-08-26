@@ -60,7 +60,7 @@ HELM_WAIT="${HELM_WAIT:-180}"
 # (shared app.kubernetes.io/{name,instance} selector labels), and
 # kind ≥ v0.24 enforces NetworkPolicy (kube-network-policies embedded
 # in kindnetd, nfqueue, fail-open). The policy's egress allows only
-# DNS/443/6443, so the bot's dial to the random proxy NodePort
+# DNS/443/6443, so the bot's dial to the proxy NodePort
 # (30000-32767) was dropped whenever enforcement was active; runs
 # passed only when the bot's first join raced ahead of kindnet's
 # pod-IP sync (fail-open window). Fixed by excluding role-labeled
@@ -482,7 +482,7 @@ kubectl --context kind-consumer apply --server-side -f \
 step "Installing the operator on the consumer cluster"
 # teleport.clusterName matches the Teleport cluster name configured in
 # hack/smoke/teleport/helm-values.yaml; teleport.proxyAddr is the
-# kind-discovered NodePort proxy address (ADR 0005).
+# kind node container IP plus the pinned proxy NodePort (ADR 0005).
 # trustBundle.tokenName names the ProvisionToken created above —
 # without it the singleton tbot the chart ships fails to join (ADR 0008).
 helm --kube-context kind-consumer upgrade --install tunnelport \
