@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The operator now verifies what each tunnel actually serves, closing the
+  detection gap in giantswarm/giantswarm#37521 (gap 2). Every
+  `verification.interval` (default `2m`, on the elected leader) it dials each
+  RemoteApp reporting `status.ready: true` at
+  `<name>.<namespace>.svc.<clusterDomain>:<tls.port>` with `ServerName` set to
+  that FQDN, and verifies the served chain against the SPIFFE trust bundle it
+  mounts from `tunnelport-spiffe-bundle`. Nothing the operator previously
+  watched could see a certificate whose SANs stopped matching: tbot joins,
+  ghostunnel binds, and the sidecar's `TCPSocket` probe connects regardless —
+  which is how 40 tunnels served unverifiable certificates for two days with
+  every signal green.
+  - New metric `tunnelport_remoteapp_tls_verification{remoteapp_name,
+    remoteapp_namespace, result}`, one series per RemoteApp with `result` one of
+    `verified`, `cert_invalid`, `unreachable` or `not_ready`. `cert_invalid` and
+    `unreachable` are deliberately distinct.
+  - New metric `tunnelport_tls_verification_available`, `0` when the operator
+    holds no usable trust bundle and therefore cannot judge any certificate.
+    Reported only by the replica running the check.
+  - New `RemoteApp.status.conditions` entry `TunnelVerified`, with the specific
+    X.509 fault as its message, and a `Verified` column on
+    `kubectl get remoteapp`. `status.ready` is unchanged — it stays join-level.
+  - New values: `verification.{enabled,interval,timeout,concurrency,clusterDomain}`.
+    Off automatically when `trustBundle.enabled=false`.
+- `monitoring.podMonitor.enabled` (default `true`) renders a PodMonitor for the
+  manager pods. Until now the chart rendered no Service and no ServiceMonitor,
+  so every `tunnelport_*` metric was served and never collected — a
+  PrometheusRule over metrics nobody scrapes cannot fire. Confirmed against a
+  live installation: no `tunnelport_*` series existed in Mimir at all.
+- `monitoring.podMonitor.labels`, merged into the PodMonitor's labels and
+  defaulting to `observability.giantswarm.io/tenant: giantswarm`. Giant Swarm's
+  monitoring agent selects PodMonitors by a label on the PodMonitor object —
+  either that tenant label, or `application.giantswarm.io/team` via a selector
+  its own config calls legacy. The chart's common labels satisfy the legacy
+  path, so this is about being on the supported selector rather than about
+  working at all; a PodMonitor matching neither is created and silently never
+  scraped.
+- Three alerts on the PrometheusRule:
+  - `TunnelPortTunnelCertificateInvalid`: a tunnel has served a certificate that
+    fails verification for 20m (`for:` long enough to ride out a rollout and an
+    SVID renewal).
+  - `TunnelPortTunnelUnreachable`: a tunnel reports Ready but accepts no
+    connection on its TLS port for 20m.
+  - `TunnelPortTLSVerificationUnavailable`: the operator has had no usable trust
+    bundle for 30m, so the check above cannot fire.
 - `RemoteApp.status.conditions` gains `IdentityIssued` and `TunnelServing`, one
   per role in the tunnel, so the Teleport join and the TLS listener are both
   visible (giantswarm/giantswarm#37445). `IdentityIssued=False` with
@@ -27,6 +71,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The manager's metrics endpoint moved to plain HTTP on port 8080
+  (`ports.metrics`, `--metrics-secure=false`), which is what the new PodMonitor
+  scrapes. The authn/authz variant gates `/metrics` behind
+  TokenReview+SubjectAccessReview and would require granting the scraping
+  agent's ServiceAccount a `nonResourceURLs: ["/metrics"]` ClusterRole in every
+  installation. Exposure is bounded by the chart's NetworkPolicy instead;
+  nothing on the endpoint is a credential.
+- The manager's NetworkPolicy now allows egress on the tunnel TLS port
+  (`tls.port`), which the verification dial needs. Without it every tunnel would
+  report `unreachable`.
 - The rendered ghostunnel sidecar now carries a TCPSocket readiness probe on
   its `tls` listen port (8443). A tunnel pod stays NotReady until ghostunnel is
   actually accepting TLS connections (which requires tbot to have written the
@@ -34,6 +88,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The two existing alerts pointed at `runbook_url`s that did not exist, under
+  the legacy `ops-recipes` path. Both now point at real runbooks under
+  `support-and-ops/runbooks/`, and every alert's URL carries the
+  `INSTALLATION`/`CLUSTER` query parameters the intranet runbook pages use.
+- `helm/tunnelport/tests/` (promtool unit tests for the PrometheusRule) now runs
+  in CI, as a second step of the `chart-test` job. It had been committed but
+  never wired up, so no alert's firing behaviour was checked by anything.
 - `RemoteApp.status.lastError` now describes the `tbot` container when both
   containers of a tunnel pod are unready. Kubelet orders container statuses
   alphabetically, so the status reported `ghostunnel`, which only exits because

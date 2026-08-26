@@ -3,6 +3,13 @@
 # `rule_files` points at the rendered+extracted rule groups that
 # tests/run.sh produces (helm template | yq '.spec'). Run via:
 #   helm/tunnelport/tests/run.sh
+#
+# These test alert *behaviour over time*, which a rendering test cannot:
+# whether a rule fires when it should, stays quiet when it should, and
+# rides out a rollout. For the TLS-verification rules that is the whole
+# point — an alert that only fires after the incident is over, or one
+# that fires on every deploy, would both have failed to catch
+# giantswarm/giantswarm#37521.
 rule_files:
   - 'rendered.rules.yaml'
 
@@ -34,7 +41,7 @@ tests:
               topic: tunnelport
             exp_annotations:
               description: 'Tunnel container ghostunnel in agentic-platform/dex-finch-59ddd757f9-h68qn is in CrashLoopBackOff; the SPIFFE/ghostunnel tunnel is down.'
-              runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-tunnel-crashlooping/
+              runbook_url: 'https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-crashlooping/?INSTALLATION=gazelle&CLUSTER=gazelle'
 
   # tbot crashlooping in a different namespace -> also fires (namespace-agnostic)
   - interval: 1m
@@ -60,7 +67,7 @@ tests:
               topic: tunnelport
             exp_annotations:
               description: 'Tunnel container tbot in mcp-kubernetes/mcp-kubernetes-tunnel-abc is in CrashLoopBackOff; the SPIFFE/ghostunnel tunnel is down.'
-              runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-tunnel-crashlooping/
+              runbook_url: 'https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-crashlooping/?INSTALLATION=gazelle&CLUSTER=gazelle'
 
   # operator deployment with no available replicas -> fires after 15m
   - interval: 1m
@@ -87,7 +94,7 @@ tests:
               topic: tunnelport
             exp_annotations:
               description: 'The tunnelport operator deployment tunnelport-system/tunnelport has no available replicas; RemoteApp tunnels will not reconcile.'
-              runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-operator-down/
+              runbook_url: 'https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-operator-down/?INSTALLATION=gazelle&CLUSTER=gazelle'
 
   # healthy tunnel (waiting reason present but not CrashLoopBackOff) -> does not fire
   - interval: 1m
@@ -97,4 +104,164 @@ tests:
     alert_rule_test:
       - alertname: TunnelPortTunnelCrashLooping
         eval_time: 15m
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------
+  # TLS verification. The incident this closes: a tunnel serving an SVID
+  # whose dns_sans named the old namespace, with every process up and
+  # every probe green.
+  # ---------------------------------------------------------------------
+
+  # Sustained cert_invalid -> fires after 20m, and NOT before. The
+  # `not-before` assertion is the one that keeps a rollout from paging:
+  # the same series exists at 15m and must be silent.
+  - interval: 1m
+    input_series:
+      - series: 'tunnelport_remoteapp_tls_verification{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", pod="tunnelport-5c9f7d8b6-2xk4t", remoteapp_name="mcp-kubernetes-gazelle", remoteapp_namespace="agent-platform", result="cert_invalid"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelCertificateInvalid
+        eval_time: 15m
+        exp_alerts: []
+      - alertname: TunnelPortTunnelCertificateInvalid
+        eval_time: 25m
+        exp_alerts:
+          - exp_labels:
+              area: platform
+              cancel_if_monitoring_agent_down: "true"
+              cancel_if_outside_working_hours: "false"
+              cluster_id: gazelle
+              installation: gazelle
+              namespace: tunnelport-system
+              pod: tunnelport-5c9f7d8b6-2xk4t
+              remoteapp_name: mcp-kubernetes-gazelle
+              remoteapp_namespace: agent-platform
+              result: cert_invalid
+              severity: notify
+              team: bumblebee
+              topic: tunnelport
+            exp_annotations:
+              description: 'Tunnel agent-platform/mcp-kubernetes-gazelle has been serving a certificate that fails verification for 20m; callers cannot establish TLS to it even though the tunnel reports Ready. The TunnelVerified condition on the RemoteApp names the specific fault: SAN mismatch, untrusted chain, or expired leaf.'
+              runbook_url: 'https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-certificate-invalid/?INSTALLATION=gazelle&CLUSTER=gazelle'
+      # A cert_invalid tunnel must NOT also raise the unreachable alert:
+      # the two states are mutually exclusive by construction and the
+      # issue asks for them to stay apart.
+      - alertname: TunnelPortTunnelUnreachable
+        eval_time: 25m
+        exp_alerts: []
+
+  # A tunnel that recovers inside the window never fires. This is the
+  # rollout / SVID-renewal case: the cert_invalid series stops existing
+  # and the verified one appears, because the result is a metric label and
+  # the exporter emits exactly one series per RemoteApp.
+  - interval: 1m
+    input_series:
+      - series: 'tunnelport_remoteapp_tls_verification{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", remoteapp_name="dex-gazelle", remoteapp_namespace="agent-platform", result="cert_invalid"}'
+        values: "1+0x9 _x30"
+      - series: 'tunnelport_remoteapp_tls_verification{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", remoteapp_name="dex-gazelle", remoteapp_namespace="agent-platform", result="verified"}'
+        values: "_x10 1+0x29"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelCertificateInvalid
+        eval_time: 25m
+        exp_alerts: []
+      - alertname: TunnelPortTunnelCertificateInvalid
+        eval_time: 39m
+        exp_alerts: []
+
+  # `verified` and `not_ready` are the two results that must never page.
+  # `not_ready` is deliberate: pod-level readiness is already covered by
+  # TunnelPortTunnelCrashLooping, and alerting on it here would fire for
+  # every tunnel that is merely still starting. Two hours of silence.
+  - interval: 1m
+    input_series:
+      - series: 'tunnelport_remoteapp_tls_verification{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", remoteapp_name="healthy-app", remoteapp_namespace="agent-platform", result="verified"}'
+        values: "1+0x120"
+      - series: 'tunnelport_remoteapp_tls_verification{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", remoteapp_name="starting-app", remoteapp_namespace="agent-platform", result="not_ready"}'
+        values: "1+0x120"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelCertificateInvalid
+        eval_time: 2h
+        exp_alerts: []
+      - alertname: TunnelPortTunnelUnreachable
+        eval_time: 2h
+        exp_alerts: []
+
+  # Sustained unreachable -> its own alert, and the certificate alert stays
+  # quiet. Collapsing the two would have put the SAN-drift failure in the
+  # same bucket as an ordinary outage.
+  - interval: 1m
+    input_series:
+      - series: 'tunnelport_remoteapp_tls_verification{cluster_id="graveler", installation="graveler", namespace="tunnelport-system", pod="tunnelport-77b6d4c9f-lm2qp", remoteapp_name="mcp-prometheus-graveler", remoteapp_namespace="agent-platform", result="unreachable"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - alertname: TunnelPortTunnelUnreachable
+        eval_time: 15m
+        exp_alerts: []
+      - alertname: TunnelPortTunnelUnreachable
+        eval_time: 25m
+        exp_alerts:
+          - exp_labels:
+              area: platform
+              cancel_if_monitoring_agent_down: "true"
+              cancel_if_outside_working_hours: "false"
+              cluster_id: graveler
+              installation: graveler
+              namespace: tunnelport-system
+              pod: tunnelport-77b6d4c9f-lm2qp
+              remoteapp_name: mcp-prometheus-graveler
+              remoteapp_namespace: agent-platform
+              result: unreachable
+              severity: notify
+              team: bumblebee
+              topic: tunnelport
+            exp_annotations:
+              description: 'Tunnel agent-platform/mcp-prometheus-graveler reports Ready but has accepted no connection on its TLS port for 20m; callers cannot reach it at all.'
+              runbook_url: 'https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-certificate-invalid/?INSTALLATION=graveler&CLUSTER=graveler#tunnelporttunnelunreachable'
+      - alertname: TunnelPortTunnelCertificateInvalid
+        eval_time: 25m
+        exp_alerts: []
+
+  # The check going blind. 30m rather than 20m because the chart
+  # pre-creates the bundle Secret empty and the singleton tbot fills it in
+  # only after joining Teleport, so "not yet" is normal on a fresh
+  # install. Must be silent at 25m and firing at 35m.
+  - interval: 1m
+    input_series:
+      - series: 'tunnelport_tls_verification_available{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", pod="tunnelport-5c9f7d8b6-2xk4t"}'
+        values: "0+0x50"
+    alert_rule_test:
+      - alertname: TunnelPortTLSVerificationUnavailable
+        eval_time: 25m
+        exp_alerts: []
+      - alertname: TunnelPortTLSVerificationUnavailable
+        eval_time: 35m
+        exp_alerts:
+          - exp_labels:
+              area: platform
+              cancel_if_monitoring_agent_down: "true"
+              cancel_if_outside_working_hours: "false"
+              cluster_id: gazelle
+              installation: gazelle
+              namespace: tunnelport-system
+              pod: tunnelport-5c9f7d8b6-2xk4t
+              severity: notify
+              team: bumblebee
+              topic: tunnelport
+            exp_annotations:
+              description: 'tunnelport on gazelle has had no usable SPIFFE trust bundle for 30m, so it cannot verify any tunnel certificate and TunnelPortTunnelCertificateInvalid cannot fire. Check the singleton trust-bundle tbot in tunnelport-system.'
+              runbook_url: 'https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-certificate-invalid/?INSTALLATION=gazelle&CLUSTER=gazelle#tunnelporttlsverificationunavailable'
+
+  # A working check reports 1 and never fires. Also covers the fresh
+  # install that takes a few minutes to write the bundle: 0 for 10m, then
+  # 1 — inside the window, so silent.
+  - interval: 1m
+    input_series:
+      - series: 'tunnelport_tls_verification_available{cluster_id="gazelle", installation="gazelle", namespace="tunnelport-system", pod="tunnelport-5c9f7d8b6-2xk4t"}'
+        values: "0+0x9 1+0x50"
+    alert_rule_test:
+      - alertname: TunnelPortTLSVerificationUnavailable
+        eval_time: 35m
+        exp_alerts: []
+      - alertname: TunnelPortTLSVerificationUnavailable
+        eval_time: 59m
         exp_alerts: []

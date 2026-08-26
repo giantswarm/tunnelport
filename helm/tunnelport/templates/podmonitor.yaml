@@ -1,0 +1,44 @@
+{{- if .Values.monitoring.podMonitor.enabled -}}
+# Scrape target for the manager's /metrics endpoint.
+#
+# Until this existed the operator served metrics that nothing collected:
+# the chart renders no Service for the manager and no ServiceMonitor, so
+# `tunnelport_*` never reached Mimir. A PrometheusRule alerting on a
+# metric nobody scrapes is a rule that never fires, which is how a
+# detection gap survives a fix — see giantswarm/giantswarm#37521.
+#
+# PodMonitor rather than Service + ServiceMonitor: the manager fronts no
+# traffic, so a Service would exist purely to give the scraper something
+# to select. Following the same shape as giantswarm/konfigure-operator.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "tunnelport.fullname" . }}
+  namespace: {{ .Values.installNamespace }}
+  labels:
+    {{- include "tunnelport.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Values.installNamespace }}
+  selector:
+    matchLabels:
+      {{- include "tunnelport.selectorLabels" . | nindent 6 }}
+    # Same exclusion as the NetworkPolicy and the PodDisruptionBudget: the
+    # selector labels alone also match the singleton trust-bundle tbot
+    # (ADR 0008), which serves no metrics endpoint at all and would show
+    # up as a permanently-down target.
+    matchExpressions:
+      - key: tunnelport.giantswarm.io/role
+        operator: DoesNotExist
+  podMetricsEndpoints:
+    # Port name, not number, so a change to .Values.ports.metrics cannot
+    # leave the scrape pointed at the old one.
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.monitoring.podMonitor.interval }}
+      scrapeTimeout: {{ .Values.monitoring.podMonitor.scrapeTimeout }}
+{{- end }}

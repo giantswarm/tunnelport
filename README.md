@@ -157,6 +157,61 @@ A plaintext `http/8080` port is still served on the `Service` alongside
 `tls/8443` during migration; it's deprecated and a future change will drop
 it once every known caller has moved.
 
+### Observability: is the tunnel actually usable?
+
+Everything a Kubernetes-native operator can passively observe about a
+tunnel is a proxy for the question callers care about, and all of those
+proxies can be green while the answer is no. In
+[giantswarm/giantswarm#37521][gap] 40 tunnels served SVIDs whose
+`dns_sans` had not followed a namespace rename: `tbot` joined, the SVID
+was issued, `ghostunnel` bound `:8443`, the sidecar's `TCPSocket`
+readiness probe connected — because a TCP connect never looks at a
+certificate — and every caller failed hostname verification for two days.
+
+So the operator asks the tunnel directly. Every
+`verification.interval` (default `2m`, leader-elected so one replica
+does it) it dials each `RemoteApp` that reports `status.ready: true` at
+`<name>.<namespace>.svc.<clusterDomain>:<tls.port>` with `ServerName` set
+to that FQDN, and verifies the served chain against the SPIFFE trust
+bundle it mounts from `tunnelport-spiffe-bundle`. That is the same check
+`curl --cacert` performs, which is to say the same check a caller
+performs.
+
+The outcome shows up in two places:
+
+| Where | What |
+|---|---|
+| `RemoteApp.status.conditions[TunnelVerified]` | `True` / `False` / `Unknown`, with the specific X.509 fault as the message. Also the `Verified` column of `kubectl get remoteapp`. |
+| `tunnelport_remoteapp_tls_verification{remoteapp_name,remoteapp_namespace,result}` | `1` for the current result. Scraped via the chart's `PodMonitor` and alerted on by its `PrometheusRule`. |
+
+`result` is one of `verified`, `cert_invalid` (connected, no verified TLS
+session), `unreachable` (nothing accepted a connection) or `not_ready`
+(the tunnel makes no claim to be serving, so it was not probed).
+`cert_invalid` and `unreachable` are deliberately separate: they have
+different first moves, and collapsing them would put the SAN-drift
+failure back in the same bucket as an ordinary outage.
+
+Two properties worth knowing:
+
+- **"Cannot verify" is never reported as "the certificate is bad."** With
+  no readable trust bundle the operator has no opinion on any
+  certificate, so it publishes none and flips
+  `tunnelport_tls_verification_available` to `0` — which
+  `TunnelPortTLSVerificationUnavailable` alerts on. A check that fails
+  silently would be the same class of bug as the one it exists to find.
+- **`status.ready` is untouched.** It stays join-level, because other
+  components consume it and widening it would be a silent behavioural
+  change. `TunnelVerified` is additive; `Ready=True` with
+  `Verified=False` is a legitimate and highly actionable state.
+
+The mechanism needs no additional RBAC — it reads the `RemoteApp` list it
+already watches and the trust bundle from a mounted file, never a `Secret`
+through the API server. Turn it off with `verification.enabled=false`;
+it is also off automatically when `trustBundle.enabled=false`, since
+there would be nothing to verify against.
+
+[gap]: https://github.com/giantswarm/giantswarm/issues/37521
+
 ## Scope
 
 `RemoteApp` covers Teleport **Application Service** apps (TCP/HTTP) only.

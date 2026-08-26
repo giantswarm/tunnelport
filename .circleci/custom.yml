@@ -13,27 +13,51 @@
 # manage. This job is the e2e signal on PRs and gates merges as a GitHub
 # required check.
 jobs:
-  # Chart assertions (test/helm/chart_test.sh): RBAC shape, value flow, CRD
-  # gating, and the team label. helm is the only dependency, so this runs in a
-  # plain container rather than the e2e machine executor.
+  # Chart checks, in two parts:
+  #
+  #   * test/helm/chart_test.sh -- rendering assertions: RBAC shape, value
+  #     flow, CRD gating, the team label, the tenant label, and that the
+  #     PodMonitor and the verification wiring actually render.
+  #   * helm/tunnelport/tests/run.sh -- promtool unit tests for the
+  #     PrometheusRule. Rendering tests cannot tell you whether an alert
+  #     fires when it should or stays quiet when it should, which for the
+  #     TLS-verification rules is the entire question.
+  #
+  # Runs in a plain container rather than the architect executor or the e2e
+  # machine executor: the dependencies are helm, promtool and yq, none of
+  # which the architect Go image carries, and none of which need Docker.
+  # `make test` therefore cannot reach the promtool suite -- hence this job.
+  # Versions are pinned so an upstream release cannot turn CI red on an
+  # unrelated PR.
   chart-test:
     docker:
       - image: cimg/base:current
     resource_class: small
     environment:
       HELM_VERSION: v3.16.0
+      PROMETHEUS_VERSION: 3.6.0
+      YQ_VERSION: v4.44.6
     steps:
       - checkout
       - run:
-          name: Install helm
+          name: Install helm, promtool and yq
           command: |
             set -euxo pipefail
-            curl -sSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz -C /tmp
+            curl -sSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" | tar -xz -C /tmp
             sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-            helm version --short
+            curl -sSL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz" | tar -xz -C /tmp
+            sudo install -m 0755 "/tmp/prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/promtool
+            # mikefarah/yq -- cimg/base ships no yq, and the python jq
+            # wrapper of the same name does not understand `yq eval`.
+            sudo curl -sSLo /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+            sudo chmod 0755 /usr/local/bin/yq
+            helm version --short && promtool --version && yq --version
       - run:
           name: Run chart assertions
           command: bash test/helm/chart_test.sh
+      - run:
+          name: Run PrometheusRule promtool tests
+          command: bash helm/tunnelport/tests/run.sh
 
   e2e-smoke:
     machine:

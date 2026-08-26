@@ -1,0 +1,49 @@
+# The SAN-drift incident, on purpose.
+#
+# Same WorkloadIdentity as workload-identity.yaml — same name, same
+# `remoteapp: smoke-app` label, so the same role still authorises issuance
+# and the same tbot service still selects it — with one thing changed: the
+# DNS SANs name the namespace `agentic-platform` instead of `smoke`.
+#
+# That is exactly what happened in giantswarm/giantswarm#37521. The
+# `agentic-platform` -> `agent-platform` rename updated the RemoteApp
+# namespaces and the ProvisionTokens, but not the 40 hand-written
+# `dns_sans` on Teleport Central. Everything kept working from
+# Kubernetes' point of view:
+#
+#   - tbot still joined and the SVID was still issued;
+#   - ghostunnel loaded it and served TLS on :8443;
+#   - the sidecar's TCPSocket readiness probe connected happily, because
+#     a TCP connect never looks at a certificate;
+#   - RemoteApp.status said Ready=True, IdentityIssued=True,
+#     TunnelServing=True.
+#
+# and every caller failed hostname verification.
+#
+# hack/smoke/run.sh applies this with `tctl create --force`, restarts the
+# tunnel so a fresh SVID is minted against it, and then asserts the
+# contrast that is the entire point of the operator's verification dial:
+# the pod stays Ready and TunnelServing stays True, while
+# TunnelVerified goes False and
+# tunnelport_remoteapp_tls_verification flips to result="cert_invalid".
+# It then restores workload-identity.yaml and asserts the signal clears.
+#
+# Not applied by any other path. Do not use this as a template for a real
+# WorkloadIdentity.
+kind: workload_identity
+version: v1
+metadata:
+  name: smoke-app-svid
+  labels:
+    remoteapp: smoke-app
+spec:
+  spiffe:
+    id: /bot/smoke-bot
+    x509:
+      dns_sans:
+        # Wrong namespace segment. The Service the operator renders — and
+        # therefore the name callers dial and the probe pins as
+        # ServerName — is smoke-app.smoke.svc.cluster.local.
+        - smoke-app.agentic-platform.svc.cluster.local
+        - smoke-app.agentic-platform.svc
+        - smoke-app.agentic-platform

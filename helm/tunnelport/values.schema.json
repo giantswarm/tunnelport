@@ -86,6 +86,25 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
+                "podMonitor": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "interval": {
+                            "type": "string"
+                        },
+                        "labels": {
+                            "type": "object",
+                            "additionalProperties": true
+                        },
+                        "scrapeTimeout": {
+                            "type": "string"
+                        }
+                    }
+                },
                 "prometheusRule": {
                     "type": "object",
                     "additionalProperties": false,
@@ -407,6 +426,27 @@
                             }
                         }
                     }
+                }
+            }
+        },
+        "verification": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "clusterDomain": {
+                    "type": "string"
+                },
+                "concurrency": {
+                    "type": "integer"
+                },
+                "enabled": {
+                    "type": "boolean"
+                },
+                "interval": {
+                    "type": "string"
+                },
+                "timeout": {
+                    "type": "string"
                 }
             }
         }

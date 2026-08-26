@@ -69,6 +69,19 @@ OPERATOR_HELM_WAIT="${OPERATOR_HELM_WAIT:-600}"
 READY_WAIT="${READY_WAIT:-180}"
 CURL_WAIT="${CURL_WAIT:-120}"
 
+# TLS-verification knobs. The chart default is a 2-minute probe cadence,
+# which is right in production and far too slow for a 10-minute smoke; the
+# assertions below need several rounds. 15s keeps the whole
+# break-the-SAN-and-recover sequence inside a couple of minutes.
+VERIFY_INTERVAL="${VERIFY_INTERVAL:-15s}"
+# Budget for a verification outcome to appear on the CR and in /metrics.
+# Generous because the manager reads the trust bundle from a mounted
+# Secret and the kubelet propagates tbot's write into that mount on its own
+# sync loop (up to ~1 min), not instantly.
+VERIFY_WAIT="${VERIFY_WAIT:-180}"
+# The manager's plain-HTTP metrics port (chart value ports.metrics).
+METRICS_PORT="${METRICS_PORT:-8080}"
+
 # prometheus-operator release supplying the PrometheusRule CRD. The chart
 # renders a PrometheusRule whenever monitoring.prometheusRule.enabled is
 # true and fails the install if the CRD is absent, so the bare kind
@@ -121,11 +134,129 @@ dump_diag() {
   kubectl --context kind-consumer -n tunnelport-system logs -l tunnelport.giantswarm.io/role=trust-bundle-bot --tail=40 2>&1 | tail -50 >&2 || true
   printf '\n--- consumer/tunnelport-system tls-probe job ---\n' >&2
   kubectl --context kind-consumer -n tunnelport-system logs job/smoke-curl-tls --all-containers=true --tail=30 2>&1 | tail -40 >&2 || true
+  printf '\n--- consumer/smoke remoteapp conditions ---\n' >&2
+  kubectl --context kind-consumer -n smoke get remoteapp smoke-app \
+    -o jsonpath='{range .status.conditions[*]}{.type}={.status} ({.reason}): {.message}{"\n"}{end}' 2>&1 >&2 || true
+  printf '\n--- consumer tunnelport_* metrics (TLS verification) ---\n' >&2
+  # The verification series are the fastest way to tell a broken tunnel
+  # from a broken check: no tunnelport_tls_verification_available line at
+  # all means no replica has run a round (no leader, or the feature is
+  # off), 0 means the trust bundle is unreadable, and 1 with no
+  # per-RemoteApp series means nothing was Ready to probe.
+  scrape_manager_metrics 2>/dev/null | grep -E '^tunnelport_' >&2 || warn "  (no tunnelport_* series)"
+  printf '\n--- consumer/tunnelport-system manager logs ---\n' >&2
+  kubectl --context kind-consumer -n tunnelport-system logs \
+    -l 'app.kubernetes.io/name=tunnelport,!tunnelport.giantswarm.io/role' \
+    --tail=40 2>&1 | tail -60 >&2 || true
 }
 
 SMOKE_RESULT=fail
 # shellcheck disable=SC2154 # rc is assigned in the trap body via rc=$?.
 trap 'rc=$?; if [[ "$SMOKE_RESULT" != "ok" ]]; then dump_diag; fi; teardown; exit $rc' EXIT
+
+# ---------------------------------------------------------------------
+# TLS-verification helpers (giantswarm/giantswarm#37521 gap 2).
+# ---------------------------------------------------------------------
+
+# scrape_manager_metrics prints the concatenated /metrics of every manager
+# pod. Every pod, not just the leader: the verifier is a leader-election
+# runnable, so only one replica reports the verification series and which
+# one is not knowable from here. The `!tunnelport.giantswarm.io/role`
+# selector excludes the singleton trust-bundle tbot, which shares the
+# chart's selector labels and serves no metrics at all.
+scrape_manager_metrics() {
+  local ips
+  ips="$(kubectl --context kind-consumer -n tunnelport-system get pods \
+    -l 'app.kubernetes.io/name=tunnelport,!tunnelport.giantswarm.io/role' \
+    --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.status.podIP} {end}')"
+  if [[ -z "${ips// /}" ]]; then
+    return 1
+  fi
+  kubectl --context kind-consumer -n tunnelport-system delete pod smoke-metrics \
+    --ignore-not-found --wait=true >/dev/null 2>&1 || true
+  kubectl --context kind-consumer -n tunnelport-system run smoke-metrics \
+    --rm -i --restart=Never --quiet --image=curlimages/curl:8.10.1 -- \
+    sh -c "for ip in ${ips}; do curl -s --max-time 5 http://\$ip:${METRICS_PORT}/metrics || true; done" \
+    2>/dev/null
+}
+
+# wait_for_metric polls the manager metrics until a line matches the given
+# extended regex. Here-strings rather than pipes throughout: run.sh runs
+# under `set -o pipefail`, and `grep -q` closing the pipe early would give
+# the upstream command a SIGPIPE and fail the pipeline on a match.
+wait_for_metric() {
+  local label="$1" pattern="$2" timeout="$3"
+  local deadline=$((SECONDS + timeout)) out=""
+  while ((SECONDS < deadline)); do
+    out="$(scrape_manager_metrics || true)"
+    if grep -qE "${pattern}" <<<"${out}"; then
+      printf '  metric ok: %s\n' "${label}"
+      grep -E '^tunnelport_(remoteapp_tls_verification|tls_verification_available)' <<<"${out}" || true
+      return 0
+    fi
+    sleep 5
+  done
+  warn "timed out after ${timeout}s waiting for metric: ${label} (/${pattern}/)"
+  warn "last scrape, verification series only:"
+  grep -E '^tunnelport_' <<<"${out}" >&2 || warn "  (no tunnelport_* series at all)"
+  return 1
+}
+
+# assert_condition checks one RemoteApp condition's status and reason.
+assert_condition() {
+  local ctype="$1" want_status="$2" want_reason="$3"
+  local got_status got_reason got_message
+  got_status="$(kubectl --context kind-consumer -n smoke get remoteapp smoke-app \
+    -o jsonpath="{.status.conditions[?(@.type==\"${ctype}\")].status}")"
+  got_reason="$(kubectl --context kind-consumer -n smoke get remoteapp smoke-app \
+    -o jsonpath="{.status.conditions[?(@.type==\"${ctype}\")].reason}")"
+  got_message="$(kubectl --context kind-consumer -n smoke get remoteapp smoke-app \
+    -o jsonpath="{.status.conditions[?(@.type==\"${ctype}\")].message}")"
+  if [[ "${got_status}" != "${want_status}" || "${got_reason}" != "${want_reason}" ]]; then
+    warn "condition ${ctype}: got ${got_status}/${got_reason}, want ${want_status}/${want_reason}"
+    warn "  message: ${got_message}"
+    return 1
+  fi
+  printf '  condition ok: %s=%s (%s)\n' "${ctype}" "${got_status}" "${got_reason}"
+  [[ -n "${got_message}" ]] && printf '    message: %s\n' "${got_message}"
+  return 0
+}
+
+# wait_for_condition polls until a condition reaches status/reason.
+wait_for_condition() {
+  local ctype="$1" want_status="$2" want_reason="$3" timeout="$4"
+  local deadline=$((SECONDS + timeout))
+  while ((SECONDS < deadline)); do
+    if assert_condition "${ctype}" "${want_status}" "${want_reason}" >/dev/null 2>&1; then
+      assert_condition "${ctype}" "${want_status}" "${want_reason}"
+      return 0
+    fi
+    sleep 5
+  done
+  warn "timed out after ${timeout}s waiting for ${ctype}=${want_status}/${want_reason}"
+  assert_condition "${ctype}" "${want_status}" "${want_reason}" || true
+  return 1
+}
+
+# restart_tunnel_and_wait_ready deletes the tunnel pods so tbot re-mints
+# its SVID against whatever the WorkloadIdentity now says, then waits for
+# the replacement to pass its probes.
+#
+# That the pod becomes Ready again is not incidental here — it is half the
+# assertion. The ghostunnel readiness probe is a TCPSocket connect, so it
+# passes with a wrong-SAN certificate, which is precisely why the
+# verification dial had to exist.
+restart_tunnel_and_wait_ready() {
+  kubectl --context kind-consumer -n smoke delete pod \
+    -l tunnelport.giantswarm.io/role=tbot,tunnelport.giantswarm.io/remoteapp=smoke-app \
+    --wait=true >/dev/null
+  kubectl --context kind-consumer -n smoke rollout status deployment/smoke-app \
+    --timeout="${READY_WAIT}s" >/dev/null
+  kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \
+    --for=jsonpath='{.status.ready}'=true --timeout="${READY_WAIT}s" >/dev/null
+}
+
 
 # ---------------------------------------------------------------------
 # Steps.
@@ -472,12 +603,16 @@ kubectl --context kind-consumer run smoke-reach \
            sleep 2
          done; exit 1" >/dev/null
 
-step "Installing the PrometheusRule CRD on the consumer cluster"
-# The chart ships a PrometheusRule (monitoring.prometheusRule.enabled
-# defaults to true) with no CRD-capability gate, so the install fails
-# unless monitoring.coreos.com/v1 is registered first.
-kubectl --context kind-consumer apply --server-side -f \
-  "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROMETHEUS_OPERATOR_VERSION}/example/prometheus-operator-crd/monitoring.coreos.com_prometheusrules.yaml" >/dev/null
+step "Installing the prometheus-operator CRDs on the consumer cluster"
+# The chart ships a PrometheusRule and a PodMonitor (both enabled by
+# default) with no CRD-capability gate, so the install fails unless
+# monitoring.coreos.com/v1 is registered first. Applying the real CRDs
+# rather than disabling the templates also means the API server validates
+# both objects, so a schema mistake in either surfaces here.
+for crd in prometheusrules podmonitors; do
+  kubectl --context kind-consumer apply --server-side -f \
+    "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROMETHEUS_OPERATOR_VERSION}/example/prometheus-operator-crd/monitoring.coreos.com_${crd}.yaml" >/dev/null
+done
 
 step "Installing the operator on the consumer cluster"
 # teleport.clusterName matches the Teleport cluster name configured in
@@ -497,6 +632,7 @@ helm --kube-context kind-consumer upgrade --install tunnelport \
   --set teleport.clusterName=smoke.tunnelport.local \
   --set teleport.proxyAddr="${TELEPORT_PROXY_ADDR}" \
   --set trustBundle.tokenName=tunnelport-trust-bundle-token \
+  --set verification.interval="${VERIFY_INTERVAL}" \
   --wait --timeout "${OPERATOR_HELM_WAIT}s" >/dev/null
 
 step "Applying the RemoteApp CR"
@@ -605,6 +741,111 @@ if [[ "${POST_RESTART_BODY}" != "${EXPECTED_BODY}" ]]; then
   warn "Post-restart curl body mismatch: expected '${EXPECTED_BODY}', got '${POST_RESTART_BODY}'"
   exit 1
 fi
+
+
+# ---------------------------------------------------------------------
+# TLS verification (giantswarm/giantswarm#37521 gap 2).
+#
+# Everything above proves the tunnel works. This section proves the
+# operator can tell when it does not — specifically in the one way nothing
+# else it watches can see. The curl-with---cacert probe above would also
+# catch a wrong-SAN certificate, but it is a fixture a human runs; these
+# steps assert the always-on signal an alert can fire on.
+#
+# The load-bearing assertion is the contrast in the negative case: pod
+# Ready, TunnelServing True, TCP probe green — and TunnelVerified False
+# with the metric on cert_invalid. That combination is the incident.
+# ---------------------------------------------------------------------
+
+step "Asserting the tunnel verifies (positive case)"
+
+# The manager reads the trust bundle from the mounted Secret, and the
+# kubelet propagates tbot's write into that mount on its own sync loop, so
+# the first rounds can legitimately report "no bundle". Wait for the
+# operator to be able to judge at all before asking it for a verdict —
+# otherwise a slow mount looks like a broken tunnel.
+wait_for_metric "trust bundle available" \
+  '^tunnelport_tls_verification_available 1$' "${VERIFY_WAIT}"
+
+wait_for_metric "smoke-app verified" \
+  '^tunnelport_remoteapp_tls_verification\{.*remoteapp_name="smoke-app".*result="verified".*\} 1$' \
+  "${VERIFY_WAIT}"
+
+wait_for_condition TunnelVerified True CertificateVerified "${VERIFY_WAIT}"
+
+step "Breaking one SAN on Teleport Central (negative case)"
+# Same WorkloadIdentity, same label, same role — only the dns_sans
+# namespace segment changes. `--force` overwrites the resource created
+# earlier in this run.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create --force -f - < hack/smoke/teleport/workload-identity-wrong-san.yaml >/dev/null
+echo "workload_identity smoke-app-svid now advertises smoke-app.agentic-platform.svc.cluster.local"
+
+# Restart so tbot mints a fresh SVID against the edited resource. The
+# rollout completing is itself an assertion: the tunnel comes back Ready
+# with a certificate no caller can verify.
+restart_tunnel_and_wait_ready
+echo "Tunnel pod is Ready again — with the wrong-SAN SVID."
+
+step "Asserting the wrong-SAN tunnel is detected while every old signal stays green"
+
+# The old signals. All three were True throughout the real incident, and
+# they must still be True here, or this test would be proving something
+# easier than the thing that actually happened.
+if [[ "$(kubectl --context kind-consumer -n smoke get remoteapp smoke-app \
+    -o jsonpath='{.status.ready}')" != "true" ]]; then
+  warn "status.ready is not true; the negative case is not reproducing the incident"
+  exit 1
+fi
+assert_condition Ready True TunnelReady
+assert_condition TunnelServing True TunnelServing
+assert_condition IdentityIssued True IdentityIssued
+echo "  Ready / IdentityIssued / TunnelServing are all True — exactly as in the incident."
+
+# The new signal. Both halves: the CR condition a platform engineer reads,
+# and the metric the alert fires on.
+wait_for_condition TunnelVerified False CertificateInvalid "${VERIFY_WAIT}"
+
+wait_for_metric "smoke-app reports cert_invalid" \
+  '^tunnelport_remoteapp_tls_verification\{.*remoteapp_name="smoke-app".*result="cert_invalid".*\} 1$' \
+  "${VERIFY_WAIT}"
+
+# The condition message has to name the mismatch, not just assert one:
+# that string is the diagnosis a responder acts on, and in the incident it
+# is what identifies the stale namespace.
+VERIFIED_MSG="$(kubectl --context kind-consumer -n smoke get remoteapp smoke-app \
+  -o jsonpath='{.status.conditions[?(@.type=="TunnelVerified")].message}')"
+echo "TunnelVerified message: ${VERIFIED_MSG}"
+for want in "SAN mismatch" "smoke-app.smoke.svc.cluster.local" "smoke-app.agentic-platform.svc.cluster.local"; do
+  if [[ "${VERIFIED_MSG}" != *"${want}"* ]]; then
+    warn "TunnelVerified message does not mention '${want}'"
+    exit 1
+  fi
+done
+echo "  message names both the expected FQDN and the SAN actually presented."
+
+step "Restoring the SAN and asserting the signal clears"
+# Recovery matters as much as detection: a signal that latches would keep
+# the alert firing after the fix and train people to ignore it.
+kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
+  tctl create --force -f - < hack/smoke/teleport/workload-identity.yaml >/dev/null
+restart_tunnel_and_wait_ready
+
+wait_for_condition TunnelVerified True CertificateVerified "${VERIFY_WAIT}"
+wait_for_metric "smoke-app verified again" \
+  '^tunnelport_remoteapp_tls_verification\{.*remoteapp_name="smoke-app".*result="verified".*\} 1$' \
+  "${VERIFY_WAIT}"
+
+# And the cert_invalid series must be gone rather than sitting at 1
+# alongside the new one — the property that keeps a recovered tunnel from
+# pinning its alert forever.
+LAST_METRICS="$(scrape_manager_metrics || true)"
+if grep -qE '^tunnelport_remoteapp_tls_verification\{.*remoteapp_name="smoke-app".*result="cert_invalid"' <<<"${LAST_METRICS}"; then
+  warn "the cert_invalid series survived recovery; the alert would never resolve"
+  grep -E '^tunnelport_remoteapp_tls_verification' <<<"${LAST_METRICS}" >&2 || true
+  exit 1
+fi
+echo "  the cert_invalid series is gone; exactly one series per RemoteApp."
 
 step "✅ SMOKE PASSED"
 SMOKE_RESULT=ok

@@ -162,12 +162,86 @@ crds:
 networkPolicy:
   enabled: true
 
-# PrometheusRule with alerts for the tunnelport data plane: a tunnel pod
-# (tbot/ghostunnel) stuck in CrashLoopBackOff, and the operator having no
-# available replicas. Rendered into installNamespace but the expressions
-# select tunnel pods cluster-wide. Disable on installs whose MC monitoring
-# stack does not pick up in-namespace PrometheusRules.
+# Active TLS verification of the tunnels the operator renders
+# (giantswarm/giantswarm#37521 gap 2).
+#
+# On the interval below, the operator dials every RemoteApp that reports
+# `status.ready: true` at `<name>.<namespace>.svc.<clusterDomain>:<tls.port>`
+# with `ServerName` set to that FQDN, and verifies the served chain against
+# the SPIFFE trust bundle. The outcome becomes the
+# `tunnelport_remoteapp_tls_verification` metric and the `TunnelVerified`
+# condition on the CR.
+#
+# Why this exists: nothing else the operator watches can see a certificate
+# whose SANs stopped matching the Service name. tbot joins, the SVID is
+# issued, ghostunnel binds :8443, and the sidecar's readiness probe is a
+# bare TCP connect — a wrong-SAN certificate passes all of it. 40 tunnels
+# served unverifiable certificates for ~2 days with every signal green.
+#
+# Requires `trustBundle.enabled` (the singleton bot's Secret is what the
+# manager pod mounts and verifies against). With trustBundle disabled the
+# manager has nothing to verify against and the check turns itself off.
+verification:
+  enabled: true
+  # Probe cadence, and therefore the worst-case detection latency. Keep it
+  # well under the alerts' `for: 20m` window so a sustained failure is
+  # sampled many times before it pages, and under tbot's 20m SVID renewal
+  # so a bad renewal is caught within one cycle.
+  interval: 2m
+  # Budget for one RemoteApp's dial plus handshake.
+  timeout: 5s
+  # How many RemoteApps are probed at once. A round costs at most
+  # ceil(N/concurrency) * timeout, which must stay under `interval`: the
+  # default covers ~2800 RemoteApps, far past any real consumer MC.
+  concurrency: 8
+  # The cluster's DNS domain, completing the FQDN the probe dials and pins
+  # as ServerName. Change only on clusters installed with a non-default
+  # `--cluster-domain` on kubelet/CoreDNS.
+  clusterDomain: cluster.local
+
+# Monitoring wiring: the PodMonitor that scrapes the manager's /metrics,
+# and the PrometheusRule carrying the alerts.
 monitoring:
+  # PodMonitor for the manager pods. Without it the operator's metrics —
+  # including tunnelport_remoteapp_tls_verification — are served and never
+  # collected, which is the same as not having them. Pod-level rather than
+  # Service-level because the chart renders no Service for the manager and
+  # the metrics endpoint is the only thing worth scraping on it.
+  #
+  # Disable on installs whose monitoring stack does not reconcile
+  # PodMonitors; the metrics stay available on the pod's metrics port for
+  # anything else to scrape.
+  podMonitor:
+    enabled: true
+    interval: 60s
+    scrapeTimeout: 30s
+    # Labels for the PodMonitor resource, merged over the chart's common
+    # labels. On Giant Swarm installations the monitoring agent selects
+    # PodMonitors by a label on the PodMonitor *object*, with two
+    # alternatives (verified against alloy-metrics' rendered config on a
+    # live MC):
+    #
+    #   observability.giantswarm.io/tenant In [<tenant>]      -- current
+    #   application.giantswarm.io/team Exists                 -- "legacy",
+    #     and only when observability.giantswarm.io/tenant is absent
+    #
+    # The chart's common labels already carry the team label, so the
+    # PodMonitor would be discovered either way today — but via the path
+    # the agent's own config calls legacy. Setting the tenant explicitly
+    # puts it on the supported selector and makes the tenant a decision
+    # rather than a fallback. Same value, same reason, as
+    # prometheusRule.labels below; a PodMonitor matching neither selector
+    # is created and silently never scraped.
+    labels:  # @schema additionalProperties: true;skipProperties: true
+      observability.giantswarm.io/tenant: giantswarm
+
+  # PrometheusRule with alerts for the tunnelport data plane: a tunnel pod
+  # (tbot/ghostunnel) stuck in CrashLoopBackOff, the operator having no
+  # available replicas, a tunnel serving a certificate callers cannot
+  # verify, a Ready tunnel that accepts no connections, and the
+  # verification itself being unable to run. Rendered into installNamespace
+  # but the expressions select tunnel pods cluster-wide. Disable on installs
+  # whose MC monitoring stack does not pick up in-namespace PrometheusRules.
   prometheusRule:
     enabled: true
     # Labels for the PrometheusRule resource, merged over the chart's common
@@ -177,10 +251,18 @@ monitoring:
     labels:  # @schema additionalProperties: true;skipProperties: true
       observability.giantswarm.io/tenant: giantswarm
 
-# Ports the manager listens on. Exposed here only so `networkPolicy`
-# stays in sync with the actual flag values.
+# Ports the manager listens on. Exposed here only so `networkPolicy` and
+# the PodMonitor stay in sync with the actual flag values.
+#
+# The metrics port serves plain HTTP (`--metrics-secure=false`), which is
+# the Giant Swarm convention for operator metrics: the authn/authz variant
+# needs the scraping agent's ServiceAccount to hold a `nonResourceURLs:
+# /metrics` grant, which is a cross-repo change per installation, and the
+# exposure is bounded by the NetworkPolicy instead. What is served is
+# controller-runtime's own instrumentation plus RemoteApp names,
+# namespaces and verification outcomes — no credentials, no Secret content.
 ports:
-  metrics: 8443
+  metrics: 8080
   health: 8081
 
 # Pod-level securityContext. Defaults match the GS operator convention.
