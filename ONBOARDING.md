@@ -324,9 +324,10 @@ restart. Run the Step 3 JWKS check before you hand the CR over.
 
 The SVID this bot mints **is** presented as a server cert on the
 consumer-side `Service`'s `:8443`, so the DNS SANs must match the
-Service's in-cluster DNS names. The operator renders the Service as
-`<cr.name>.<ns>.svc.cluster.local`, so all three short/long forms of
-that name go in.
+Service's in-cluster DNS names. The operator renders both the
+`ServiceAccount` and the `Service` as `<cr.name>` in the CR's
+namespace, so **template the SANs off the join attributes instead of
+typing the name and namespace out**:
 
 ```yaml
 kind: workload_identity
@@ -340,10 +341,40 @@ spec:
     id: /bot/<app>-bot
     x509:
       dns_sans:
-        - <app>.<ns>.svc.cluster.local
-        - <app>.<ns>.svc
-        - <app>.<ns>
+        - "{{ join.kubernetes.service_account.name }}.{{ join.kubernetes.service_account.namespace }}.svc.cluster.local"
+        - "{{ join.kubernetes.service_account.name }}.{{ join.kubernetes.service_account.namespace }}.svc"
+        - "{{ join.kubernetes.service_account.name }}.{{ join.kubernetes.service_account.namespace }}"
 ```
+
+Teleport resolves `join.kubernetes.*` from the ServiceAccount JWT the
+pod presented at join time, so the rendered SANs are always exactly
+the DNS names of the `Service` in front of that pod — you cannot get
+them wrong, and they follow the RemoteApp if it ever moves namespace.
+
+Hardcoded SANs are the trap this replaces. A literal
+`<app>.<ns>.svc.cluster.local` is a second, unlinked copy of a
+namespace that is really owned by the consumer-side CR. Move the
+RemoteApp to a different namespace — a chart rename, a re-platforming
+— and nothing here notices: `tbot` still joins, the SVID is still
+issued, `ghostunnel` still serves it, the pod is still `Ready`, and
+the RemoteApp still reports `Ready=True`. The only symptom is every
+caller failing hostname verification with `x509: certificate is valid
+for <app>.<old-ns>...`, from a resource nobody thinks to re-read
+because it was correct when it was written.
+
+Templating does not widen what the SAN can be. The value is attested by
+Teleport from the ServiceAccount JWT rather than asserted by the
+workload, and every `allow` entry on the app's `ProvisionToken` names the
+same `<ns>:<sa>` pair, so only one value can ever resolve.
+
+Note that "the same pair" is not "a single entry". A token shared by
+several consumers of one app carries one `allow` entry per consumer (see
+"A second consumer reaching the same app" in §2c), and they are
+identical, because every consumer renders the same Service name in the
+same namespace. That is fine — and it is why one `WorkloadIdentity` can
+serve them all. What would break the guarantee is a token admitting two
+*different* `<ns>:<sa>` identities: the SAN would then follow whichever
+one happened to join.
 
 Apply:
 
@@ -416,6 +447,56 @@ selector (`remoteapp: <app>`). Without this match, `tbot` joins
 successfully but SVID issuance fails — the symptom on the consumer
 side is `ghostunnel` failing to load its cert.
 
+### The served cert's SANs match the Service (consumer-side)
+
+Nothing in Teleport can tell you the SANs resolved to the right
+namespace — the templates render at issuance time, against the pod. The
+operator answers this for you: it dials each ready tunnel with
+`ServerName` set to the Service FQDN, verifies the chain against the
+SPIFFE trust bundle, and reports the result as the `TunnelVerified`
+condition plus the `tunnelport_remoteapp_tls_verification` metric, which
+the chart's `PrometheusRule` alerts on.
+
+So the first check is just:
+
+```sh
+kubectl -n <ns> get remoteapp <app> \
+  -o jsonpath='{.status.conditions[?(@.type=="TunnelVerified")]}{"\n"}'
+```
+
+`TunnelVerified=True` means a real handshake against the Service name
+succeeded. Note it is deliberately distinct from `TunnelServing`: the
+sidecar's readiness probe is a TCP connect, and a TCP connect never
+looks at a certificate, so a tunnel can serve happily with SANs that
+match nothing.
+
+To see the SANs themselves — worth doing when `TunnelVerified` is False
+and you want to know *why*, or when provisioning a new tunnel before
+the first verification lands:
+
+```sh
+kubectl -n <ns> exec deploy/<app> -c ghostunnel \
+  -- cat /var/run/spiffe/svid.pem \
+  | openssl x509 -noout -text | grep -A2 'Alternative Name'
+```
+
+Every `DNS:` entry must carry the CR's own namespace. To reproduce
+exactly what a caller does, mount the chart-managed trust bundle and let
+`curl` verify (see `hack/smoke/consumer/tls-probe.yaml` for a ready-made
+Job):
+
+```sh
+curl --cacert /etc/spiffe/svid_bundle.pem \
+  https://<app>.<ns>.svc.cluster.local:8443/
+```
+
+Any `x509:` error is a SAN mismatch. A namespace rename is the classic
+trigger, which is why the SANs are templated (§2d) and why the operator
+now checks continuously rather than trusting the resource that was
+authored: this failure used to be invisible from both ends — pods
+`Ready`, RemoteApps `Ready=True` — and surfaced only as broken callers
+one hop downstream.
+
 ### Trust-bundle bot is healthy (one-time, after Step 1)
 
 After the chart is installed on the consumer cluster, the trust-bundle
@@ -465,11 +546,20 @@ pick up the new chain on the next reload. No per-app action needed.
       uses a value unique to this RemoteApp.
 - [ ] Trust-bundle role's selector key is `trust-bundle:`, **not**
       `remoteapp:` — the two families must not cross-match.
-- [ ] Every `ProvisionToken`'s `allow.service_account` names exactly
-      one `<ns>:<sa>` pair; no wildcards.
-- [ ] The WorkloadIdentity's `dns_sans` exactly match the consumer
-      Service's DNS names. Mismatches cause silent TLS verification
-      failures at callers.
+- [ ] Every `allow.service_account` entry on a `ProvisionToken` names the
+      same `<ns>:<sa>` pair; no wildcards, and no second *distinct*
+      identity. Repeated identical entries are expected on a token shared
+      by several consumers of one app (§2c) — it is differing identities
+      that would let the templated `dns_sans` resolve to more than one
+      value.
+- [ ] The WorkloadIdentity's `dns_sans` are templated off
+      `join.kubernetes.service_account.{name,namespace}`, not written
+      out literally — a hardcoded namespace silently stops matching if
+      the RemoteApp moves, and causes TLS verification failures at
+      callers that nothing on either side reports.
+- [ ] The cert the tunnel actually serves verifies against the
+      consumer Service's DNS name (Step 3), not just the resource
+      that was authored.
 - [ ] One bot per RemoteApp. No shared bot identities across tunnels.
 - [ ] The JWKS embedded in every token for a given consumer is the
       consumer's current `/openid/v1/jwks` output.
