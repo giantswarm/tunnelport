@@ -70,12 +70,24 @@ TBOT_MAJOR="$(helm template ./helm/tunnelport |
 TELEPORT_CHART_VERSION="$(helm search repo teleport/teleport-cluster --versions -o json |
   jq -r --arg M "${TBOT_MAJOR}" '[.[] | select(.version | startswith($M+"."))] | first | .version')"
 
-# First install — uses the placeholder publicAddr in helm-values.yaml.
-# We come back in step 2 with the real proxy address.
+# Resolve the proxy address first — the placeholder publicAddr in
+# helm-values.yaml must never reach a running proxy (see the note at the
+# end of this step). The kind node container already exists, and the
+# NodePort is pinned in helm-values.yaml, so both halves are known now.
+TELEPORT_PROXY_IP=$(docker inspect teleport-control-plane \
+  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
+NODEPORT=$(awk '/name: tls/{f=1} f && /nodePort:/{print $2; exit}' \
+  hack/smoke/teleport/helm-values.yaml)
+TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${NODEPORT}"
+echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
+
+sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
+  hack/smoke/teleport/helm-values.yaml > /tmp/teleport-values.yaml
+
 helm --kube-context kind-teleport upgrade --install teleport-cluster \
   teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
   --create-namespace --namespace teleport \
-  --values hack/smoke/teleport/helm-values.yaml \
+  --values /tmp/teleport-values.yaml \
   --wait --timeout 5m
 ```
 
@@ -91,40 +103,32 @@ The proxy is exposed via a `NodePort` Service so peer kind clusters
 can reach it on the kind-teleport node container's IP within the
 `kind` Docker network.
 
-## 2. Network setup: discover the proxy address, then re-apply with publicAddr
+## 2. Why publicAddr is resolved before the install
 
 The proxy advertises a `publicAddr` to clients for reverse-tunnel
 reconnects. Without overriding it, the proxy hands out
 `smoke.tunnelport.local:443` — a name peer kind clusters cannot
-resolve — and kube-agent / tbot fail with DNS errors. We discover the
-real address and re-apply the chart with it.
+resolve — and kube-agent / tbot fail with DNS errors.
 
-```bash
-# Discover the kind container's IP on the `kind` Docker network.
-TELEPORT_PROXY_IP=$(docker inspect teleport-control-plane \
-  --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')
+This used to be two installs: placeholder first, then a second
+`helm upgrade` with the discovered address. **Don't go back to that.**
+`--wait` returns when resources are *ready*, not when the proxy has
+*adopted* the new `publicAddr` — that value only reaches the proxy
+through its ConfigMap, so unless the proxy pods happen to roll they keep
+advertising the placeholder. The producer's kube-agent then registers
+`smoke-app` at `smoke-app.replace_with_teleport_proxy_addr` and the run
+dies three minutes later in an opaque `smoke-curl` timeout. That raced at
+a ~25-75% failure rate on unchanged content (issue #92).
 
-# The proxy's NodePort is auto-assigned by Kubernetes; read it back.
-NODEPORT=$(kubectl --context kind-teleport -n teleport get svc \
-  teleport-cluster -o jsonpath='{.spec.ports[0].nodePort}')
+Two things keep it honest now: `nodePort` is pinned in `helm-values.yaml`
+so the address is computable before anything is installed, and step 5's
+`app_servers` check asserts the *advertised address*, not just that an
+app named `smoke-app` exists.
 
-TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${NODEPORT}"
-echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
-
-# Re-apply the chart with publicAddr set to the discovered address.
-sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
-  hack/smoke/teleport/helm-values.yaml > /tmp/teleport-values.yaml
-
-helm --kube-context kind-teleport upgrade teleport-cluster \
-  teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
-  --namespace teleport --values /tmp/teleport-values.yaml \
-  --wait --timeout 3m
-```
-
-Keep `TELEPORT_PROXY_ADDR` in scope; later steps reference it in
-`sed` calls. If you start a new shell, re-run the `docker inspect` +
-`kubectl get svc` pair — the IP and NodePort are stable for the
-lifetime of the kind cluster but do not survive a recreate.
+Keep `TELEPORT_PROXY_ADDR` in scope; later steps reference it in `sed`
+calls. If you start a new shell, re-run the `docker inspect` + `awk` pair
+from step 1 — the IP is stable for the lifetime of the kind cluster but
+does not survive a recreate.
 
 ## 3. Provision the producer agent token
 

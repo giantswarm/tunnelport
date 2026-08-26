@@ -173,7 +173,7 @@ echo "All three kind clusters ready."
 step "Loading operator image into consumer cluster"
 kind load docker-image "${OPERATOR_IMAGE}" --name consumer >/dev/null
 
-step "Installing Teleport (first pass — placeholder publicAddr)"
+step "Resolving the Teleport chart version and proxy address"
 helm repo add teleport https://charts.releases.teleport.dev >/dev/null 2>&1 || true
 helm repo update >/dev/null
 
@@ -209,23 +209,50 @@ if [ -z "${TELEPORT_CHART_VERSION}" ]; then
   echo "Resolved TELEPORT_CHART_VERSION=${TELEPORT_CHART_VERSION} from chart's tbot.image major ${TBOT_MAJOR}."
 fi
 
-helm --kube-context kind-teleport upgrade --install teleport-cluster \
-  teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
-  --create-namespace --namespace teleport \
-  --values hack/smoke/teleport/helm-values.yaml \
-  --wait --timeout "${HELM_WAIT}s" >/dev/null
-
-step "Discovering proxy address and re-applying with publicAddr"
+# The proxy address is resolved BEFORE the one and only install, so a
+# running proxy never sees the placeholder. Both halves are knowable at
+# this point: the kind node container already exists (created above), and
+# the NodePort is pinned in helm-values.yaml rather than allocated by the
+# API server.
+#
+# This used to be a two-phase install — placeholder first, then a second
+# `helm upgrade` once the NodePort had been allocated. That raced:
+# `--wait` returns when resources are *ready*, not when the proxy has
+# *adopted* the new publicAddr, and publicAddr only reaches the proxy
+# through its ConfigMap. If the proxy pods did not happen to roll, they
+# kept advertising the placeholder, the producer's kube-agent registered
+# smoke-app at `smoke-app.replace_with_teleport_proxy_addr`, and the run
+# died three minutes later in an opaque `smoke-curl` timeout. Measured at
+# a ~25-75% failure rate on unchanged content (issue #92).
 TELEPORT_PROXY_IP="$(docker inspect teleport-control-plane --format '{{ .NetworkSettings.Networks.kind.IPAddress }}')"
-NODEPORT="$(kubectl --context kind-teleport -n teleport get svc teleport-cluster -o jsonpath='{.spec.ports[0].nodePort}')"
+if [ -z "${TELEPORT_PROXY_IP}" ]; then
+  warn "Could not resolve the teleport-control-plane container IP on the kind network."
+  exit 1
+fi
+# Read the pinned NodePort out of the values file rather than restating
+# it here, so the two cannot drift. Kept to awk rather than yq: yq is not
+# used anywhere else in this script and is not preflight-checked, so
+# depending on it here would just trade one failure mode for another.
+NODEPORT="$(awk '/name: tls/{f=1} f && /nodePort:/{print $2; exit}' \
+  hack/smoke/teleport/helm-values.yaml)"
+if ! printf '%s' "${NODEPORT}" | grep -qE '^[0-9]+$'; then
+  warn "Could not read the pinned tls nodePort from hack/smoke/teleport/helm-values.yaml (got: '${NODEPORT}')."
+  exit 1
+fi
 TELEPORT_PROXY_ADDR="${TELEPORT_PROXY_IP}:${NODEPORT}"
 echo "TELEPORT_PROXY_ADDR=${TELEPORT_PROXY_ADDR}"
 
+step "Installing Teleport"
 sed "s|REPLACE_WITH_TELEPORT_PROXY_ADDR|${TELEPORT_PROXY_ADDR}|" \
   hack/smoke/teleport/helm-values.yaml > "${TELEPORT_VALUES_FILE}"
-helm --kube-context kind-teleport upgrade teleport-cluster \
+if grep -q REPLACE_WITH_TELEPORT_PROXY_ADDR "${TELEPORT_VALUES_FILE}"; then
+  warn "publicAddr placeholder survived substitution — refusing to install a proxy that would advertise it."
+  exit 1
+fi
+helm --kube-context kind-teleport upgrade --install teleport-cluster \
   teleport/teleport-cluster --version "${TELEPORT_CHART_VERSION}" \
-  --namespace teleport --values "${TELEPORT_VALUES_FILE}" \
+  --create-namespace --namespace teleport \
+  --values "${TELEPORT_VALUES_FILE}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
 step "Provisioning Teleport role, WorkloadIdentity, bot, and producer agent token via tctl"
@@ -282,22 +309,36 @@ helm --kube-context kind-producer upgrade --install teleport-kube-agent \
   --values "${KUBE_AGENT_VALUES_FILE}" \
   --wait --timeout "${HELM_WAIT}s" >/dev/null
 
-step "Verifying smoke-app registered with Teleport"
+step "Verifying smoke-app registered with Teleport at the right address"
 # Heartbeat-based registration; appears in app_servers, not the static `apps`.
+#
+# Assert the advertised address, not just the name. The app's public_addr
+# is derived from whatever the proxy advertises, so a proxy serving a
+# stale publicAddr still registers a perfectly well-named smoke-app that
+# no client can reach. Checking only the name let that through and the
+# run then died ~3min later in an opaque `smoke-curl` timeout (issue #92).
 APP_SERVERS_OK=0
+APP_SERVERS_DUMP=""
 for _ in $(seq 1 30); do
-  if kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
-      tctl get app_servers 2>/dev/null | grep -q 'name: smoke-app'; then
+  APP_SERVERS_DUMP="$(kubectl --context kind-teleport -n teleport exec "$AUTH_POD" -- \
+    tctl get app_servers 2>/dev/null || true)"
+  if printf '%s' "${APP_SERVERS_DUMP}" | grep -q 'name: smoke-app' &&
+     printf '%s' "${APP_SERVERS_DUMP}" | grep -q "${TELEPORT_PROXY_ADDR}"; then
     APP_SERVERS_OK=1
     break
   fi
   sleep 2
 done
 if [[ "${APP_SERVERS_OK}" -ne 1 ]]; then
-  warn "smoke-app did not register as an app_server within 60s"
+  if printf '%s' "${APP_SERVERS_DUMP}" | grep -q 'name: smoke-app'; then
+    warn "smoke-app registered but not at ${TELEPORT_PROXY_ADDR} — the proxy is advertising a stale publicAddr."
+    printf '%s\n' "${APP_SERVERS_DUMP}" | grep -E 'name: smoke-app|public_addr|uri' >&2 || true
+  else
+    warn "smoke-app did not register as an app_server within 60s"
+  fi
   exit 1
 fi
-echo "smoke-app present in app_servers."
+echo "smoke-app present in app_servers at ${TELEPORT_PROXY_ADDR}."
 
 step "Exporting consumer cluster JWKS and creating the kubernetes-join bot tokens"
 # ADR 0004 / ADR 0008: both kubernetes-join tokens carry the consumer

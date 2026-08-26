@@ -12,10 +12,10 @@ clusterName: smoke.tunnelport.local
 # publicAddr is what the proxy advertises to clients (kube-agent, tbot)
 # for reverse-tunnel reconnects. Without it the proxy hands out
 # "smoke.tunnelport.local:443" and peer kind clusters cannot resolve
-# that name. Replace via `helm upgrade --set` after the
-# teleport-control-plane node IP is discovered (see runbook step 2).
-# The placeholder here keeps the chart installable on first try; the
-# runbook re-installs with the real IP.
+# that name. The placeholder is substituted with the real
+# `<node-ip>:<nodePort>` BEFORE the chart is installed (runbook step 1) —
+# a running proxy must never see it. `nodePort` below is pinned rather
+# than auto-assigned precisely so the address is computable up front.
 publicAddr:
   - "REPLACE_WITH_TELEPORT_PROXY_ADDR"
 
