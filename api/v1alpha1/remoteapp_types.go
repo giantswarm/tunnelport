@@ -103,6 +103,11 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="App",type=string,JSONPath=`.spec.appName`
 // +kubebuilder:printcolumn:name="Port",type=integer,JSONPath=`.spec.port`
 // +kubebuilder:printcolumn:name="Ready",type=boolean,JSONPath=`.status.ready`
+// Verified is a default column, not a priority=1 one, precisely because
+// Ready=True with Verified=False is the state that went unnoticed for two
+// days in giantswarm/giantswarm#37521. A signal only visible under
+// `-o wide` would not have been looked at.
+// +kubebuilder:printcolumn:name="Verified",type=string,JSONPath=`.status.conditions[?(@.type=="TunnelVerified")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Identity",type=string,JSONPath=`.status.conditions[?(@.type=="IdentityIssued")].status`,priority=1
 // +kubebuilder:printcolumn:name="Serving",type=string,JSONPath=`.status.conditions[?(@.type=="TunnelServing")].status`,priority=1

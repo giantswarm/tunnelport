@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"regexp"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -35,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -88,6 +90,13 @@ type flags struct {
 	ghostunnelReloadInterval string
 	ghostunnelListenPort     int
 
+	verifyTunnels         bool
+	verifyInterval        time.Duration
+	verifyTimeout         time.Duration
+	verifyConcurrency     int
+	verifyTrustBundleFile string
+	clusterDomain         string
+
 	zapOpts zap.Options
 }
 
@@ -140,6 +149,42 @@ func parseFlags() flags {
 	flag.IntVar(&f.ghostunnelListenPort, "ghostunnel-listen-port", 8443,
 		"Port the ghostunnel sidecar listens on inside the pod; the rendered "+
 			"Service exposes it as the `tls` port with the same value.")
+	// Active TLS verification (giantswarm/giantswarm#37521 gap 2). The
+	// operator dials each Ready RemoteApp's own rendered Service with
+	// ServerName set to the Service FQDN and verifies the served chain
+	// against the SPIFFE trust bundle, then publishes the outcome as
+	// `tunnelport_remoteapp_tls_verification` and the `TunnelVerified`
+	// condition. Nothing else the operator watches can see a certificate
+	// whose SANs stopped matching: tbot joins, ghostunnel binds, and the
+	// sidecar's TCPSocket probe connects regardless.
+	flag.BoolVar(&f.verifyTunnels, "verify-tunnels", true,
+		"Periodically verify the certificate each RemoteApp tunnel serves against "+
+			"the SPIFFE trust bundle, with ServerName set to the Service FQDN. "+
+			"Requires --verify-trust-bundle-file. Disable to restore the "+
+			"pre-verification observable surface exactly.")
+	flag.DurationVar(&f.verifyInterval, "verify-interval",
+		remoteappctrl.DefaultVerifyInterval,
+		"Interval between TLS verification rounds. Also the worst-case detection "+
+			"latency, so keep it well below the PrometheusRule's `for:` window.")
+	flag.DurationVar(&f.verifyTimeout, "verify-timeout",
+		remoteappctrl.DefaultVerifyTimeout,
+		"Per-RemoteApp budget for the verification dial plus TLS handshake.")
+	flag.IntVar(&f.verifyConcurrency, "verify-concurrency",
+		remoteappctrl.DefaultVerifyConcurrency,
+		"How many RemoteApps are probed concurrently in one verification round. "+
+			"A round costs at most ceil(N/concurrency)*timeout, which must stay "+
+			"under --verify-interval.")
+	flag.StringVar(&f.verifyTrustBundleFile, "verify-trust-bundle-file", "",
+		"Path to the PEM SPIFFE trust bundle the verification dial checks the "+
+			"served chain against — the `svid_bundle.pem` key of the chart's "+
+			"singleton trust-bundle Secret (ADR 0008), mounted read-only into this "+
+			"pod. Read from the filesystem, never through the API server, so the "+
+			"operator keeps its no-verbs-on-secrets posture. Empty (or an "+
+			"unwritten file) makes tunnelport_tls_verification_available report 0 "+
+			"rather than pretend every tunnel is fine.")
+	flag.StringVar(&f.clusterDomain, "cluster-domain", remoteappctrl.DefaultClusterDomain,
+		"The cluster's DNS domain, completing the `<name>.<namespace>.svc.<domain>` "+
+			"FQDN the verification dial targets and pins as ServerName.")
 	flag.StringVar(&f.metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&f.probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
@@ -264,6 +309,45 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 		GhostunnelImage:          f.ghostunnelImage,
 		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
 		GhostunnelListenPort:     int32(f.ghostunnelListenPort), // #nosec G115 -- bounded to 1..65535 above
+	}
+}
+
+// buildVerifyConfig translates the verification flags into the
+// controller package's VerifyConfig.
+//
+// The effective enablement is `--verify-tunnels` AND a non-empty
+// `--verify-trust-bundle-file`, and the asymmetry is deliberate. An
+// *empty* path means the install never configured the check, so the
+// operator stays silent: no metrics, no condition, exactly the surface it
+// had before. A *non-empty but unreadable* path means the install did
+// configure it and something is wrong, so the check runs and reports
+// tunnelport_tls_verification_available == 0 — loudly, because a
+// monitoring gap that hides itself is the failure mode
+// giantswarm/giantswarm#37521 was about.
+func buildVerifyConfig(f flags) remoteappctrl.VerifyConfig {
+	if f.verifyTunnels && f.verifyTrustBundleFile == "" {
+		setupLog.Info("TLS tunnel verification requested but no trust bundle configured; "+
+			"disabling it",
+			"hint", "set --verify-trust-bundle-file (helm: trustBundle.enabled=true "+
+				"mounts it automatically), or pass --verify-tunnels=false to silence this")
+	}
+	if f.verifyConcurrency < 1 {
+		setupLog.Error(nil, "invalid --verify-concurrency (must be >= 1)",
+			"value", f.verifyConcurrency)
+		os.Exit(1)
+	}
+	return remoteappctrl.VerifyConfig{
+		Enabled:         f.verifyTunnels && f.verifyTrustBundleFile != "",
+		Interval:        f.verifyInterval,
+		Timeout:         f.verifyTimeout,
+		Concurrency:     f.verifyConcurrency,
+		TrustBundleFile: f.verifyTrustBundleFile,
+		ClusterDomain:   f.clusterDomain,
+		// One source of truth for the tunnel's TLS port: the same flag
+		// value the renderer stamps onto the ghostunnel container and the
+		// Service, so the probe can never target a port nothing listens
+		// on.
+		TLSPort: int32(f.ghostunnelListenPort), // #nosec G115 -- bounded to 1..65535 by buildReconcilerConfig
 	}
 }
 
@@ -399,10 +483,34 @@ func main() {
 	// here so a later bundle can emit Events without re-touching main.go.
 	recorder := mgr.GetEventRecorder("remoteapp-controller")
 
+	// Active TLS verification. The store is both the reconciler's source
+	// for the TunnelVerified condition and the Prometheus collector for
+	// tunnelport_remoteapp_tls_verification, so the alert and
+	// `kubectl get remoteapp` can never disagree about a tunnel — they
+	// read the same map.
+	verifyCfg := buildVerifyConfig(f)
+	verifications := remoteappctrl.NewVerificationStore(verifyCfg.Enabled)
+	if err := verifications.Register(); err != nil {
+		setupLog.Error(err, "Failed to register TLS verification metrics")
+		os.Exit(1)
+	}
+
+	var verificationEvents <-chan event.TypedGenericEvent[*accessv1alpha1.RemoteApp]
+	if verifyCfg.Enabled {
+		ch, err := remoteappctrl.SetupVerifier(mgr, verifyCfg, verifications)
+		if err != nil {
+			setupLog.Error(err, "Failed to set up TLS tunnel verification")
+			os.Exit(1)
+		}
+		verificationEvents = ch
+	}
+
 	if err := (&remoteappctrl.Reconciler{
-		Client:      mgr.GetClient(),
-		PodDefaults: buildReconcilerConfig(f),
-		Recorder:    recorder,
+		Client:             mgr.GetClient(),
+		PodDefaults:        buildReconcilerConfig(f),
+		Recorder:           recorder,
+		Verifications:      verifications,
+		VerificationEvents: verificationEvents,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to set up RemoteApp controller")
 		os.Exit(1)

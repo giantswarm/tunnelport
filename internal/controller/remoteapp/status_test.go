@@ -534,7 +534,7 @@ func TestComputeStatus_PerRoleConditions(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeStatus(cr, tc.pods, nil, "")
+			got := computeStatus(cr, tc.pods, nil, "", nil)
 
 			identity := conditionByType(got.Conditions, accessv1alpha1.ConditionTypeIdentityIssued)
 			serving := conditionByType(got.Conditions, accessv1alpha1.ConditionTypeTunnelServing)
@@ -571,7 +571,7 @@ func TestComputeStatus_PerRoleConditionsUnknownBeforeContainerStatuses(t *testin
 		},
 	}
 
-	got := computeStatus(newRemoteApp(), []corev1.Pod{pod}, nil, "")
+	got := computeStatus(newRemoteApp(), []corev1.Pod{pod}, nil, "", nil)
 	for _, ct := range []string{
 		accessv1alpha1.ConditionTypeIdentityIssued,
 		accessv1alpha1.ConditionTypeTunnelServing,
@@ -633,7 +633,7 @@ func TestComputeStatus(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := computeStatus(cr, tc.pods, nil, "")
+			got := computeStatus(cr, tc.pods, nil, "", nil)
 			if got.Ready != tc.wantReady {
 				t.Errorf("Ready: want %v, got %v", tc.wantReady, got.Ready)
 			}
@@ -678,7 +678,7 @@ func TestComputeStatus_ReconciledFalseOnApplyError(t *testing.T) {
 		Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 	}}
 
-	got := computeStatus(cr, []corev1.Pod{readyPod}, nil, "reconcile Deployment: forbidden")
+	got := computeStatus(cr, []corev1.Pod{readyPod}, nil, "reconcile Deployment: forbidden", nil)
 
 	// Ready is independent of apply: the previously-applied tbot pod is
 	// up, so Ready stays True even though this pass failed to apply.

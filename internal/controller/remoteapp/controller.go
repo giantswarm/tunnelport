@@ -62,9 +62,11 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
@@ -95,6 +97,24 @@ type Reconciler struct {
 	// from the manager in main.go; the reconcile loop does not yet call
 	// it — that arrives in a later bundle.
 	Recorder events.EventRecorder
+
+	// Verifications is the read side of the TLS verifier's store, used to
+	// build the TunnelVerified condition. Nil when verification is
+	// disabled, in which case the condition is omitted entirely.
+	//
+	// The verifier writes no status of its own: it records outcomes here
+	// and pushes an event onto VerificationEvents, so RemoteApp.status
+	// keeps exactly one writer (reconcileStatus) and the two cannot race
+	// each other into a patch conflict loop.
+	Verifications VerificationReader
+
+	// VerificationEvents carries one event per RemoteApp whose
+	// verification outcome changed. SetupWithManager turns it into a
+	// watch, so a probe result lands in status on the next reconcile pass
+	// rather than waiting for an unrelated Kubernetes event — the whole
+	// point being that a wrong-SAN certificate generates no Kubernetes
+	// events at all.
+	VerificationEvents <-chan event.TypedGenericEvent[*accessv1alpha1.RemoteApp]
 }
 
 // Reconcile renders the four owned objects from the RemoteApp's spec and
@@ -232,7 +252,7 @@ func (r *Reconciler) applyOwned(ctx context.Context, cr *accessv1alpha1.RemoteAp
 // `tunnelport.giantswarm.io/role=tbot` label, narrowing the cache to
 // pods this operator itself rendered.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&accessv1alpha1.RemoteApp{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
@@ -244,9 +264,21 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(r.mapPodToRemoteApp),
-		).
-		Named("remoteapp").
-		Complete(r)
+		)
+
+	// The TLS verifier's channel, when wired. A certificate whose SANs
+	// stopped matching produces no Kubernetes event of any kind — no pod
+	// restart, no object change — so without this source the
+	// TunnelVerified condition would only refresh when something
+	// unrelated happened to trigger a reconcile.
+	if r.VerificationEvents != nil {
+		b = b.WatchesRawSource(source.Channel(
+			r.VerificationEvents,
+			&handler.TypedEnqueueRequestForObject[*accessv1alpha1.RemoteApp]{},
+		))
+	}
+
+	return b.Named("remoteapp").Complete(r)
 }
 
 // mapPodToRemoteApp routes a Pod event to the RemoteApp whose name lives
@@ -294,7 +326,7 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.Rem
 	}
 
 	before := cr.Status.DeepCopy()
-	newStatus := computeStatus(cr, pods, before.Conditions, applyErrSummary)
+	newStatus := computeStatus(cr, pods, before.Conditions, applyErrSummary, r.Verifications)
 	if statusEqual(before, &newStatus) {
 		return nil
 	}

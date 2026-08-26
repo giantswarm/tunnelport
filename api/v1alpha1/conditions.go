@@ -56,4 +56,26 @@ const (
 	// cause and TLS is the symptom, while IdentityIssued=True with
 	// TunnelServing=False is a genuine TLS-side fault.
 	ConditionTypeTunnelServing = "TunnelServing"
+
+	// ConditionTypeTunnelVerified reports whether the certificate the
+	// tunnel actually serves is one a caller can verify: it chains to the
+	// SPIFFE trust bundle AND covers the Service DNS name callers dial.
+	//
+	// Every other condition here can be True while this one is False,
+	// and that combination is not hypothetical — it is
+	// giantswarm/giantswarm#37521. 40 tunnels served SVIDs whose
+	// `dns_sans` had not followed a namespace rename: tbot joined
+	// (IdentityIssued=True), ghostunnel bound its listener
+	// (TunnelServing=True), the sidecar's TCPSocket probe connected
+	// happily (Ready=True), and every caller failed hostname
+	// verification. TunnelServing answers "does the listener accept
+	// connections"; this answers "is what it serves usable", which no
+	// amount of watching Kubernetes objects can establish.
+	//
+	// Unlike its siblings the source is an active TLS handshake the
+	// operator performs against its own rendered Service, not pod state
+	// — see internal/controller/remoteapp/verify.go for the position on
+	// ADR 0003 and for why "cannot verify" is reported as Unknown rather
+	// than False. Absent entirely when TLS verification is disabled.
+	ConditionTypeTunnelVerified = "TunnelVerified"
 )

@@ -135,6 +135,54 @@ Conditions on `status`:
 (The earlier `TokenSecretBound` condition is gone with the static-token
 model — see ADR 0004.)
 
+### Active TLS verification
+
+Everything above is passive: it derives from k8s-visible state, and
+every one of those signals can be green while callers cannot use the
+tunnel at all. That is not hypothetical — it is
+giantswarm/giantswarm#37521. 40 tunnels served SVIDs whose Teleport-side
+`dns_sans` had not followed a namespace rename. tbot joined, the SVID was
+issued, ghostunnel bound `:8443`, the sidecar's `TCPSocket` readiness
+probe connected (a TCP connect never looks at a certificate), and
+`Ready`, `IdentityIssued` and `TunnelServing` were all True for two days.
+The only observable was 21 broken MCPServers one hop downstream.
+
+So the operator asks the tunnel what it is serving. A leader-elected
+manager Runnable dials every RemoteApp reporting `status.ready: true` at
+`<name>.<namespace>.svc.<cluster-domain>:<tls-port>` with `ServerName`
+pinned to that FQDN, and verifies the chain against the SPIFFE trust
+bundle mounted from the chart's singleton `tunnelport-spiffe-bundle`
+Secret. Outcome per RemoteApp: `verified`, `cert_invalid` (connected, no
+verified session), `unreachable` (nothing accepted a connection), or
+`not_ready` (not probed). It surfaces as the `TunnelVerified` condition
+and as `tunnelport_remoteapp_tls_verification`.
+
+Four decisions that carry the design:
+
+- **`cert_invalid` and `unreachable` stay apart.** They have different
+  first moves, and collapsing them would return the SAN-drift failure to
+  the same bucket as an ordinary outage — which the crashloop alert
+  already covers.
+- **"Cannot verify" is never "the certificate is bad."** No bundle, no
+  round yet, or a tunnel that is not Ready each yield Unknown or a
+  distinct result. Blindness is reported separately, via
+  `tunnelport_tls_verification_available`, so the check cannot fail
+  silently — which would be the same class of bug it exists to catch.
+- **`status.ready` is not widened.** It stays join-level; other
+  components consume it. `TunnelVerified` is additive, and `Ready=True`
+  with `Verified=False` is a legitimate, highly actionable state (it is
+  the incident).
+- **The ADR 0003 position.** ADR 0003 restricts status to k8s-visible
+  state for two stated reasons: avoid the `pods/log` RBAC grant, and
+  never couple status classification to tbot's log format. An outbound
+  TLS handshake against the operator's own rendered Service trips
+  neither — it needs no additional RBAC (the RemoteApp list is already
+  watched; the bundle is a mounted file, never a Secret read through the
+  API) and X.509/TLS is a stable contract, unlike a log format. What it
+  does change is that one condition derives from an active probe, which
+  is why the honest-unknown rule and the `verification.enabled` off
+  switch above are part of the deal rather than nice-to-haves.
+
 ### Readiness
 
 `status.ready` is **tunnel-level**: true when at least one tbot pod has its

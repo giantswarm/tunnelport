@@ -45,7 +45,9 @@ spec:
   # health probes on :{{ .Values.ports.health }}. Caller selector is
   # left wide-open here because Prometheus deployments vary across MCs;
   # tighten with a values overlay in clusters that ship a stable
-  # monitoring namespace.
+  # monitoring namespace. This rule is what bounds the exposure of the
+  # plain-HTTP metrics endpoint (`--metrics-secure=false`, see
+  # deployment.yaml) — it is reachable from inside the cluster only.
   - ports:
     - port: {{ .Values.ports.metrics }}
       protocol: TCP
@@ -71,4 +73,24 @@ spec:
       protocol: TCP
     - port: 6443
       protocol: TCP
+{{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+  # The tunnel TLS port, for the verification dial. Without this rule the
+  # probe reaches no RemoteApp Service at all and every tunnel reports
+  # `unreachable` — a whole-fleet false alarm produced by this policy
+  # rather than by the tunnels, which is exactly how #41 presented for
+  # the trust-bundle bot.
+  #
+  # No `to:` peer, for the same reason as the kube-apiserver rule above
+  # and deliberately rather than for brevity: the dial targets a
+  # ClusterIP Service VIP, and CNIs disagree about whether egress peers
+  # are matched before or after the service translation. A
+  # `podSelector: {tunnelport.giantswarm.io/role: tbot}` peer would be
+  # tighter and would silently deny every probe on any implementation
+  # that evaluates the pre-DNAT destination. An empty peer set means
+  # "any destination on this port", which for a pod whose only outbound
+  # traffic is the apiserver and its own tunnels is a narrow grant.
+  - ports:
+    - port: {{ .Values.tls.port }}
+      protocol: TCP
+{{- end }}
 {{- end }}

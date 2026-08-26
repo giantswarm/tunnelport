@@ -24,6 +24,9 @@ spec:
     - jsonPath: .status.ready
       name: Ready
       type: boolean
+    - jsonPath: .status.conditions[?(@.type=="TunnelVerified")].status
+      name: Verified
+      type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date

@@ -56,7 +56,30 @@ spec:
         - --leader-elect=true
         - --health-probe-bind-address=:{{ .Values.ports.health }}
         - --metrics-bind-address=:{{ .Values.ports.metrics }}
-        - --metrics-secure=true
+        # Plain HTTP on the metrics port. controller-runtime's secure
+        # variant gates /metrics behind TokenReview+SubjectAccessReview,
+        # which requires granting the scraping agent's ServiceAccount a
+        # `nonResourceURLs: ["/metrics"]` ClusterRole in every
+        # installation — a cross-repo change per MC, and the reason
+        # tunnelport's metrics were served but never scraped. The GS
+        # convention for operator metrics is plain HTTP bounded by the
+        # NetworkPolicy below; nothing on this endpoint is a credential.
+        - --metrics-secure=false
+{{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+        # Active TLS verification (giantswarm/giantswarm#37521 gap 2).
+        # Gated on trustBundle too: the bundle the manager verifies
+        # against is the singleton bot's Secret, so without that bot
+        # there is nothing to verify against and the operator would only
+        # be able to report "I cannot tell".
+        - --verify-tunnels=true
+        - --verify-trust-bundle-file={{ include "tunnelport.trustBundleMountPath" . }}/svid_bundle.pem
+        - --verify-interval={{ .Values.verification.interval }}
+        - --verify-timeout={{ .Values.verification.timeout }}
+        - --verify-concurrency={{ .Values.verification.concurrency }}
+        - --cluster-domain={{ .Values.verification.clusterDomain }}
+{{- else }}
+        - --verify-tunnels=false
+{{- end }}
         - --tbot-image={{ include "tunnelport.tbotImage" . }}
         - --tbot-cpu-request={{ .Values.tbot.resources.requests.cpu }}
         - --tbot-memory-request={{ .Values.tbot.resources.requests.memory }}
@@ -93,6 +116,28 @@ spec:
           {{- toYaml .Values.resources | nindent 10 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
+{{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+        volumeMounts:
+        # The SPIFFE trust bundle the verification dial checks served
+        # chains against. Mounted as a file rather than read through the
+        # API server on purpose: the operator's ClusterRole grants no
+        # verbs on secrets (ADR 0008) and this keeps it that way — the
+        # kubelet does the reading. `optional` is not set, but the chart
+        # pre-creates the Secret with empty Data, so the pod starts
+        # before tbot has written anything; an empty or absent
+        # svid_bundle.pem reports
+        # tunnelport_tls_verification_available 0 rather than failing
+        # every tunnel.
+        - name: trust-bundle
+          mountPath: {{ include "tunnelport.trustBundleMountPath" . }}
+          readOnly: true
+{{- end }}
+      {{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+      volumes:
+      - name: trust-bundle
+        secret:
+          secretName: {{ .Values.trustBundle.secretName }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

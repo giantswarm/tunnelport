@@ -6,6 +6,22 @@
 # expr keys on the two container names (constants in the operator's
 # renderer) rather than a pod label, since kube-state-metrics exposes
 # `container` directly but pod labels only via a kube_pod_labels join.
+#
+# Two families of rule live here, and the difference matters when reading
+# them:
+#
+#   - The first two are derived from kube-state-metrics — "is the process
+#     up" — and carry cancel_if_kube_state_metrics_down.
+#   - The last three are derived from metrics tunnelport exports itself
+#     via the PodMonitor — "is the tunnel usable" — and carry
+#     cancel_if_monitoring_agent_down instead.
+#
+# The second family exists because the first cannot see the failure mode
+# of giantswarm/giantswarm#37521: 40 tunnels served SVIDs whose dns_sans
+# no longer matched the Service name, and every process was up, every
+# probe green, every condition True. Only asking the tunnel for its
+# certificate reveals that, which is what the operator's verification
+# dial does.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -23,7 +39,7 @@ spec:
         - alert: TunnelPortTunnelCrashLooping
           annotations:
             description: '{{`Tunnel container {{ $labels.container }} in {{ $labels.namespace }}/{{ $labels.pod }} is in CrashLoopBackOff; the SPIFFE/ghostunnel tunnel is down.`}}'
-            runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-tunnel-crashlooping/
+            runbook_url: '{{`https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-crashlooping/?INSTALLATION={{ $labels.installation }}&CLUSTER={{ $labels.cluster_id }}`}}'
           expr: |-
             kube_pod_container_status_waiting_reason{container=~"ghostunnel|tbot", reason="CrashLoopBackOff"} == 1
           for: 10m
@@ -37,13 +53,96 @@ spec:
         - alert: TunnelPortOperatorDown
           annotations:
             description: '{{`The tunnelport operator deployment {{ $labels.namespace }}/{{ $labels.deployment }} has no available replicas; RemoteApp tunnels will not reconcile.`}}'
-            runbook_url: https://intranet.giantswarm.io/docs/support-and-ops/ops-recipes/tunnelport-operator-down/
+            runbook_url: '{{`https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-operator-down/?INSTALLATION={{ $labels.installation }}&CLUSTER={{ $labels.cluster_id }}`}}'
           expr: |-
             kube_deployment_status_replicas_available{namespace="{{ .Values.installNamespace }}", deployment="{{ include "tunnelport.fullname" . }}"} == 0
           for: 15m
           labels:
             area: platform
             cancel_if_kube_state_metrics_down: "true"
+            cancel_if_outside_working_hours: "false"
+            severity: notify
+            team: bumblebee
+            topic: tunnelport
+        # The alert this whole change exists for. The operator dials each
+        # Ready RemoteApp's own Service with ServerName set to the FQDN
+        # callers use and verifies the served chain against the SPIFFE
+        # trust bundle; `cert_invalid` means it connected and could not
+        # get a verified session. Wrong dns_sans, a chain that does not
+        # root in the bundle, and an expired leaf all land here — which
+        # of them is in the CR's TunnelVerified condition message.
+        #
+        # The window has to ride out a rollout. The rendered Deployment
+        # uses maxUnavailable=0 so Service endpoints never empty, but a
+        # RemoteApp whose SVID is being re-minted can briefly serve a
+        # certificate the probe rejects, and a fresh RemoteApp goes
+        # Ready a few seconds before ghostunnel has loaded anything. 20m
+        # is comfortably past both, matches the window muster settled on
+        # for the same reason, and is still two orders of magnitude below
+        # the ~2 days this went unnoticed for.
+        - alert: TunnelPortTunnelCertificateInvalid
+          annotations:
+            description: '{{`Tunnel {{ $labels.remoteapp_namespace }}/{{ $labels.remoteapp_name }} has been serving a certificate that fails verification for 20m; callers cannot establish TLS to it even though the tunnel reports Ready. The TunnelVerified condition on the RemoteApp names the specific fault: SAN mismatch, untrusted chain, or expired leaf.`}}'
+            runbook_url: '{{`https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-certificate-invalid/?INSTALLATION={{ $labels.installation }}&CLUSTER={{ $labels.cluster_id }}`}}'
+          expr: |-
+            tunnelport_remoteapp_tls_verification{result="cert_invalid"} == 1
+          for: 20m
+          labels:
+            area: platform
+            cancel_if_monitoring_agent_down: "true"
+            cancel_if_outside_working_hours: "false"
+            severity: notify
+            team: bumblebee
+            topic: tunnelport
+        # Distinct from the alert above on purpose: collapsing "cannot
+        # connect" into "certificate does not verify" would put the
+        # SAN-drift failure back in the same bucket as an ordinary
+        # outage, and the two have different first moves. This one only
+        # fires for a RemoteApp that reports Ready=True, so it means the
+        # tunnel claims to be serving and nothing accepts a connection —
+        # a Service with no endpoints, a listener that never bound, or a
+        # NetworkPolicy blocking the operator's dial. Tunnels that are
+        # honestly not ready report `not_ready` and are covered by
+        # TunnelPortTunnelCrashLooping instead.
+        - alert: TunnelPortTunnelUnreachable
+          annotations:
+            description: '{{`Tunnel {{ $labels.remoteapp_namespace }}/{{ $labels.remoteapp_name }} reports Ready but has accepted no connection on its TLS port for 20m; callers cannot reach it at all.`}}'
+            runbook_url: '{{`https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-certificate-invalid/?INSTALLATION={{ $labels.installation }}&CLUSTER={{ $labels.cluster_id }}#tunnelporttunnelunreachable`}}'
+          expr: |-
+            tunnelport_remoteapp_tls_verification{result="unreachable"} == 1
+          for: 20m
+          labels:
+            area: platform
+            cancel_if_monitoring_agent_down: "true"
+            cancel_if_outside_working_hours: "false"
+            severity: notify
+            team: bumblebee
+            topic: tunnelport
+        # Guards the check against failing silently, which is the same
+        # class of bug as the one it detects. With no usable trust bundle
+        # the operator has no opinion on any certificate, so it reports
+        # none — and "no series" is indistinguishable from "no
+        # RemoteApps". This says so out loud instead.
+        #
+        # Cluster-scoped: one series regardless of how many RemoteApps
+        # exist, because a missing bundle is one fact about the install.
+        # Only the elected leader reports it (the standby replica emits
+        # no series at all), so `== 0` cannot double-fire.
+        #
+        # 30m, longer than the tunnel windows: on a fresh install the
+        # chart pre-creates the bundle Secret empty and the singleton
+        # tbot fills it in only after it has joined Teleport, so a few
+        # minutes of "not yet" is normal rather than broken.
+        - alert: TunnelPortTLSVerificationUnavailable
+          annotations:
+            description: '{{`tunnelport on {{ $labels.cluster_id }} has had no usable SPIFFE trust bundle for 30m, so it cannot verify any tunnel certificate and TunnelPortTunnelCertificateInvalid cannot fire. Check the singleton trust-bundle tbot in {{ $labels.namespace }}.`}}'
+            runbook_url: '{{`https://intranet.giantswarm.io/docs/support-and-ops/runbooks/tunnelport-tunnel-certificate-invalid/?INSTALLATION={{ $labels.installation }}&CLUSTER={{ $labels.cluster_id }}#tunnelporttlsverificationunavailable`}}'
+          expr: |-
+            tunnelport_tls_verification_available == 0
+          for: 30m
+          labels:
+            area: platform
+            cancel_if_monitoring_agent_down: "true"
             cancel_if_outside_working_hours: "false"
             severity: notify
             team: bumblebee

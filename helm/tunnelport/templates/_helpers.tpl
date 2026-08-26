@@ -89,3 +89,14 @@ tunnelport.tbotImage.
 {{- if $img.digest }}{{- $ref = printf "%s@%s" $ref $img.digest -}}{{- end -}}
 {{- $ref -}}
 {{- end -}}
+
+{{/*
+Mount path for the SPIFFE trust bundle inside the manager pod. One
+definition so the volumeMount and the --verify-trust-bundle-file flag
+cannot drift apart — a flag pointing at an unmounted path would report
+"cannot verify" forever, which is a quiet failure of the very check meant
+to prevent quiet failures.
+*/}}
+{{- define "tunnelport.trustBundleMountPath" -}}
+/etc/tunnelport/spiffe
+{{- end -}}

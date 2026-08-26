@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
 )
@@ -58,6 +59,17 @@ const (
 	reasonIdentityNotIssued = "IdentityNotIssued"
 	reasonTunnelServing     = "TunnelServing"
 	reasonTunnelNotServing  = "TunnelNotServing"
+
+	// Reasons for the TunnelVerified condition. The two Unknown reasons
+	// are as load-bearing as the False one: reporting "cannot verify" as
+	// a failure would make the check cry wolf on every fresh install,
+	// and reporting it as success would recreate the blind spot
+	// giantswarm/giantswarm#37521 is about.
+	reasonCertificateVerified = "CertificateVerified"
+	reasonCertificateInvalid  = "CertificateInvalid"
+	reasonTunnelUnreachable   = "TunnelUnreachable"
+	reasonVerificationPending = "VerificationPending"
+	reasonNotVerifiedNotReady = "TunnelNotReady"
 )
 
 // liveTbotPods returns the subset of pods that are not being torn down,
@@ -411,7 +423,12 @@ func roleCondition(condType string, generation int64, ready bool, summary, trueR
 // applyErrSummary is the operator-internal summary of the most recent
 // reconcile pass's apply errors (empty string means all applies
 // succeeded). The caller — reconcileStatus — collects it before calling.
-func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition, applyErrSummary string) accessv1alpha1.RemoteAppStatus {
+//
+// verifications is the read side of the TLS verifier's store, or nil when
+// verification is not wired. It is the one input here that is not
+// k8s-visible state; see verify.go for the ADR 0003 position and
+// setVerifiedCondition for how absence of a result is reported.
+func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition, applyErrSummary string, verifications VerificationReader) accessv1alpha1.RemoteAppStatus {
 	ready, lastError := summarizeStatus(pods)
 
 	conditions := append([]metav1.Condition(nil), prevConditions...)
@@ -446,6 +463,12 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditio
 		"TLS listener is accepting connections",
 	))
 
+	// TunnelVerified: the one condition whose source is an active probe
+	// rather than pod state. Deliberately placed after TunnelServing —
+	// the pair reads as "the listener accepts connections, and here is
+	// whether what it serves is usable".
+	setVerifiedCondition(&conditions, cr, verifications)
+
 	reconciledCond := metav1.Condition{
 		Type:               accessv1alpha1.ConditionTypeReconciled,
 		ObservedGeneration: cr.Generation,
@@ -467,6 +490,71 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditio
 		ObservedGeneration: cr.Generation,
 		Conditions:         conditions,
 	}
+}
+
+// setVerifiedCondition writes (or removes) the TunnelVerified condition
+// from the TLS verifier's latest outcome.
+//
+// Three cases, and the difference between them is the whole design:
+//
+//   - Verification not wired or disabled: the condition is *removed*, not
+//     set to Unknown. An operator that does not run the check must not
+//     leave a permanent Unknown on every CR, and removal also cleans up
+//     after an install that turns the feature off again.
+//   - Wired but nothing to report — no round has covered this RemoteApp
+//     yet, or the tunnel does not claim to be serving so it was not
+//     probed: Unknown. "I have not checked" is not "the certificate is
+//     bad", and conflating the two would make the condition useless
+//     during every rollout.
+//   - A real outcome: True for verified, False for cert_invalid and
+//     unreachable, with the prober's one-line diagnosis as the message.
+//     That message is the fast path for a human — in the SAN-drift
+//     incident it names both the expected FQDN and the SANs actually
+//     presented, which is the whole diagnosis in one line of
+//     `kubectl describe`.
+func setVerifiedCondition(conditions *[]metav1.Condition, cr *accessv1alpha1.RemoteApp, verifications VerificationReader) {
+	if verifications == nil || !verifications.Enabled() {
+		meta.RemoveStatusCondition(conditions, accessv1alpha1.ConditionTypeTunnelVerified)
+		return
+	}
+
+	cond := metav1.Condition{
+		Type:               accessv1alpha1.ConditionTypeTunnelVerified,
+		ObservedGeneration: cr.Generation,
+	}
+
+	result, ok := verifications.Result(types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name})
+	switch {
+	case !ok:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonVerificationPending
+		cond.Message = "no TLS verification result yet"
+	case result.Result == ResultVerified:
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = reasonCertificateVerified
+		cond.Message = fmt.Sprintf("served certificate verifies for %s", result.ServerName)
+	case result.Result == ResultNotReady:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonNotVerifiedNotReady
+		cond.Message = "tunnel is not ready; certificate not verified"
+	case result.Result == ResultCertInvalid:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonCertificateInvalid
+		cond.Message = result.Detail
+	case result.Result == ResultUnreachable:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonTunnelUnreachable
+		cond.Message = result.Detail
+	default:
+		// Unreachable in practice: every VerificationResult is handled
+		// above. Reported as Unknown rather than silently dropped so a
+		// future result value added without touching this switch shows up
+		// as "not classified" instead of as a passing tunnel.
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonVerificationPending
+		cond.Message = fmt.Sprintf("unclassified verification result %q", result.Result)
+	}
+	meta.SetStatusCondition(conditions, cond)
 }
 
 func boolToConditionStatus(b bool) metav1.ConditionStatus {
