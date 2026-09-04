@@ -5,5 +5,4 @@
 # branch builds, so an ATS smoke deploy on a throwaway kind cluster would only
 # duplicate weaker coverage. Skip the test scenarios here; the cluster type is
 # still declared so ATS's scenario pre-run validation passes.
-smoke-tests-cluster-type: kind
 skip-steps: [smoke, functional, upgrade]
