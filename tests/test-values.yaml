@@ -1,0 +1,20 @@
+# Helm values for the app-test-suite install of execute-chart-tests
+# (.ats/main.yaml): the operator alone on a kind cluster with no Teleport.
+teleport:
+  # Placeholders for the chart's `required` operator flags (ADR 0005). The
+  # manager only dials Teleport while reconciling a RemoteApp, and the smoke
+  # creates none.
+  clusterName: ats-smoke.example.com
+  proxyAddr: ats-smoke.example.com:443
+
+# The singleton trust-bundle tbot has to join a real Teleport before it is
+# ready (ADR 0008) and would keep `helm --wait` from returning; verification
+# checks served chains against the bundle that bot writes, so it goes with it.
+trustBundle:
+  enabled: false
+verification:
+  enabled: false
+
+# The pull secret is provisioned out of band on real clusters; the dev image
+# in gsoci is public.
+imagePullSecret: ""
