@@ -1,36 +1,17 @@
-# Build the manager binary.
-# Pin the builder to the native build platform ($BUILDPLATFORM) and
-# cross-compile to the target arch via GOOS/GOARCH. Without this, buildx
-# runs the builder stage under QEMU emulation for each non-native arch
-# (e.g. arm64 on an amd64 host), which compiles Go painfully slowly and
-# trips the multi-arch push job's no-output timeout.
-FROM --platform=$BUILDPLATFORM golang:1.27 AS builder
-ARG TARGETOS
-ARG TARGETARCH
-
-WORKDIR /workspace
-# Copy the Go Modules manifests
-COPY go.mod go.mod
-COPY go.sum go.sum
-# cache deps before building and copying source so that we don't need to re-download as much
-# and so that source changes don't invalidate our downloaded layer
-RUN go mod download
-
-# Copy the Go source (relies on .dockerignore to filter)
-COPY . .
-
-# Build
-# the GOARCH has no default value to allow the binary to be built according to the host where the command
-# was called. For example, if we call make docker-build in a local env which has the Apple Silicon M1 SO
-# the docker BUILDPLATFORM arg will be linux/arm64 when for Apple x86 it will be linux/amd64. Therefore,
-# by leaving it empty we can ensure that the container and binary shipped on it will have the same platform.
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a -o manager main.go
-
+# The manager binary is built by CircleCI (architect/go-build) for every target
+# platform and attached to the build context as tunnelport-<os>-<arch>; this
+# image only packages it. Compiling it here again (the former builder stage)
+# cost ~5 minutes per image build. For a local build, produce the binary first:
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tunnelport-linux-amd64 .
+# hack/smoke/run.sh does this when the binary is missing.
+#
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/static:nonroot
 WORKDIR /
-COPY --from=builder /workspace/manager .
+ARG TARGETOS
+ARG TARGETARCH
+COPY tunnelport-${TARGETOS}-${TARGETARCH} /manager
 USER 65532:65532
 
 ENTRYPOINT ["/manager"]

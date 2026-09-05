@@ -71,6 +71,11 @@ jobs:
       HELM_VERSION: v3.16.0
     steps:
       - checkout
+      # The Dockerfile packages the go-build binary (tunnelport-linux-<arch>)
+      # instead of compiling; attach the go-build workspace so run.sh's
+      # `docker build .` finds it. Locally run.sh builds it when missing.
+      - attach_workspace:
+          at: .
       - run:
           name: Install kind, kubectl, helm, jq
           command: |

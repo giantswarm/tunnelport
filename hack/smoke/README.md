@@ -237,9 +237,14 @@ default, but for local smoke runs you want the code in this checkout.
 Build a local image and load it into the consumer kind cluster:
 
 ```bash
-make docker-build IMG=tunnelport:smoke
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o tunnelport-linux-amd64 .
+docker build -t tunnelport:smoke .
 kind load docker-image tunnelport:smoke --name consumer
 ```
+
+The Dockerfile packages the prebuilt `tunnelport-linux-<arch>` binary (the
+name `architect/go-build` uses in CI) instead of compiling; use `GOARCH=arm64`
+on an Arm host.
 
 ### 6b. Install the operator
 
