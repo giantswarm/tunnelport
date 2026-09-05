@@ -123,8 +123,9 @@ already provides.
 
 Conditions on `status`:
 
-- `Ready` — join-level state, mirrors pod readiness wired to tbot's
-  tunnel diag endpoint.
+- `Ready` — the roll-up: pod readiness wired to tbot's tunnel diag
+  endpoint, and (see "End-to-end probe") whether the last request
+  through the tunnel got an answer.
 - `Reconciled` — operator-internal state, surfaces whether the most
   recent reconcile pass applied every owned object successfully.
   Distinct from `Ready`: a successful reconcile does not imply the
@@ -168,10 +169,11 @@ Four decisions that carry the design:
   distinct result. Blindness is reported separately, via
   `tunnelport_tls_verification_available`, so the check cannot fail
   silently — which would be the same class of bug it exists to catch.
-- **`status.ready` is not widened.** It stays join-level; other
-  components consume it. `TunnelVerified` is additive, and `Ready=True`
-  with `Verified=False` is a legitimate, highly actionable state (it is
-  the incident).
+- **`TunnelVerified` does not feed `status.ready`.** `Ready=True` with
+  `Verified=False` is a legitimate, highly actionable state (it is the
+  incident), and the alert on `cert_invalid` covers it. The end-to-end
+  probe below is the one active check that does fold into Ready, for
+  reasons of its own.
 - **The ADR 0003 position.** ADR 0003 restricts status to k8s-visible
   state for two stated reasons: avoid the `pods/log` RBAC grant, and
   never couple status classification to tbot's log format. An outbound
@@ -183,13 +185,76 @@ Four decisions that carry the design:
   is why the honest-unknown rule and the `verification.enabled` off
   switch above are part of the deal rather than nice-to-haves.
 
+### End-to-end probe
+
+The TLS check stops at the consumer-side listener. giantswarm/tunnelport#110
+is what lies behind it: a Teleport app service whose gRPC connection to its
+auth server had gone stale answered every new app session with `504 Gateway
+Timeout` for thirteen minutes. ghostunnel forwarded each request faithfully
+(its log shows the bytes going out and the 179-byte 504 coming back), the
+handshake verified, the pods were Ready, and four RemoteApps stayed
+`Ready/Verified/Identity/Serving` while every caller failed. The only place
+the 504 was visible was the producer's `teleport-kube-agent` log.
+
+So, on the same verified session, the operator sends one request through
+the tunnel: `GET spec.probe.path` (default `/`) via ghostunnel → tbot
+application-tunnel → Teleport proxy → app service → app, with a budget of
+`verification.upstream.timeout` (default 10s). What comes back is the
+`UpstreamReachable` condition and the
+`tunnelport_remoteapp_upstream_probe_status` gauge (value: the HTTP status,
+0 for none; label `result`):
+
+- **502, 503, 504 or no response** → `UpstreamReachable=False`, reason
+  `UpstreamUnreachable`. These are what the Teleport proxy and app service
+  return when *they* cannot reach the next hop.
+- **Any other status** → `True`. 200, a 401 from an mcp-oauth resource
+  server, 404, even the app's own 500 all prove the path through Teleport
+  answers; the probe judges the tunnel, not the app.
+- **No request sent** — no round yet, tunnel not Ready, handshake did not
+  verify — → `Unknown`, with a reason that says which. "I did not ask" is
+  never "nobody answered".
+
+The message carries the status, the probed URL (so a responder can `curl`
+it) and, while failing, the time of the last good probe. A Kubernetes Event
+(`events.k8s.io/v1`, reason `UpstreamUnreachable` / `UpstreamReachable`)
+marks each outage boundary, so a failure one hop downstream can be
+attributed to the tunnel path from `kubectl get events` alone. "Boundary"
+is judged against the verifier's store, not the condition alone: the
+store keeps an outage open across rounds that did not probe (pods rolling
+mid-outage turn `False` into `Unknown`) and stamps its end, so a recovery
+after such a gap still gets its one `Normal` Event, while `Unknown→True`
+on a fresh RemoteApp, a pod restart or a leader handover stays silent.
+
+Two decisions that differ from the TLS check:
+
+- **It folds into `Ready`.** A tunnel whose far end answers nothing but
+  504 is not usable, and the consumers of Ready — muster's MCPServer,
+  `kubectl get remoteapp` — are where people looked during #110 and saw
+  green. `Ready=False` with reason `UpstreamUnreachable` puts the
+  degradation where they already look and names the layer;
+  `status.lastError` carries the same diagnosis. The consequence inside
+  the operator: the verifier's "does the tunnel claim to serve?" gate can
+  no longer read `status.ready` (it would un-probe a failing tunnel and
+  never see it recover), so it reads pod readiness directly through the
+  same `summarizeStatus` the reconciler uses.
+- **The load is spread.** ~40 RemoteApps on a consumer MC would otherwise
+  open 40 Teleport app sessions at the same instant every two minutes. Each
+  round schedules its probes at random offsets within
+  `verification.jitter` (default 30s, clamped to half the interval), and
+  reuses the TLS probe's connection rather than opening a second one.
+
+Off switch: `verification.upstream.enabled=false` removes the condition
+and returns `Ready` to join-level, independently of the TLS check.
+
 ### Readiness
 
-`status.ready` is **tunnel-level**: true when at least one tbot pod has its
-k8s readiness probe passing, *and that probe is wired to tbot's diag endpoint
-reporting tunnel state* — not just process liveness. End-to-end reachability
-(Central → producer → app) is not verified by the operator; `lastError` only
-captures failures visible on the consumer side.
+`status.ready` is the roll-up consumers read: true when at least one tbot
+pod has its k8s readiness probe passing — *and that probe is wired to
+tbot's diag endpoint reporting tunnel state*, not just process liveness —
+and, with the end-to-end probe on, when the far end answered the last
+request sent through the tunnel. `lastError` captures the pod-level
+failure summary or, when the pods are fine and the probe is what took
+Ready down, the probe's diagnosis.
 
 ### Operator config posture
 

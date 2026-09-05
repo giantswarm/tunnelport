@@ -170,47 +170,74 @@ certificate — and every caller failed hostname verification for two days.
 
 So the operator asks the tunnel directly. Every
 `verification.interval` (default `2m`, leader-elected so one replica
-does it) it dials each `RemoteApp` that reports `status.ready: true` at
+does it) it dials each `RemoteApp` whose tbot pods are Ready at
 `<name>.<namespace>.svc.<clusterDomain>:<tls.port>` with `ServerName` set
 to that FQDN, and verifies the served chain against the SPIFFE trust
 bundle it mounts from `tunnelport-spiffe-bundle`. That is the same check
 `curl --cacert` performs, which is to say the same check a caller
 performs.
 
-The outcome shows up in two places:
+A verified handshake still stops at the consumer-side listener. In
+[giantswarm/tunnelport#110][upstream] a Teleport app service whose
+connection to its auth server had gone stale answered every new session
+with `504 Gateway Timeout` for thirteen minutes; ghostunnel forwarded the
+requests faithfully, and four RemoteApps stayed Ready and Verified
+throughout. So on that same verified session the operator then sends one
+request *through* the tunnel — `GET /`, or `spec.probe.path` — via tbot,
+the Teleport proxy and the app service to the app, and looks at what
+comes back.
+
+The outcomes show up here:
 
 | Where | What |
 |---|---|
 | `RemoteApp.status.conditions[TunnelVerified]` | `True` / `False` / `Unknown`, with the specific X.509 fault as the message. Also the `Verified` column of `kubectl get remoteapp`. |
 | `tunnelport_remoteapp_tls_verification{remoteapp_name,remoteapp_namespace,result}` | `1` for the current result. Scraped via the chart's `PodMonitor` and alerted on by its `PrometheusRule`. |
+| `RemoteApp.status.conditions[UpstreamReachable]` | `True` for any HTTP status but a gateway failure (200, a 401 from an OAuth resource server, 404 all count); `False` with reason `UpstreamUnreachable` for 502/503/504 or no response within `verification.upstream.timeout`; `Unknown` when no request was sent. The message carries the status, the probed URL and, while failing, the time of the last good probe. **Folds into `Ready`** and `status.ready`; also the `Upstream` column under `-o wide`. |
+| `tunnelport_remoteapp_upstream_probe_status{remoteapp_name,remoteapp_namespace,result}` | The HTTP status the far end answered with (`0` for none), `result` one of `reachable` / `unreachable`. No series for tunnels that were not probed. |
+| Kubernetes Events on the `RemoteApp` | `Warning UpstreamUnreachable` when the far end stops answering, `Normal UpstreamReachable` when it answers again. |
 
-`result` is one of `verified`, `cert_invalid` (connected, no verified TLS
-session), `unreachable` (nothing accepted a connection) or `not_ready`
-(the tunnel makes no claim to be serving, so it was not probed).
-`cert_invalid` and `unreachable` are deliberately separate: they have
-different first moves, and collapsing them would put the SAN-drift
-failure back in the same bucket as an ordinary outage.
+`result` on the TLS series is one of `verified`, `cert_invalid`
+(connected, no verified TLS session), `unreachable` (nothing accepted a
+connection) or `not_ready` (the tunnel makes no claim to be serving, so it
+was not probed). `cert_invalid` and `unreachable` are deliberately
+separate: they have different first moves, and collapsing them would put
+the SAN-drift failure back in the same bucket as an ordinary outage.
 
-Two properties worth knowing:
+Three properties worth knowing:
 
-- **"Cannot verify" is never reported as "the certificate is bad."** With
-  no readable trust bundle the operator has no opinion on any
-  certificate, so it publishes none and flips
-  `tunnelport_tls_verification_available` to `0` — which
-  `TunnelPortTLSVerificationUnavailable` alerts on. A check that fails
-  silently would be the same class of bug as the one it exists to find.
-- **`status.ready` is untouched.** It stays join-level, because other
-  components consume it and widening it would be a silent behavioural
-  change. `TunnelVerified` is additive; `Ready=True` with
-  `Verified=False` is a legitimate and highly actionable state.
+- **"Cannot verify" is never reported as "the certificate is bad,"** and
+  "no request was sent" is never reported as "nobody answered". With no
+  readable trust bundle the operator has no opinion on any certificate, so
+  it publishes none and flips `tunnelport_tls_verification_available` to
+  `0` — which `TunnelPortTLSVerificationUnavailable` alerts on. A tunnel
+  whose handshake failed gets `UpstreamReachable=Unknown`, not `False`. A
+  check that fails silently would be the same class of bug as the one it
+  exists to find.
+- **`TunnelVerified` does not feed `status.ready`; `UpstreamReachable`
+  does.** `Ready=True` with `Verified=False` is a legitimate and highly
+  actionable state with its own alert. A tunnel whose far end answers
+  nothing but 504 is simply not usable, and `Ready` is where its consumers
+  — muster's MCPServer, `kubectl get remoteapp` — look; during #110 they
+  looked there and saw green. `Ready=False` with reason
+  `UpstreamUnreachable` names the layer.
+- **One connection per RemoteApp per round, spread out.** The request rides
+  the TLS probe's session, and each round schedules its probes at random
+  offsets within `verification.jitter` (default `30s`), so ~40 tunnels do
+  not open 40 Teleport app sessions at the same instant every two minutes.
 
-The mechanism needs no additional RBAC — it reads the `RemoteApp` list it
-already watches and the trust bundle from a mounted file, never a `Secret`
-through the API server. Turn it off with `verification.enabled=false`;
-it is also off automatically when `trustBundle.enabled=false`, since
-there would be nothing to verify against.
+The mechanism needs no additional RBAC beyond `create`/`patch` on
+`events.k8s.io` Events — it reads the `RemoteApp` and Pod lists it already
+watches and the trust bundle from a mounted file, never a `Secret` through
+the API server. Turn the whole thing off with `verification.enabled=false`,
+or only the request through the tunnel with
+`verification.upstream.enabled=false` (which also returns `Ready` to
+join-level). It is off automatically when there is no bundle to verify
+against: `trustBundle.enabled=false` and no
+`verification.trustBundleSecretName`.
 
 [gap]: https://github.com/giantswarm/giantswarm/issues/37521
+[upstream]: https://github.com/giantswarm/tunnelport/issues/110
 
 ## Scope
 

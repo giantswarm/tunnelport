@@ -93,7 +93,10 @@ type flags struct {
 	verifyTunnels         bool
 	verifyInterval        time.Duration
 	verifyTimeout         time.Duration
+	verifyJitter          time.Duration
 	verifyConcurrency     int
+	verifyUpstream        bool
+	verifyUpstreamTimeout time.Duration
 	verifyTrustBundleFile string
 	clusterDomain         string
 
@@ -169,11 +172,34 @@ func parseFlags() flags {
 	flag.DurationVar(&f.verifyTimeout, "verify-timeout",
 		remoteappctrl.DefaultVerifyTimeout,
 		"Per-RemoteApp budget for the verification dial plus TLS handshake.")
+	flag.DurationVar(&f.verifyJitter, "verify-jitter",
+		remoteappctrl.DefaultVerifyJitter,
+		"Window over which one round's probes are spread: each Ready RemoteApp is "+
+			"probed at a random offset in [0, jitter) from the round start, so a fleet "+
+			"of tunnels does not open a Teleport app session each at the same instant "+
+			"every interval. Clamped to half of --verify-interval.")
 	flag.IntVar(&f.verifyConcurrency, "verify-concurrency",
 		remoteappctrl.DefaultVerifyConcurrency,
 		"How many RemoteApps are probed concurrently in one verification round. "+
-			"A round costs at most ceil(N/concurrency)*timeout, which must stay "+
-			"under --verify-interval.")
+			"A round costs at most jitter + ceil(N/concurrency)*(timeout+upstream "+
+			"timeout) when every probe times out, which must stay under "+
+			"--verify-interval.")
+	// End-to-end probe through the tunnel (giantswarm/tunnelport#110). After
+	// the handshake verifies, the operator sends one GET through the same
+	// session — ghostunnel, tbot, the Teleport proxy, the app service, the
+	// app — and publishes the answer as `UpstreamReachable`, folded into
+	// `Ready`. A TLS handshake stops at the consumer-side listener; a
+	// Teleport app service that answers every session with 504 passes it.
+	flag.BoolVar(&f.verifyUpstream, "verify-upstream", true,
+		"After a RemoteApp's certificate verifies, send one HTTP request through the "+
+			"tunnel and report whether the far end answered (UpstreamReachable, folded "+
+			"into Ready). 502/503/504 or no response within --verify-upstream-timeout is "+
+			"UpstreamUnreachable; any other status counts as reachable. Disable to keep "+
+			"TLS verification only and Ready join-level.")
+	flag.DurationVar(&f.verifyUpstreamTimeout, "verify-upstream-timeout",
+		remoteappctrl.DefaultUpstreamProbeTimeout,
+		"Budget for the request through the tunnel and its response, separate from "+
+			"--verify-timeout because it crosses the Teleport proxy and app service.")
 	flag.StringVar(&f.verifyTrustBundleFile, "verify-trust-bundle-file", "",
 		"Path to the PEM SPIFFE trust bundle the verification dial checks the "+
 			"served chain against — the `svid_bundle.pem` key of the chart's "+
@@ -351,7 +377,10 @@ func buildVerifyConfig(f flags) remoteappctrl.VerifyConfig {
 		Enabled:         f.verifyTunnels && f.verifyTrustBundleFile != "",
 		Interval:        f.verifyInterval,
 		Timeout:         f.verifyTimeout,
+		Jitter:          f.verifyJitter,
 		Concurrency:     f.verifyConcurrency,
+		UpstreamProbe:   f.verifyUpstream,
+		UpstreamTimeout: f.verifyUpstreamTimeout,
 		TrustBundleFile: f.verifyTrustBundleFile,
 		ClusterDomain:   f.clusterDomain,
 		// One source of truth for the tunnel's TLS port: the same flag
@@ -490,17 +519,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The reconciler doesn't yet call Recorder.Eventf(...); wiring stays
-	// here so a later bundle can emit Events without re-touching main.go.
+	// Events (events.k8s.io/v1) for UpstreamReachable transitions; the
+	// chart's ClusterRole grants create/patch on that group.
 	recorder := mgr.GetEventRecorder("remoteapp-controller")
 
-	// Active TLS verification. The store is both the reconciler's source
-	// for the TunnelVerified condition and the Prometheus collector for
-	// tunnelport_remoteapp_tls_verification, so the alert and
+	// Active tunnel verification. The store is both the reconciler's
+	// source for the TunnelVerified and UpstreamReachable conditions and
+	// the Prometheus collector for tunnelport_remoteapp_tls_verification
+	// and tunnelport_remoteapp_upstream_probe_status, so the alerts and
 	// `kubectl get remoteapp` can never disagree about a tunnel — they
 	// read the same map.
 	verifyCfg := buildVerifyConfig(f)
-	verifications := remoteappctrl.NewVerificationStore(verifyCfg.Enabled)
+	verifications := remoteappctrl.NewVerificationStore(verifyCfg.Enabled, verifyCfg.UpstreamProbe)
 	if err := verifications.Register(); err != nil {
 		setupLog.Error(err, "Failed to register TLS verification metrics")
 		os.Exit(1)

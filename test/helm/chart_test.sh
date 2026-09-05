@@ -24,6 +24,10 @@
 #      can alert on (giantswarm/giantswarm#37521).
 #   8. TLS verification wiring: the flags, the trust-bundle mount, the
 #      NetworkPolicy egress the dial needs, and the off switches.
+#   9. The end-to-end probe (giantswarm/tunnelport#110): its flags, its
+#      off switch, the externally supplied trust bundle that lets an install
+#      without the singleton bot still verify, and the events.k8s.io grant
+#      the transition Events need.
 #
 # We use `grep` on the rendered YAML rather than yq so the test runs in
 # any CI image with bash + helm.
@@ -363,6 +367,59 @@ assert "trustBundle.enabled=false disables verification too" \
   "printf '%s' \"\${RENDERED_NO_BUNDLE}\" | grep -E -- '--verify-tunnels=false'"
 assert "trustBundle.enabled=false drops the trust-bundle mount" \
   "! printf '%s' \"\${RENDERED_NO_BUNDLE}\" | grep -F 'mountPath: /etc/tunnelport/spiffe'"
+
+echo "==> upstream probe assertions (giantswarm/tunnelport#110)"
+
+assert "upstream probe is on by default with its budget and the jitter" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--verify-upstream=true' \
+    && printf '%s' \"\${RENDERED}\" | grep -E -- '--verify-upstream-timeout=10s' \
+    && printf '%s' \"\${RENDERED}\" | grep -E -- '--verify-jitter=30s'"
+
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_NO_UPSTREAM="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
+  --set verification.upstream.enabled=false)"
+assert "verification.upstream.enabled=false flows and keeps TLS verification on" \
+  "printf '%s' \"\${RENDERED_NO_UPSTREAM}\" | grep -E -- '--verify-upstream=false' \
+    && printf '%s' \"\${RENDERED_NO_UPSTREAM}\" | grep -E -- '--verify-tunnels=true'"
+
+# The default install mounts the singleton bot's Secret, which the chart
+# pre-creates, so it must NOT be optional: a missing Secret there is a
+# broken install and should keep the pod from starting.
+assert "default install mounts the bot's Secret without optional" \
+  "! printf '%s' \"\${RENDERED}\" | grep -E '^[[:space:]]+optional: true'"
+
+# An externally supplied bundle (the ATS smoke, an install without the bot)
+# keeps verification on, mounts the named Secret optionally, and still gets
+# the NetworkPolicy egress the dial needs — while the bot itself is absent.
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_EXTERNAL_BUNDLE="$(helm template tunnelport "${CHART}" \
+  --set teleport.clusterName=teleport.example.com \
+  --set teleport.proxyAddr=teleport.example.com:443 \
+  --set trustBundle.enabled=false \
+  --set verification.trustBundleSecretName=my-bundle)"
+assert "an external trust bundle keeps verification on without the bot" \
+  "printf '%s' \"\${RENDERED_EXTERNAL_BUNDLE}\" | grep -E -- '--verify-tunnels=true' \
+    && printf '%s' \"\${RENDERED_EXTERNAL_BUNDLE}\" | grep -E '^[[:space:]]+secretName: my-bundle\$' \
+    && printf '%s' \"\${RENDERED_EXTERNAL_BUNDLE}\" | grep -E '^[[:space:]]+optional: true\$' \
+    && ! printf '%s' \"\${RENDERED_EXTERNAL_BUNDLE}\" | grep -E '^  name: tunnelport-trust-bundle\$'"
+assert "an external trust bundle keeps the TLS-port egress rule" \
+  "printf '%s' \"\${RENDERED_EXTERNAL_BUNDLE}\" | awk '
+      /^kind: NetworkPolicy\$/ { np=1 }
+      np && /^  egress:/ { eg=1 }
+      eg && /- port: 8443/ { found=1 }
+      END { exit !found }'"
+assert "the ATS test values render" \
+  "helm template tunnelport \"${CHART}\" -f \"${REPO_ROOT}/tests/test-values.yaml\" | grep -E -- '--verify-upstream=true'"
+
+# controller-runtime's GetEventRecorder writes events.k8s.io/v1 Events;
+# without this grant the transition Events fail silently in the manager log
+# and nothing else notices.
+assert "manager may create events.k8s.io Events" \
+  "printf '%s' \"\${RENDERED}\" | awk '
+      /^kind: ClusterRole\$/ { cr=1 }
+      cr && /^  - events.k8s.io\$/ { grp=1 }
+      grp && /^  - events\$/ { found=1 }
+      END { exit !found }'"
 
 echo "==> new alert assertions"
 

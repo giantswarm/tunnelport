@@ -100,3 +100,26 @@ to prevent quiet failures.
 {{- define "tunnelport.trustBundleMountPath" -}}
 /etc/tunnelport/spiffe
 {{- end -}}
+
+{{/*
+Whether the manager runs tunnel verification: `verification.enabled` and a
+bundle to verify against — the singleton bot's Secret
+(`trustBundle.enabled`) or one supplied out of band
+(`verification.trustBundleSecretName`). Renders "true" or nothing, so it
+is used as `{{ if include "tunnelport.verificationEnabled" . }}`. One
+definition because the flags, the mount, the volume and the NetworkPolicy
+egress rule must all agree, or the check reports "I cannot tell" forever.
+*/}}
+{{- define "tunnelport.verificationEnabled" -}}
+{{- if and .Values.verification.enabled (or .Values.trustBundle.enabled .Values.verification.trustBundleSecretName) -}}
+true
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the Secret the manager mounts as its trust bundle: an explicit
+`verification.trustBundleSecretName` wins, otherwise the singleton bot's.
+*/}}
+{{- define "tunnelport.trustBundleSecretName" -}}
+{{- default .Values.trustBundle.secretName .Values.verification.trustBundleSecretName -}}
+{{- end -}}

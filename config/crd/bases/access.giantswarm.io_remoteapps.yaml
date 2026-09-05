@@ -38,6 +38,10 @@ spec:
       name: Serving
       priority: 1
       type: string
+    - jsonPath: .status.conditions[?(@.type=="UpstreamReachable")].status
+      name: Upstream
+      priority: 1
+      type: string
     - jsonPath: .status.lastError
       name: LastError
       priority: 1
@@ -106,6 +110,23 @@ spec:
                 x-kubernetes-validations:
                 - message: port 3001 is reserved for tbot's diagnostic endpoint
                   rule: self != 3001
+              probe:
+                description: |-
+                  Probe tunes the operator's end-to-end probe through this tunnel (the
+                  UpstreamReachable condition). Absent means the defaults: one
+                  `GET /` per verification round.
+                properties:
+                  path:
+                    description: |-
+                      Path is the request path of the probe, `/` when unset. Point it at a
+                      cheap endpoint of the app (a health route, say) when `GET /` is
+                      expensive or misleading. The status the app returns is not judged:
+                      401 and 404 count as reachable, only gateway failures do not.
+                    maxLength: 2048
+                    minLength: 1
+                    pattern: ^/[^\s]*$
+                    type: string
+                type: object
               replicas:
                 description: |-
                   Replicas is the desired number of tbot pods for this RemoteApp. The
@@ -198,9 +219,11 @@ spec:
                 x-kubernetes-list-type: map
               lastError:
                 description: |-
-                  LastError carries the most recent k8s-visible failure summary, e.g.
-                  "CrashLoopBackOff (5 restarts), last termination: Error (137)".
-                  The operator does not read pod logs (see ADR-0003).
+                  LastError carries the most recent failure summary, e.g.
+                  "CrashLoopBackOff (5 restarts), last termination: Error (137)" from
+                  k8s-visible pod state, or the upstream probe's diagnosis when the pods
+                  are fine but the path behind the tunnel is not. The operator does not
+                  read pod logs (see ADR-0003).
                 type: string
               observedGeneration:
                 description: |-
@@ -210,8 +233,10 @@ spec:
                 type: integer
               ready:
                 description: |-
-                  Ready is the tunnel-level readiness shorthand: true when at least one
-                  tbot pod's readiness probe (wired to tbot's diag endpoint) passes.
+                  Ready is the shorthand consumers read: at least one tbot pod's
+                  readiness probe (wired to tbot's diag endpoint) passes, and — when the
+                  operator runs the end-to-end probe — the far end answered the last
+                  request sent through the tunnel. Mirrors the Ready condition.
                 type: boolean
             type: object
         required:

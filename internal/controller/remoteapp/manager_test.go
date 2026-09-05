@@ -25,7 +25,18 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
+)
+
+// testVerifications and testVerificationEvents are the verifier's store
+// and reconcile-nudge channel as wired into the shared test manager; see
+// startManager.
+var (
+	testVerifications      *VerificationStore
+	testVerificationEvents chan event.TypedGenericEvent[*accessv1alpha1.RemoteApp]
 )
 
 // managerHandle owns the controller-runtime manager goroutine for
@@ -85,9 +96,19 @@ func startManager(ctx context.Context, cfg *rest.Config, scheme *runtime.Scheme)
 		return nil, fmt.Errorf("ctrl.NewManager: %w", err)
 	}
 
+	// The verification store and its channel are wired the way main.go
+	// wires them, minus the prober: tests push outcomes into the store and
+	// an event onto the channel to play one round, which exercises the
+	// reconciler's half of the probe path — conditions, the fold into
+	// Ready, the Event — against a real API server.
+	testVerifications = NewVerificationStore(true, true)
+	testVerificationEvents = make(chan event.TypedGenericEvent[*accessv1alpha1.RemoteApp], 16)
 	r := &Reconciler{
-		Client:      mgr.GetClient(),
-		PodDefaults: testConfig(),
+		Client:             mgr.GetClient(),
+		PodDefaults:        testConfig(),
+		Recorder:           mgr.GetEventRecorder("remoteapp-controller"),
+		Verifications:      testVerifications,
+		VerificationEvents: testVerificationEvents,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		return nil, fmt.Errorf("Reconciler.SetupWithManager: %w", err)

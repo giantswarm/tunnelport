@@ -69,18 +69,45 @@ type RemoteAppSpec struct {
 	// so absence remains observable in the API.
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Probe tunes the operator's end-to-end probe through this tunnel (the
+	// UpstreamReachable condition). Absent means the defaults: one
+	// `GET /` per verification round.
+	// +optional
+	Probe *ProbeSpec `json:"probe,omitempty"`
+}
+
+// ProbeSpec configures the end-to-end HTTP probe the operator sends through
+// the tunnel each verification round. The request travels ghostunnel →
+// tbot application-tunnel → Teleport proxy → Teleport app service → app,
+// so any HTTP status proves the whole path answers; 502/503/504 and a
+// timeout mean it does not.
+type ProbeSpec struct {
+	// Path is the request path of the probe, `/` when unset. Point it at a
+	// cheap endpoint of the app (a health route, say) when `GET /` is
+	// expensive or misleading. The status the app returns is not judged:
+	// 401 and 404 count as reachable, only gateway failures do not.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	// +kubebuilder:validation:Pattern="^/[^\\s]*$"
+	Path string `json:"path,omitempty"`
 }
 
 // RemoteAppStatus defines the observed state of a RemoteApp.
 type RemoteAppStatus struct {
-	// Ready is the tunnel-level readiness shorthand: true when at least one
-	// tbot pod's readiness probe (wired to tbot's diag endpoint) passes.
+	// Ready is the shorthand consumers read: at least one tbot pod's
+	// readiness probe (wired to tbot's diag endpoint) passes, and — when the
+	// operator runs the end-to-end probe — the far end answered the last
+	// request sent through the tunnel. Mirrors the Ready condition.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 
-	// LastError carries the most recent k8s-visible failure summary, e.g.
-	// "CrashLoopBackOff (5 restarts), last termination: Error (137)".
-	// The operator does not read pod logs (see ADR-0003).
+	// LastError carries the most recent failure summary, e.g.
+	// "CrashLoopBackOff (5 restarts), last termination: Error (137)" from
+	// k8s-visible pod state, or the upstream probe's diagnosis when the pods
+	// are fine but the path behind the tunnel is not. The operator does not
+	// read pod logs (see ADR-0003).
 	// +optional
 	LastError string `json:"lastError,omitempty"`
 
@@ -111,6 +138,10 @@ type RemoteAppStatus struct {
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:printcolumn:name="Identity",type=string,JSONPath=`.status.conditions[?(@.type=="IdentityIssued")].status`,priority=1
 // +kubebuilder:printcolumn:name="Serving",type=string,JSONPath=`.status.conditions[?(@.type=="TunnelServing")].status`,priority=1
+// Upstream can live under -o wide: unlike Verified it already folds into
+// the Ready column, so the default view shows the degradation and the wide
+// view says which layer it is.
+// +kubebuilder:printcolumn:name="Upstream",type=string,JSONPath=`.status.conditions[?(@.type=="UpstreamReachable")].status`,priority=1
 // +kubebuilder:printcolumn:name="LastError",type=string,JSONPath=`.status.lastError`,priority=1
 // +kubebuilder:printcolumn:name="Reconciled",type=string,JSONPath=`.status.conditions[?(@.type=="Reconciled")].status`,priority=1
 

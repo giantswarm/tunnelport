@@ -192,7 +192,7 @@ wait_for_metric() {
     out="$(scrape_manager_metrics || true)"
     if grep -qE "${pattern}" <<<"${out}"; then
       printf '  metric ok: %s\n' "${label}"
-      grep -E '^tunnelport_(remoteapp_tls_verification|tls_verification_available)' <<<"${out}" || true
+      grep -E '^tunnelport_(remoteapp_tls_verification|remoteapp_upstream_probe_status|tls_verification_available)' <<<"${out}" || true
       return 0
     fi
     sleep 5
@@ -784,6 +784,18 @@ wait_for_metric "smoke-app verified" \
 
 wait_for_condition TunnelVerified True CertificateVerified "${VERIFY_WAIT}"
 
+# The end-to-end probe (giantswarm/tunnelport#110): one GET on the verified
+# session, through ghostunnel, tbot, the Teleport proxy and the app service
+# to http-echo, which answers 200. This is the only place the request
+# travels a real Teleport; the ATS smoke fakes the far end.
+wait_for_condition UpstreamReachable True UpstreamReachable "${VERIFY_WAIT}"
+wait_for_metric "smoke-app upstream answered 200" \
+  '^tunnelport_remoteapp_upstream_probe_status\{.*remoteapp_name="smoke-app".*result="reachable".*\} 200$' \
+  "${VERIFY_WAIT}"
+# Folded into Ready without changing it: a reachable upstream keeps the
+# join-level verdict.
+assert_condition Ready True TunnelReady
+
 step "Breaking one SAN on Teleport Central (negative case)"
 # Same WorkloadIdentity, same label, same role — only the dns_sans
 # namespace segment changes. `--force` overwrites the resource created
@@ -817,6 +829,11 @@ echo "  Ready / IdentityIssued / TunnelServing are all True — exactly as in th
 # and the metric the alert fires on.
 wait_for_condition TunnelVerified False CertificateInvalid "${VERIFY_WAIT}"
 
+# No verified session, no request: the upstream verdict is honestly Unknown
+# rather than a second False, and Ready stays True above — the certificate
+# incident keeps its own shape instead of being relabelled an upstream one.
+assert_condition UpstreamReachable Unknown TunnelNotVerified
+
 wait_for_metric "smoke-app reports cert_invalid" \
   '^tunnelport_remoteapp_tls_verification\{.*remoteapp_name="smoke-app".*result="cert_invalid".*\} 1$' \
   "${VERIFY_WAIT}"
@@ -843,6 +860,7 @@ kubectl --context kind-teleport -n teleport exec -i "$AUTH_POD" -- \
 restart_tunnel_and_wait_ready
 
 wait_for_condition TunnelVerified True CertificateVerified "${VERIFY_WAIT}"
+wait_for_condition UpstreamReachable True UpstreamReachable "${VERIFY_WAIT}"
 wait_for_metric "smoke-app verified again" \
   '^tunnelport_remoteapp_tls_verification\{.*remoteapp_name="smoke-app".*result="verified".*\} 1$' \
   "${VERIFY_WAIT}"

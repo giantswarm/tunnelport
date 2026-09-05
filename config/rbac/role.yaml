@@ -36,6 +36,14 @@ rules:
   - patch
   - watch
 - apiGroups:
+  - ""
+  - events.k8s.io
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - access.giantswarm.io
   resources:
   - remoteapps
