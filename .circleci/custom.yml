@@ -81,7 +81,15 @@ jobs:
             sudo install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
             curl -sSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz -C /tmp
             sudo install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
-            sudo apt-get update -qq && sudo apt-get install -y -qq jq
+            # jq ships with the ubuntu-2404 machine image. The former
+            # unconditional `apt-get update` hung with no output until the
+            # 10-minute step timeout in 6 of the 12 e2e-smoke runs between
+            # 2026-09-04 and 2026-09-05 (jobs 2221, 2227, 2235, 2246, 2285,
+            # 2287) -- the only way this job failed in that window. Touch apt
+            # only if jq is really missing.
+            if ! command -v jq >/dev/null 2>&1; then
+              sudo apt-get update -qq && sudo apt-get install -y -qq jq
+            fi
             kind version && kubectl version --client && helm version --short && jq --version
       - run:
           name: Run end-to-end smoke
