@@ -20,8 +20,11 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -217,6 +220,35 @@ func TestProbeTunnel_ConnectionClosedIsUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(got.Upstream.Detail, "no HTTP response from") {
 		t.Errorf("Detail = %q, want the no-response wording", got.Upstream.Detail)
+	}
+}
+
+// TestDescribeUpstreamError pins that the no-response wording is stable
+// across rounds. A *net.OpError carries the probe's ephemeral source port;
+// left in the message it would change the outcome every round, re-enqueue
+// the RemoteApp every round, and rewrite its status every round.
+func TestDescribeUpstreamError(t *testing.T) {
+	const url = "https://app.ns.svc.cluster.local:8443/"
+	reset := &net.OpError{
+		Op: "read", Net: "tcp",
+		Source: &net.TCPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 43210},
+		Addr:   &net.TCPAddr{IP: net.IPv4(10, 0, 0, 2), Port: 8443},
+		Err:    errors.New("connection reset by peer"),
+	}
+	got := describeUpstreamError(url, 10*time.Second, reset)
+	if strings.Contains(got, "43210") || strings.Contains(got, "10.0.0.1") {
+		t.Errorf("message leaks the ephemeral source address: %q", got)
+	}
+	if want := "no HTTP response from " + url + ": connection reset by peer"; got != want {
+		t.Errorf("message = %q, want %q", got, want)
+	}
+
+	timeout := &net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded}
+	if got := describeUpstreamError(url, 10*time.Second, timeout); got != "no HTTP response from "+url+" within 10s" {
+		t.Errorf("timeout message = %q", got)
+	}
+	if got := describeUpstreamError(url, 10*time.Second, io.EOF); got != "no HTTP response from "+url+": EOF" {
+		t.Errorf("EOF message = %q", got)
 	}
 }
 

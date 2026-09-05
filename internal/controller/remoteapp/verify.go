@@ -898,13 +898,22 @@ func probeUpstream(conn net.Conn, t probeTarget) UpstreamProbe {
 // describeUpstreamError distinguishes "nothing came back in time" from
 // "the connection broke", the two ways a tunnel with a dead far end
 // presents: tbot holds the client connection open while its own dial to
-// the proxy hangs (timeout), or closes it when that dial fails (EOF).
+// the proxy hangs (timeout), or closes it when that dial fails (EOF,
+// connection reset).
+//
+// The text has to be stable across rounds: it becomes the condition
+// message, and RunOnce detects change with `!=` on the whole outcome. A
+// *net.OpError renders its source address — an ephemeral port that
+// differs on every probe — so only its inner error is kept.
 func describeUpstreamError(url string, timeout time.Duration, err error) string {
 	if errors.Is(err, os.ErrDeadlineExceeded) {
 		return fmt.Sprintf("no HTTP response from %s within %s", url, timeout)
 	}
 	if netErr, ok := errors.AsType[net.Error](err); ok && netErr.Timeout() {
 		return fmt.Sprintf("no HTTP response from %s within %s", url, timeout)
+	}
+	if opErr, ok := errors.AsType[*net.OpError](err); ok && opErr.Err != nil {
+		err = opErr.Err
 	}
 	return fmt.Sprintf("no HTTP response from %s: %s", url, err)
 }
