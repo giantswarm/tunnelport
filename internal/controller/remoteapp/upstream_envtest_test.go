@@ -171,7 +171,18 @@ func TestStatus_UpstreamUnreachableFoldsIntoReadyAndEmitsEvents(t *testing.T) {
 		t.Errorf("Event action = %q, want %q", warning.Action, eventActionProbe)
 	}
 
-	// Recovery: back to Ready with a Normal Event.
+	// The tunnel pods roll in the middle of the outage: a round finds no
+	// Ready pod, the verdict goes Unknown, Ready follows the pods. This is
+	// the shape the ATS smoke produces when it swaps the fake upstream, and
+	// it must not swallow the recovery Event below.
+	publishOutcome(cr, Verification{
+		Result: ResultNotReady, ServerName: fqdn,
+		Upstream: UpstreamProbe{Result: UpstreamNotProbed},
+	})
+	waitForUpstream(ctx, t, key, true, reasonTunnelReady, metav1.ConditionUnknown)
+
+	// Recovery: back to Ready with a Normal Event, despite the Unknown in
+	// between.
 	publishOutcome(cr, Verification{
 		Result: ResultVerified, ServerName: fqdn,
 		Upstream: UpstreamProbe{Result: UpstreamReachable, StatusCode: 200, URL: url},

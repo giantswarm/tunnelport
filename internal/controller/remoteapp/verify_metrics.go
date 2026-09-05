@@ -114,6 +114,17 @@ type VerificationStore struct {
 	// Pruned with results, so a deleted RemoteApp leaves nothing behind.
 	lastUpstreamSuccess map[types.NamespacedName]time.Time
 
+	// upstreamDownSince is when the current outage of each RemoteApp's
+	// upstream began: stamped by the first unreachable round, carried
+	// through rounds that did not probe (pods restarting mid-outage),
+	// cleared by the next reachable round. upstreamRecoveredAt is when
+	// that clearing round ran. Together they let the reconciler tell a
+	// recovery apart from an ordinary Unknown→True — the condition alone
+	// cannot, because a pod roll during the outage replaces False with
+	// Unknown and the eventual True then looks like any fresh tunnel.
+	upstreamDownSince   map[types.NamespacedName]time.Time
+	upstreamRecoveredAt map[types.NamespacedName]time.Time
+
 	// bundleAvailable mirrors whether the last round managed to load a
 	// trust bundle.
 	bundleAvailable bool
@@ -159,6 +170,8 @@ func NewVerificationStore(enabled, upstreamProbe bool) *VerificationStore {
 	return &VerificationStore{
 		results:             make(map[types.NamespacedName]Verification),
 		lastUpstreamSuccess: make(map[types.NamespacedName]time.Time),
+		upstreamDownSince:   make(map[types.NamespacedName]time.Time),
+		upstreamRecoveredAt: make(map[types.NamespacedName]time.Time),
 		enabled:             enabled,
 		upstreamProbe:       enabled && upstreamProbe,
 		now:                 time.Now,
@@ -228,13 +241,36 @@ func (s *VerificationStore) LastUpstreamSuccess(key types.NamespacedName) (time.
 	return t, ok
 }
 
+// UpstreamDownSince implements VerificationReader.
+func (s *VerificationStore) UpstreamDownSince(key types.NamespacedName) (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.upstreamDownSince[key]
+	return t, ok
+}
+
+// UpstreamRecoveredAt implements VerificationReader.
+func (s *VerificationStore) UpstreamRecoveredAt(key types.NamespacedName) (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.upstreamRecoveredAt[key]
+	return t, ok
+}
+
 // Replace swaps in the outcomes of one complete probe round and records
 // that the trust bundle was usable.
 //
 // Wholesale replacement is what makes deletion work without a delete
 // hook: a RemoteApp that vanished between rounds is simply absent from
-// the new map, so its series is gone at the next scrape — and so is its
-// last-success timestamp.
+// the new map, so its series is gone at the next scrape — and so are its
+// timestamps.
+//
+// The upstream bookkeeping per RemoteApp: a reachable round stamps the
+// last success and, if an outage was open, closes it and stamps the
+// recovery; an unreachable round opens an outage if none is open; a round
+// that did not probe (tunnel not Ready, handshake failed) carries
+// everything over unchanged, so a pod roll in the middle of an outage
+// neither ends it nor starts a new one.
 func (s *VerificationStore) Replace(results map[types.NamespacedName]Verification) {
 	next := make(map[types.NamespacedName]Verification, len(results))
 	maps.Copy(next, results)
@@ -242,17 +278,40 @@ func (s *VerificationStore) Replace(results map[types.NamespacedName]Verificatio
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	successes := make(map[types.NamespacedName]time.Time, len(s.lastUpstreamSuccess))
-	for key, v := range next {
-		if v.Upstream.Result == UpstreamReachable {
-			successes[key] = now
-			continue
+	down := make(map[types.NamespacedName]time.Time, len(s.upstreamDownSince))
+	recovered := make(map[types.NamespacedName]time.Time, len(s.upstreamRecoveredAt))
+	carry := func(from map[types.NamespacedName]time.Time, to map[types.NamespacedName]time.Time, key types.NamespacedName) {
+		if t, ok := from[key]; ok {
+			to[key] = t
 		}
-		if t, ok := s.lastUpstreamSuccess[key]; ok {
-			successes[key] = t
+	}
+	for key, v := range next {
+		switch v.Upstream.Result {
+		case UpstreamReachable:
+			successes[key] = now
+			if _, wasDown := s.upstreamDownSince[key]; wasDown {
+				recovered[key] = now
+			} else {
+				carry(s.upstreamRecoveredAt, recovered, key)
+			}
+		case UpstreamUnreachable:
+			carry(s.lastUpstreamSuccess, successes, key)
+			carry(s.upstreamRecoveredAt, recovered, key)
+			if t, ok := s.upstreamDownSince[key]; ok {
+				down[key] = t
+			} else {
+				down[key] = now
+			}
+		default:
+			carry(s.lastUpstreamSuccess, successes, key)
+			carry(s.upstreamDownSince, down, key)
+			carry(s.upstreamRecoveredAt, recovered, key)
 		}
 	}
 	s.results = next
 	s.lastUpstreamSuccess = successes
+	s.upstreamDownSince = down
+	s.upstreamRecoveredAt = recovered
 	s.bundleAvailable = true
 	s.probed = true
 }

@@ -33,10 +33,12 @@ import (
 // a test says otherwise, so the TunnelVerified rows below keep exercising
 // the surface an install without the HTTP probe has.
 type stubVerifications struct {
-	enabled  bool
-	upstream bool
-	results  map[types.NamespacedName]Verification
-	lastGood map[types.NamespacedName]time.Time
+	enabled   bool
+	upstream  bool
+	results   map[types.NamespacedName]Verification
+	lastGood  map[types.NamespacedName]time.Time
+	downSince map[types.NamespacedName]time.Time
+	recovered map[types.NamespacedName]time.Time
 }
 
 func (s stubVerifications) Enabled() bool { return s.enabled }
@@ -50,6 +52,16 @@ func (s stubVerifications) Result(key types.NamespacedName) (Verification, bool)
 
 func (s stubVerifications) LastUpstreamSuccess(key types.NamespacedName) (time.Time, bool) {
 	t, ok := s.lastGood[key]
+	return t, ok
+}
+
+func (s stubVerifications) UpstreamDownSince(key types.NamespacedName) (time.Time, bool) {
+	t, ok := s.downSince[key]
+	return t, ok
+}
+
+func (s stubVerifications) UpstreamRecoveredAt(key types.NamespacedName) (time.Time, bool) {
+	t, ok := s.recovered[key]
 	return t, ok
 }
 

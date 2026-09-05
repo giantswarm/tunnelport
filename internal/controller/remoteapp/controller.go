@@ -351,37 +351,67 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.Rem
 // emits: what the controller was doing when it observed the transition.
 const eventActionProbe = "Probe"
 
-// recordUpstreamTransition emits one Event when the UpstreamReachable
-// condition changes status: a Warning when the far end stops answering,
-// a Normal one when it answers again after having failed. It is called
-// after the status patch succeeded, so an Event never describes a state
-// the CR does not show.
+// recordUpstreamTransition emits one Event per outage boundary of the
+// UpstreamReachable condition: a Warning when the far end stops answering,
+// a Normal one when it answers again. It is called after the status patch
+// succeeded, so an Event never describes a state the CR does not show.
 //
-// Unknown→True is deliberately silent. Every RemoteApp goes through it
-// once per leader start, and 40 "upstream answered" Events per rollout
-// would train readers to ignore the ones that matter.
+// "Boundary" is judged against the store, not only against the previous
+// condition, because the condition forgets. A pod roll in the middle of
+// an outage replaces False with Unknown (not probed), and the eventual
+// True then looks exactly like a fresh tunnel's first verdict — which is
+// how the ATS smoke first caught this. The store keeps the outage open
+// across not-probed rounds (UpstreamDownSince) and stamps its end
+// (UpstreamRecoveredAt), and both are compared with the previous
+// condition's transition time:
+//
+//   - into False: emit unless the previous condition was already False, or
+//     was Unknown for an outage that had begun before it (the pods went
+//     away and came back while the upstream stayed down: one Warning).
+//   - into True: emit only if an outage ended after the previous
+//     condition last transitioned. Unknown→True on a fresh RemoteApp, on a
+//     pod restart with a healthy upstream, or on a leader handover ends no
+//     outage and stays silent — 40 "upstream answered" Events per rollout
+//     would train readers to ignore the ones that matter.
 func (r *Reconciler) recordUpstreamTransition(cr *accessv1alpha1.RemoteApp, before, after []metav1.Condition) {
-	if r.Recorder == nil {
+	if r.Recorder == nil || r.Verifications == nil {
 		return
 	}
 	next := meta.FindStatusCondition(after, accessv1alpha1.ConditionTypeUpstreamReachable)
 	if next == nil {
 		return
 	}
+	prev := meta.FindStatusCondition(before, accessv1alpha1.ConditionTypeUpstreamReachable)
 	prevStatus := metav1.ConditionUnknown
-	if prev := meta.FindStatusCondition(before, accessv1alpha1.ConditionTypeUpstreamReachable); prev != nil {
+	if prev != nil {
 		prevStatus = prev.Status
 	}
 	if prevStatus == next.Status {
 		return
 	}
+	key := types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}
+
 	switch next.Status {
 	case metav1.ConditionFalse:
+		if prev != nil && prevStatus == metav1.ConditionUnknown {
+			if since, ok := r.Verifications.UpstreamDownSince(key); ok && since.Before(prev.LastTransitionTime.Time) {
+				// The outage predates the Unknown: the pods came back
+				// into an outage that was already reported.
+				return
+			}
+		}
 		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, reasonUpstreamUnreachable, eventActionProbe, "%s", next.Message)
 	case metav1.ConditionTrue:
-		if prevStatus == metav1.ConditionFalse {
-			r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, reasonUpstreamReachable, eventActionProbe, "%s", next.Message)
+		recovered, ok := r.Verifications.UpstreamRecoveredAt(key)
+		if !ok {
+			return
 		}
+		if prev != nil && recovered.Before(prev.LastTransitionTime.Time) {
+			// The recovery is older than the state we are leaving: this
+			// True ends a pod restart or a leader handover, not an outage.
+			return
+		}
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, reasonUpstreamReachable, eventActionProbe, "%s", next.Message)
 	}
 }
 

@@ -217,8 +217,13 @@ application-tunnel → Teleport proxy → app service → app, with a budget of
 The message carries the status, the probed URL (so a responder can `curl`
 it) and, while failing, the time of the last good probe. A Kubernetes Event
 (`events.k8s.io/v1`, reason `UpstreamUnreachable` / `UpstreamReachable`)
-marks each transition, so a failure one hop downstream can be attributed
-to the tunnel path from `kubectl get events` alone.
+marks each outage boundary, so a failure one hop downstream can be
+attributed to the tunnel path from `kubectl get events` alone. "Boundary"
+is judged against the verifier's store, not the condition alone: the
+store keeps an outage open across rounds that did not probe (pods rolling
+mid-outage turn `False` into `Unknown`) and stamps its end, so a recovery
+after such a gap still gets its one `Normal` Event, while `Unknown→True`
+on a fresh RemoteApp, a pod restart or a leader handover stays silent.
 
 Two decisions that differ from the TLS check:
 

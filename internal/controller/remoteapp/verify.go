@@ -263,6 +263,20 @@ type VerificationReader interface {
 	// message only while the upstream is unreachable, so a healthy tunnel
 	// does not rewrite its status every round.
 	LastUpstreamSuccess(key types.NamespacedName) (time.Time, bool)
+
+	// UpstreamDownSince returns when the current outage of this
+	// RemoteApp's upstream began; the bool is false when no outage is
+	// open. An outage stays open through rounds that did not probe (pods
+	// restarting), so the Event logic can tell "the pods came back and
+	// the upstream is still down" from a new failure.
+	UpstreamDownSince(key types.NamespacedName) (time.Time, bool)
+
+	// UpstreamRecoveredAt returns when the last outage of this
+	// RemoteApp's upstream ended — the first reachable round after an
+	// unreachable one, however many not-probed rounds lay between. The
+	// bool is false when no outage has ended yet. It is what lets the
+	// reconciler emit exactly one recovery Event per outage.
+	UpstreamRecoveredAt(key types.NamespacedName) (time.Time, bool)
 }
 
 // VerifyConfig carries the operator-level knobs for the verifier. Like
