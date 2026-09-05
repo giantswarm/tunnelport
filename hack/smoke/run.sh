@@ -263,9 +263,20 @@ restart_tunnel_and_wait_ready() {
 # ---------------------------------------------------------------------
 
 step "Building operator image (${OPERATOR_IMAGE})"
-# The repo's Dockerfile is multi-stage and self-contained; call docker
-# directly rather than detouring through `make docker-build`, which the
-# devctl Makefile no longer ships.
+# The Dockerfile packages a prebuilt static binary named the way
+# architect/go-build names it (tunnelport-linux-<arch>); it no longer
+# compiles. In CI the e2e job attaches the go-build workspace, so the
+# binary is already there. Locally, build it for the host architecture
+# when it is missing -- `docker build` targets the host platform, so
+# TARGETARCH in the Dockerfile resolves to the same value.
+host_arch="$(uname -m)"
+case "${host_arch}" in
+  x86_64) host_arch=amd64 ;;
+  aarch64|arm64) host_arch=arm64 ;;
+esac
+if [[ ! -f "tunnelport-linux-${host_arch}" ]]; then
+  CGO_ENABLED=0 GOOS=linux GOARCH="${host_arch}" go build -o "tunnelport-linux-${host_arch}" .
+fi
 docker build -t "${OPERATOR_IMAGE}" . >/dev/null
 
 # Three kind clusters in parallel exhaust the default inotify limits on
