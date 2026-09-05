@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The operator now sends one HTTP request *through* each verified tunnel per
+  verification round and reports whether the far end answered
+  (giantswarm/tunnelport#110). On gazelle a Teleport app service whose
+  connection to its auth server had gone stale answered every new session
+  with `504 Gateway Timeout` for thirteen minutes; ghostunnel forwarded the
+  requests faithfully, the handshake verified, and four RemoteApps stayed
+  `Ready`/`Verified` throughout. The probe rides the TLS check's session —
+  `GET /` by default, `spec.probe.path` to override — via tbot, the Teleport
+  proxy and the app service to the app.
+  - New `RemoteApp.status.conditions` entry `UpstreamReachable`: `True` for
+    any HTTP status that is not a gateway failure (200, a 401 from an OAuth
+    resource server, 404 all count), `False` with reason `UpstreamUnreachable`
+    for 502/503/504 or no response within the budget, `Unknown` when no
+    request was sent (not Ready, handshake failed, no round yet). The message
+    carries the status, the probed URL and, while failing, the time of the
+    last good probe. Also an `Upstream` column under `-o wide`.
+  - **`Ready` and `status.ready` now fold the upstream verdict in.** Pods
+    Ready with the far end unreachable is `Ready=False`, reason
+    `UpstreamUnreachable`, with the diagnosis in `status.lastError` —
+    consumers such as muster's MCPServer and `kubectl get remoteapp` see the
+    degradation where they already look. `TunnelVerified` still does not
+    feed `Ready`.
+  - Kubernetes Events (`events.k8s.io/v1`) on the RemoteApp when the
+    condition transitions: `Warning UpstreamUnreachable`, `Normal
+    UpstreamReachable` on recovery. The chart's ClusterRole grants
+    `create`/`patch` on that group.
+  - New metric `tunnelport_remoteapp_upstream_probe_status{remoteapp_name,
+    remoteapp_namespace, result}`: the HTTP status the far end answered with
+    (`0` for none), `result` one of `reachable` / `unreachable`; no series
+    for tunnels that were not probed.
+  - New CRD field `spec.probe.path` (absolute path, default `/`).
+  - New values: `verification.upstream.{enabled,timeout}` (default `true`,
+    `10s`), `verification.jitter` (default `30s`; each round's probes are
+    spread over random offsets in that window so ~40 tunnels do not open 40
+    Teleport app sessions at once) and `verification.trustBundleSecretName`
+    (verify against a bundle supplied out of band on an install without the
+    singleton bot; the mount is optional so the manager starts before the
+    Secret exists).
+  - Manager flags `--verify-upstream`, `--verify-upstream-timeout`,
+    `--verify-jitter`.
+  - The verifier's "does the tunnel claim to serve?" gate now reads pod
+    readiness directly rather than `status.ready`, which would otherwise
+    un-probe a failing tunnel and never observe its recovery.
+  - ATS smoke: a RemoteApp whose upstream returns 504 becomes `Ready=False`
+    within one verification interval and recovers on its own when the
+    upstream answers 401; the e2e smoke asserts `UpstreamReachable=True`
+    through a real Teleport and `Unknown` while the certificate is wrong.
+
 - The operator now verifies what each tunnel actually serves, closing the
   detection gap in giantswarm/giantswarm#37521 (gap 2). Every
   `verification.interval` (default `2m`, on the elected leader) it dials each

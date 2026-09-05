@@ -217,3 +217,65 @@ func TestRemoteApp_RejectsInvalidPort(t *testing.T) {
 		})
 	}
 }
+
+// spec.probe.path (giantswarm/tunnelport#110) is the one per-RemoteApp knob
+// of the end-to-end probe. It has to be an absolute path: a relative one
+// would make the probe URL depend on how the request is assembled, and
+// whitespace would break the request line.
+func TestRemoteApp_ProbePathValidation(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		path    string
+		wantErr string
+	}{
+		{name: "probe-root", path: "/"},
+		{name: "probe-health", path: "/healthz"},
+		{name: "probe-query", path: "/v1/ping?probe=1"},
+		{name: "probe-relative", path: "healthz", wantErr: "spec.probe.path"},
+		{name: "probe-space", path: "/health z", wantErr: "spec.probe.path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &accessv1alpha1.RemoteApp{
+				ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: "default"},
+				Spec: accessv1alpha1.RemoteAppSpec{
+					AppName:   "myapp",
+					Port:      8080,
+					TokenName: "myapp-token",
+					Probe:     &accessv1alpha1.ProbeSpec{Path: tc.path},
+				},
+			}
+			err := k8sClient.Create(ctx, cr)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected probe.path %q to be accepted, got: %v", tc.path, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected probe.path %q to be rejected", tc.path)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// An empty probe block is the same as none: path is omitted from the wire
+// form, so the CRD's minLength never sees it and the operator falls back
+// to `/`.
+func TestRemoteApp_EmptyProbeBlockIsAccepted(t *testing.T) {
+	cr := &accessv1alpha1.RemoteApp{
+		ObjectMeta: metav1.ObjectMeta{Name: "probe-empty", Namespace: "default"},
+		Spec: accessv1alpha1.RemoteAppSpec{
+			AppName:   "myapp",
+			Port:      8080,
+			TokenName: "myapp-token",
+			Probe:     &accessv1alpha1.ProbeSpec{},
+		},
+	}
+	if err := k8sClient.Create(context.Background(), cr); err != nil {
+		t.Fatalf("expected an empty probe block to be accepted, got: %v", err)
+	}
+}

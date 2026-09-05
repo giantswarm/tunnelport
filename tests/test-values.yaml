@@ -3,17 +3,30 @@
 teleport:
   # Placeholders for the chart's `required` operator flags (ADR 0005). The
   # manager only dials Teleport while reconciling a RemoteApp, and the smoke
-  # creates none.
+  # creates none that can join.
   clusterName: ats-smoke.example.com
   proxyAddr: ats-smoke.example.com:443
 
 # The singleton trust-bundle tbot has to join a real Teleport before it is
-# ready (ADR 0008) and would keep `helm --wait` from returning; verification
-# checks served chains against the bundle that bot writes, so it goes with it.
+# ready (ADR 0008) and would keep `helm --wait` from returning, so it stays
+# off. Verification stays on against a bundle the smoke supplies itself:
+# tests/ats/test_upstream_probe.py mints a CA, writes it into the Secret
+# named here after the install, and stands up a TLS listener that plays the
+# tunnel for one RemoteApp. The Secret does not exist at install time, which
+# is what the optional mount behind trustBundleSecretName is for.
 trustBundle:
   enabled: false
 verification:
-  enabled: false
+  enabled: true
+  trustBundleSecretName: ats-smoke-trust-bundle
+  # Short cadence so the smoke's transitions land within its budget. The
+  # kubelet's Secret propagation into the manager's mount (about a minute)
+  # dominates the first verdict; after that every round is 10s apart.
+  interval: 10s
+  jitter: 1s
+  timeout: 5s
+  upstream:
+    timeout: 5s
 
 # The pull secret is provisioned out of band on real clusters; the dev image
 # in gsoci is public.

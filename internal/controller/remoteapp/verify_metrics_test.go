@@ -81,7 +81,7 @@ func key(namespace, name string) types.NamespacedName {
 // against it — the exact trap giantswarm/muster#1076 documented. Pin the
 // exposed names on the wire so a well-meaning rename cannot land quietly.
 func TestVerificationStore_LabelsAreNamespacePrefixed(t *testing.T) {
-	s := NewVerificationStore(true)
+	s := NewVerificationStore(true, true)
 	s.Replace(map[types.NamespacedName]Verification{
 		key("agent-platform", "mcp-kubernetes"): {Result: ResultVerified},
 	})
@@ -104,7 +104,7 @@ tunnelport_tls_verification_available 1
 // label tuple, so a deleted RemoteApp would keep its series and pin
 // TunnelPortTunnelCertificateInvalid on a resource nobody can fix.
 func TestVerificationStore_DeletedRemoteAppStopsReporting(t *testing.T) {
-	s := NewVerificationStore(true)
+	s := NewVerificationStore(true, true)
 	s.Replace(map[types.NamespacedName]Verification{
 		key("smoke", "kept"):    {Result: ResultCertInvalid},
 		key("smoke", "deleted"): {Result: ResultCertInvalid},
@@ -133,7 +133,7 @@ func TestVerificationStore_DeletedRemoteAppStopsReporting(t *testing.T) {
 // recovers must not leave its `cert_invalid` series behind at value 1.
 // Exactly one series per RemoteApp, always.
 func TestVerificationStore_RecoveryDropsTheOldResultSeries(t *testing.T) {
-	s := NewVerificationStore(true)
+	s := NewVerificationStore(true, true)
 	s.Replace(map[types.NamespacedName]Verification{
 		key("smoke", "app"): {Result: ResultCertInvalid},
 	})
@@ -158,7 +158,7 @@ func TestVerificationStore_RecoveryDropsTheOldResultSeries(t *testing.T) {
 // 0 on the availability gauge, which is what
 // TunnelPortTLSVerificationUnavailable fires on.
 func TestVerificationStore_BundleUnavailable(t *testing.T) {
-	s := NewVerificationStore(true)
+	s := NewVerificationStore(true, true)
 	s.Replace(map[types.NamespacedName]Verification{
 		key("smoke", "app"): {Result: ResultVerified},
 	})
@@ -177,7 +177,7 @@ func TestVerificationStore_BundleUnavailable(t *testing.T) {
 // un-guarded availability gauge would sit at its zero value and report 0
 // forever.
 func TestVerificationStore_StandbyReplicaReportsNothing(t *testing.T) {
-	s := NewVerificationStore(true)
+	s := NewVerificationStore(true, true)
 	if got := gather(t, s); got != "" {
 		t.Errorf("a store that has never run a round exposes %q, want nothing", got)
 	}
@@ -188,7 +188,7 @@ func TestVerificationStore_StandbyReplicaReportsNothing(t *testing.T) {
 // surface it had before the check existed, so there is no ambiguous zero
 // for anyone to alert on.
 func TestVerificationStore_DisabledCollectsNothing(t *testing.T) {
-	s := NewVerificationStore(false)
+	s := NewVerificationStore(false, false)
 	if s.Enabled() {
 		t.Fatal("Enabled() is true on a disabled store")
 	}
@@ -212,7 +212,7 @@ func TestVerificationStore_DisabledCollectsNothing(t *testing.T) {
 // the map it handed over — the round builds one map per pass, but an
 // aliased map would let a later write race the scrape goroutine.
 func TestVerificationStore_ReplaceCopies(t *testing.T) {
-	s := NewVerificationStore(true)
+	s := NewVerificationStore(true, true)
 	handed := map[types.NamespacedName]Verification{
 		key("smoke", "app"): {Result: ResultVerified},
 	}

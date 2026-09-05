@@ -73,7 +73,7 @@ spec:
       protocol: TCP
     - port: 6443
       protocol: TCP
-{{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+{{- if include "tunnelport.verificationEnabled" . }}
   # The tunnel TLS port, for the verification dial. Without this rule the
   # probe reaches no RemoteApp Service at all and every tunnel reports
   # `unreachable` — a whole-fleet false alarm produced by this policy

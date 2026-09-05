@@ -45,6 +45,8 @@ limitations under the License.
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 package remoteapp
 
 import (
@@ -55,6 +57,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -93,9 +96,13 @@ type Reconciler struct {
 	// from Helm values.
 	PodDefaults PodDefaults
 
-	// Recorder emits Kubernetes Events against the RemoteApp CR. Wired
-	// from the manager in main.go; the reconcile loop does not yet call
-	// it — that arrives in a later bundle.
+	// Recorder emits Kubernetes Events against the RemoteApp CR on
+	// UpstreamReachable transitions, so a member's failure one hop
+	// downstream can be attributed to the tunnel path from `kubectl get
+	// events` alone. Wired from the manager in main.go via
+	// GetEventRecorder, which writes events.k8s.io/v1 Events — hence the
+	// RBAC marker for that group above. Nil (as in the envtest suite)
+	// means no events.
 	Recorder events.EventRecorder
 
 	// Verifications is the read side of the TLS verifier's store, used to
@@ -333,7 +340,49 @@ func (r *Reconciler) reconcileStatus(ctx context.Context, cr *accessv1alpha1.Rem
 
 	patchBase := cr.DeepCopy()
 	cr.Status = newStatus
-	return r.Status().Patch(ctx, cr, client.MergeFrom(patchBase))
+	if err := r.Status().Patch(ctx, cr, client.MergeFrom(patchBase)); err != nil {
+		return err
+	}
+	r.recordUpstreamTransition(cr, before.Conditions, newStatus.Conditions)
+	return nil
+}
+
+// eventActionProbe is the `action` of every Event the upstream probe
+// emits: what the controller was doing when it observed the transition.
+const eventActionProbe = "Probe"
+
+// recordUpstreamTransition emits one Event when the UpstreamReachable
+// condition changes status: a Warning when the far end stops answering,
+// a Normal one when it answers again after having failed. It is called
+// after the status patch succeeded, so an Event never describes a state
+// the CR does not show.
+//
+// Unknown→True is deliberately silent. Every RemoteApp goes through it
+// once per leader start, and 40 "upstream answered" Events per rollout
+// would train readers to ignore the ones that matter.
+func (r *Reconciler) recordUpstreamTransition(cr *accessv1alpha1.RemoteApp, before, after []metav1.Condition) {
+	if r.Recorder == nil {
+		return
+	}
+	next := meta.FindStatusCondition(after, accessv1alpha1.ConditionTypeUpstreamReachable)
+	if next == nil {
+		return
+	}
+	prevStatus := metav1.ConditionUnknown
+	if prev := meta.FindStatusCondition(before, accessv1alpha1.ConditionTypeUpstreamReachable); prev != nil {
+		prevStatus = prev.Status
+	}
+	if prevStatus == next.Status {
+		return
+	}
+	switch next.Status {
+	case metav1.ConditionFalse:
+		r.Recorder.Eventf(cr, nil, corev1.EventTypeWarning, reasonUpstreamUnreachable, eventActionProbe, "%s", next.Message)
+	case metav1.ConditionTrue:
+		if prevStatus == metav1.ConditionFalse {
+			r.Recorder.Eventf(cr, nil, corev1.EventTypeNormal, reasonUpstreamReachable, eventActionProbe, "%s", next.Message)
+		}
+	}
 }
 
 // listTbotPods returns the pods labelled as belonging to this RemoteApp.

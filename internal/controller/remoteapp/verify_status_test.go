@@ -19,6 +19,7 @@ package remoteapp
 import (
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,17 +29,28 @@ import (
 )
 
 // stubVerifications is a VerificationReader with fixed answers, so the
-// condition logic can be tested without a prober.
+// condition logic can be tested without a prober. `upstream` is off unless
+// a test says otherwise, so the TunnelVerified rows below keep exercising
+// the surface an install without the HTTP probe has.
 type stubVerifications struct {
-	enabled bool
-	results map[types.NamespacedName]Verification
+	enabled  bool
+	upstream bool
+	results  map[types.NamespacedName]Verification
+	lastGood map[types.NamespacedName]time.Time
 }
 
 func (s stubVerifications) Enabled() bool { return s.enabled }
 
+func (s stubVerifications) UpstreamProbeEnabled() bool { return s.enabled && s.upstream }
+
 func (s stubVerifications) Result(key types.NamespacedName) (Verification, bool) {
 	v, ok := s.results[key]
 	return v, ok
+}
+
+func (s stubVerifications) LastUpstreamSuccess(key types.NamespacedName) (time.Time, bool) {
+	t, ok := s.lastGood[key]
+	return t, ok
 }
 
 // readyPodFixture is a tunnel pod with both containers ready, so every

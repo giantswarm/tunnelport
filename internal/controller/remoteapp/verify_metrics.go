@@ -19,6 +19,7 @@ package remoteapp
 import (
 	"maps"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/apimachinery/pkg/types"
@@ -39,6 +40,15 @@ const (
 	// disappears on its own, with no zeroing bookkeeping, and the alert
 	// expression stays a plain equality match.
 	MetricTLSVerification = "tunnelport_remoteapp_tls_verification"
+
+	// MetricUpstreamProbeStatus carries the HTTP status the far end
+	// answered the last probe through the tunnel with — 0 when nothing
+	// came back — with the classification in the `result` label. One
+	// series per probed RemoteApp; none for tunnels that were not probed
+	// (not Ready, handshake failed, probe disabled), so a series that
+	// exists is always a verdict. An alert can key on either the label
+	// (`result="unreachable"`) or the value (`== 504`).
+	MetricUpstreamProbeStatus = "tunnelport_remoteapp_upstream_probe_status"
 
 	// MetricTLSVerificationAvailable is 1 when the operator holds a
 	// usable SPIFFE trust bundle and can therefore judge certificates at
@@ -69,7 +79,8 @@ const (
 	LabelRemoteAppName      = "remoteapp_name"
 	LabelRemoteAppNamespace = "remoteapp_namespace"
 
-	// LabelResult carries the VerificationResult verbatim.
+	// LabelResult carries the VerificationResult (or UpstreamResult)
+	// verbatim.
 	LabelResult = "result"
 )
 
@@ -86,14 +97,22 @@ const (
 // that is gone. Collect() emits from the current map, so forgetting is
 // the default and remembering is the special case.
 type VerificationStore struct {
-	// mu guards results and bundleAvailable. Taken by the probe round
-	// (Replace / SetBundleUnavailable), by the reconciler (Result) and by
-	// the Prometheus registry's scrape goroutine (Collect).
+	// mu guards every field below. Taken by the probe round (Replace /
+	// SetBundleUnavailable), by the reconciler (Result,
+	// LastUpstreamSuccess) and by the Prometheus registry's scrape
+	// goroutine (Collect).
 	mu sync.RWMutex
 
 	// results is the last outcome per RemoteApp. Absence means "not
 	// covered by a round yet", which is Unknown rather than failure.
 	results map[types.NamespacedName]Verification
+
+	// lastUpstreamSuccess is when each RemoteApp's upstream last
+	// answered with a non-gateway status. Kept apart from results so a
+	// healthy round does not change the comparable outcome and
+	// re-enqueue the fleet; consulted only while the upstream is down.
+	// Pruned with results, so a deleted RemoteApp leaves nothing behind.
+	lastUpstreamSuccess map[types.NamespacedName]time.Time
 
 	// bundleAvailable mirrors whether the last round managed to load a
 	// trust bundle.
@@ -116,20 +135,33 @@ type VerificationStore struct {
 	// enabled is fixed at construction. A disabled store collects
 	// nothing at all — not even a zero — so an install that does not run
 	// the check has no series to misread, and computeStatus omits the
-	// condition entirely.
+	// conditions entirely.
 	enabled bool
 
+	// upstreamProbe is fixed at construction and mirrors
+	// VerifyConfig.UpstreamProbe, so the reconciler can tell "not probed
+	// this round" (Unknown) from "never probed by design" (no condition).
+	upstreamProbe bool
+
+	// now is the clock lastUpstreamSuccess is stamped with. Tests pin it.
+	now func() time.Time
+
 	verificationDesc *prometheus.Desc
+	upstreamDesc     *prometheus.Desc
 	availableDesc    *prometheus.Desc
 }
 
 // NewVerificationStore returns a store. Pass enabled=false to keep the
 // operator's observable surface byte-identical to what it was before TLS
-// verification existed.
-func NewVerificationStore(enabled bool) *VerificationStore {
+// verification existed; upstreamProbe=false does the same for the HTTP
+// half only.
+func NewVerificationStore(enabled, upstreamProbe bool) *VerificationStore {
 	return &VerificationStore{
-		results: make(map[types.NamespacedName]Verification),
-		enabled: enabled,
+		results:             make(map[types.NamespacedName]Verification),
+		lastUpstreamSuccess: make(map[types.NamespacedName]time.Time),
+		enabled:             enabled,
+		upstreamProbe:       enabled && upstreamProbe,
+		now:                 time.Now,
 		verificationDesc: prometheus.NewDesc(
 			MetricTLSVerification,
 			"Result of the operator's TLS verification of each RemoteApp tunnel: "+
@@ -139,6 +171,16 @@ func NewVerificationStore(enabled bool) *VerificationStore {
 				"`cert_invalid` means it does not; `unreachable` means nothing "+
 				"accepted a connection; `not_ready` means the tunnel does not claim "+
 				"to be serving and was not probed.",
+			[]string{LabelRemoteAppName, LabelRemoteAppNamespace, LabelResult},
+			nil,
+		),
+		upstreamDesc: prometheus.NewDesc(
+			MetricUpstreamProbeStatus,
+			"HTTP status the far end answered the operator's last probe through "+
+				"the tunnel with (ghostunnel, tbot, Teleport proxy, app service, app), "+
+				"0 when no response arrived. `result` is `reachable` for any status "+
+				"other than 502/503/504 and `unreachable` for those or no response. "+
+				"No series for tunnels that were not probed.",
 			[]string{LabelRemoteAppName, LabelRemoteAppNamespace, LabelResult},
 			nil,
 		),
@@ -167,6 +209,9 @@ func (s *VerificationStore) Register() error {
 // Enabled implements VerificationReader.
 func (s *VerificationStore) Enabled() bool { return s.enabled }
 
+// UpstreamProbeEnabled implements VerificationReader.
+func (s *VerificationStore) UpstreamProbeEnabled() bool { return s.upstreamProbe }
+
 // Result implements VerificationReader.
 func (s *VerificationStore) Result(key types.NamespacedName) (Verification, bool) {
 	s.mu.RLock()
@@ -175,18 +220,39 @@ func (s *VerificationStore) Result(key types.NamespacedName) (Verification, bool
 	return v, ok
 }
 
+// LastUpstreamSuccess implements VerificationReader.
+func (s *VerificationStore) LastUpstreamSuccess(key types.NamespacedName) (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.lastUpstreamSuccess[key]
+	return t, ok
+}
+
 // Replace swaps in the outcomes of one complete probe round and records
 // that the trust bundle was usable.
 //
 // Wholesale replacement is what makes deletion work without a delete
 // hook: a RemoteApp that vanished between rounds is simply absent from
-// the new map, so its series is gone at the next scrape.
+// the new map, so its series is gone at the next scrape — and so is its
+// last-success timestamp.
 func (s *VerificationStore) Replace(results map[types.NamespacedName]Verification) {
 	next := make(map[types.NamespacedName]Verification, len(results))
 	maps.Copy(next, results)
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	successes := make(map[types.NamespacedName]time.Time, len(s.lastUpstreamSuccess))
+	for key, v := range next {
+		if v.Upstream.Result == UpstreamReachable {
+			successes[key] = now
+			continue
+		}
+		if t, ok := s.lastUpstreamSuccess[key]; ok {
+			successes[key] = t
+		}
+	}
 	s.results = next
+	s.lastUpstreamSuccess = successes
 	s.bundleAvailable = true
 	s.probed = true
 }
@@ -197,7 +263,9 @@ func (s *VerificationStore) Replace(results map[types.NamespacedName]Verificatio
 // Dropping rather than keeping is the honest choice: without a bundle the
 // operator has no opinion on any certificate, and retaining the last
 // round's verdicts would keep asserting a judgement it can no longer
-// make. The gauge is what says so out loud.
+// make. The gauge is what says so out loud. The last-success timestamps
+// are history rather than a verdict and stay, so a failure reported after
+// the bundle returns can still say when the upstream last answered.
 func (s *VerificationStore) SetBundleUnavailable() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,6 +277,7 @@ func (s *VerificationStore) SetBundleUnavailable() {
 // Describe implements prometheus.Collector.
 func (s *VerificationStore) Describe(ch chan<- *prometheus.Desc) {
 	ch <- s.verificationDesc
+	ch <- s.upstreamDesc
 	ch <- s.availableDesc
 }
 
@@ -241,5 +310,12 @@ func (s *VerificationStore) Collect(ch chan<- prometheus.Metric) {
 			s.verificationDesc, prometheus.GaugeValue, 1,
 			key.Name, key.Namespace, string(v.Result),
 		)
+		switch v.Upstream.Result {
+		case UpstreamReachable, UpstreamUnreachable:
+			ch <- prometheus.MustNewConstMetric(
+				s.upstreamDesc, prometheus.GaugeValue, float64(v.Upstream.StatusCode),
+				key.Name, key.Namespace, string(v.Upstream.Result),
+			)
+		}
 	}
 }

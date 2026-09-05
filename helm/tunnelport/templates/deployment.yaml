@@ -65,17 +65,21 @@ spec:
         # convention for operator metrics is plain HTTP bounded by the
         # NetworkPolicy below; nothing on this endpoint is a credential.
         - --metrics-secure=false
-{{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
-        # Active TLS verification (giantswarm/giantswarm#37521 gap 2).
-        # Gated on trustBundle too: the bundle the manager verifies
-        # against is the singleton bot's Secret, so without that bot
-        # there is nothing to verify against and the operator would only
-        # be able to report "I cannot tell".
+{{- if include "tunnelport.verificationEnabled" . }}
+        # Active tunnel verification (giantswarm/giantswarm#37521 gap 2,
+        # giantswarm/tunnelport#110). Gated on a bundle to verify
+        # against: the singleton bot's Secret, or one named in
+        # verification.trustBundleSecretName. Without either there is
+        # nothing to verify against and the operator would only be able
+        # to report "I cannot tell".
         - --verify-tunnels=true
         - --verify-trust-bundle-file={{ include "tunnelport.trustBundleMountPath" . }}/svid_bundle.pem
         - --verify-interval={{ .Values.verification.interval }}
         - --verify-timeout={{ .Values.verification.timeout }}
+        - --verify-jitter={{ .Values.verification.jitter }}
         - --verify-concurrency={{ .Values.verification.concurrency }}
+        - --verify-upstream={{ .Values.verification.upstream.enabled }}
+        - --verify-upstream-timeout={{ .Values.verification.upstream.timeout }}
         - --cluster-domain={{ .Values.verification.clusterDomain }}
 {{- else }}
         - --verify-tunnels=false
@@ -116,7 +120,7 @@ spec:
           {{- toYaml .Values.resources | nindent 10 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
-{{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+{{- if include "tunnelport.verificationEnabled" . }}
         volumeMounts:
         # The SPIFFE trust bundle the verification dial checks served
         # chains against. Mounted as a file rather than read through the
@@ -132,11 +136,20 @@ spec:
           mountPath: {{ include "tunnelport.trustBundleMountPath" . }}
           readOnly: true
 {{- end }}
-      {{- if and .Values.verification.enabled .Values.trustBundle.enabled }}
+      {{- if include "tunnelport.verificationEnabled" . }}
       volumes:
       - name: trust-bundle
         secret:
-          secretName: {{ .Values.trustBundle.secretName }}
+          secretName: {{ include "tunnelport.trustBundleSecretName" . }}
+          {{- if .Values.verification.trustBundleSecretName }}
+          # A bundle supplied out of band may not exist yet when the
+          # manager starts (the ATS smoke creates it after `helm install`
+          # returns). An optional mount lets the pod start and the kubelet
+          # fill the file in once the Secret appears; until then the
+          # operator reports tunnelport_tls_verification_available 0, as
+          # it does for the singleton bot's not-yet-written Secret.
+          optional: true
+          {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

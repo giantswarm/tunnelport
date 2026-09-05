@@ -17,9 +17,17 @@ limitations under the License.
 package v1alpha1
 
 const (
-	// ConditionTypeReady mirrors pod readiness, which is wired to tbot's diag
-	// endpoint reporting tunnel state. It surfaces join-level state: the
-	// tunnel either reaches Teleport and serves traffic, or it does not.
+	// ConditionTypeReady is the roll-up a consumer reads: the tunnel is
+	// usable end to end. It is True when at least one tbot pod's readiness
+	// probe (wired to tbot's diag endpoint) passes AND, when the operator
+	// runs the end-to-end probe, the far end answered the last probe through
+	// the tunnel (see ConditionTypeUpstreamReachable). It is False with
+	// reason PodNotReady / NoPods when no pod claims the tunnel is up, and
+	// False with reason UpstreamUnreachable when the pods are fine but the
+	// path behind the tunnel is not — the state of giantswarm/tunnelport#110,
+	// where every pod-level signal stayed green for thirteen minutes while
+	// every request through the tunnel got a 504 from the Teleport app
+	// service.
 	ConditionTypeReady = "Ready"
 
 	// ConditionTypeReconciled surfaces operator-internal state: whether the
@@ -78,4 +86,31 @@ const (
 	// ADR 0003 and for why "cannot verify" is reported as Unknown rather
 	// than False. Absent entirely when TLS verification is disabled.
 	ConditionTypeTunnelVerified = "TunnelVerified"
+
+	// ConditionTypeUpstreamReachable reports whether a request sent
+	// *through* the tunnel got an answer from the far end: ghostunnel, tbot's
+	// application-tunnel, the Teleport proxy, the Teleport app service and
+	// the app itself all had to cooperate for the probe's `GET
+	// spec.probe.path` (default `/`) to come back with any HTTP status.
+	//
+	// TunnelVerified stops at the consumer-side listener, and every
+	// pod-level condition stops earlier still. giantswarm/tunnelport#110 is
+	// the gap: a Teleport app service whose connection to its auth server
+	// had gone stale answered every new session with 504 Gateway Timeout
+	// for thirteen minutes, ghostunnel forwarded the requests faithfully,
+	// and the RemoteApps stayed Ready/Verified/Identity/Serving throughout.
+	//
+	// True means the upstream answered with any status other than a
+	// gateway failure — 200, 401 from an OAuth resource server, and 404 all
+	// prove the path works. False, with reason UpstreamUnreachable, means
+	// 502/503/504 or no HTTP response within the probe's budget; the
+	// message carries the status, the probed URL and the time of the last
+	// good probe. Unknown means the probe did not run: no round yet, the
+	// tunnel not Ready, or the TLS handshake failed (there is no verified
+	// session to send a request over). Absent when the probe is disabled.
+	//
+	// Unlike TunnelVerified this condition folds into Ready: a tunnel whose
+	// far end cannot answer is not usable, and consumers such as muster's
+	// MCPServer and humans running `kubectl get remoteapp` look at Ready.
+	ConditionTypeUpstreamReachable = "UpstreamReachable"
 )

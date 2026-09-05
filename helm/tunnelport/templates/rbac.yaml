@@ -122,10 +122,15 @@ rules:
   - patch
   - delete
 
-# Events: the operator emits Kubernetes Events alongside status
-# conditions (slice 4 wires this up; the verb is harmless before then).
+# Events: the operator emits a Kubernetes Event when a RemoteApp's
+# UpstreamReachable condition transitions (giantswarm/tunnelport#110), so
+# a failure one hop downstream can be attributed to the tunnel path from
+# `kubectl get events` alone. controller-runtime's GetEventRecorder
+# writes events.k8s.io/v1 Events, hence that group; the core group stays
+# for the deprecated recorder and for tooling that still reads it.
 - apiGroups:
   - ""
+  - events.k8s.io
   resources:
   - events
   verbs:

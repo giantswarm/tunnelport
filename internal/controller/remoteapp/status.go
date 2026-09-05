@@ -18,8 +18,10 @@ package remoteapp
 
 import (
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -70,6 +72,15 @@ const (
 	reasonTunnelUnreachable   = "TunnelUnreachable"
 	reasonVerificationPending = "VerificationPending"
 	reasonNotVerifiedNotReady = "TunnelNotReady"
+
+	// Reasons for the UpstreamReachable condition. UpstreamUnreachable is
+	// also the Ready condition's reason when the pods are fine and the
+	// probe is what took Ready down — so a reader of `kubectl describe`
+	// sees which layer failed without opening the second condition.
+	reasonUpstreamReachable   = "UpstreamReachable"
+	reasonUpstreamUnreachable = "UpstreamUnreachable"
+	reasonUpstreamPending     = "ProbePending"
+	reasonUpstreamNotVerified = "TunnelNotVerified"
 )
 
 // liveTbotPods returns the subset of pods that are not being torn down,
@@ -405,14 +416,22 @@ func roleCondition(condType string, generation int64, ready bool, summary, trueR
 	return cond
 }
 
-// computeStatus derives the full RemoteAppStatus from k8s-visible inputs.
-// Pure: no I/O, no logging. meta.SetStatusCondition uses metav1.Now() for
-// LastTransitionTime — that's library-imposed and stripped by statusEqual.
+// computeStatus derives the full RemoteAppStatus from k8s-visible inputs
+// plus the verifier's latest probe outcome. Pure: no I/O, no logging.
+// meta.SetStatusCondition uses metav1.Now() for LastTransitionTime —
+// that's library-imposed and stripped by statusEqual.
 //
-// Per ADR 0004 the operator emits two conditions:
+// Conditions emitted:
 //
-//   - `Ready` — join-level state, derived from tbot pod readiness against
-//     the tunnel diag endpoint.
+//   - `Ready` — the roll-up: at least one tbot pod is Ready (its readiness
+//     probe is wired to the tunnel diag endpoint) AND, when the upstream
+//     probe runs, the far end answered the last request through the
+//     tunnel. False with reason UpstreamUnreachable is the state
+//     giantswarm/tunnelport#110 asked for: pods green, path behind the
+//     tunnel dead.
+//   - `IdentityIssued`, `TunnelServing` — per-role pod state.
+//   - `TunnelVerified`, `UpstreamReachable` — the two active-probe
+//     conditions; see verify.go.
 //   - `Reconciled` — operator-internal state: True if every owned-object
 //     apply in the most recent reconcile pass succeeded; False with
 //     Reason=ReconcileError if any failed. Distinct from `Ready`: a
@@ -424,15 +443,23 @@ func roleCondition(condType string, generation int64, ready bool, summary, trueR
 // reconcile pass's apply errors (empty string means all applies
 // succeeded). The caller — reconcileStatus — collects it before calling.
 //
-// verifications is the read side of the TLS verifier's store, or nil when
+// verifications is the read side of the verifier's store, or nil when
 // verification is not wired. It is the one input here that is not
 // k8s-visible state; see verify.go for the ADR 0003 position and
-// setVerifiedCondition for how absence of a result is reported.
+// setVerifiedCondition / upstreamCondition for how absence of a result is
+// reported.
 func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditions []metav1.Condition, applyErrSummary string, verifications VerificationReader) accessv1alpha1.RemoteAppStatus {
-	ready, lastError := summarizeStatus(pods)
+	podsReady, lastError := summarizeStatus(pods)
 
 	conditions := append([]metav1.Condition(nil), prevConditions...)
 
+	// The upstream verdict is computed before Ready because Ready folds
+	// it in, but set after the per-role conditions so the list reads
+	// top-down from the roll-up through the pods to the two probes.
+	upstream := upstreamCondition(cr, verifications)
+	upstreamDown := upstream != nil && upstream.Status == metav1.ConditionFalse
+
+	ready := podsReady && !upstreamDown
 	readyCond := metav1.Condition{
 		Type:               accessv1alpha1.ConditionTypeReady,
 		Status:             boolToConditionStatus(ready),
@@ -440,8 +467,17 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditio
 		Reason:             readyConditionReason(ready, lastError),
 		Message:            lastError,
 	}
-	if ready {
+	switch {
+	case ready:
 		readyCond.Message = "tbot tunnel ready"
+	case podsReady && upstreamDown:
+		// The pods say the tunnel is up and the probe says nothing
+		// answers behind it. Carry the probe's diagnosis on Ready and in
+		// lastError — the LastError column is where a reader looks when
+		// Ready is false, and "" there would send them to the pods.
+		readyCond.Reason = reasonUpstreamUnreachable
+		readyCond.Message = upstream.Message
+		lastError = upstream.Message
 	}
 	meta.SetStatusCondition(&conditions, readyCond)
 
@@ -468,6 +504,15 @@ func computeStatus(cr *accessv1alpha1.RemoteApp, pods []corev1.Pod, prevConditio
 	// the pair reads as "the listener accepts connections, and here is
 	// whether what it serves is usable".
 	setVerifiedCondition(&conditions, cr, verifications)
+
+	// UpstreamReachable: removed when the probe is not wired or disabled,
+	// so an install that turns the HTTP half off ends up with exactly the
+	// status shape it had before.
+	if upstream == nil {
+		meta.RemoveStatusCondition(&conditions, accessv1alpha1.ConditionTypeUpstreamReachable)
+	} else {
+		meta.SetStatusCondition(&conditions, *upstream)
+	}
 
 	reconciledCond := metav1.Condition{
 		Type:               accessv1alpha1.ConditionTypeReconciled,
@@ -555,6 +600,94 @@ func setVerifiedCondition(conditions *[]metav1.Condition, cr *accessv1alpha1.Rem
 		cond.Message = fmt.Sprintf("unclassified verification result %q", result.Result)
 	}
 	meta.SetStatusCondition(conditions, cond)
+}
+
+// upstreamCondition builds the UpstreamReachable condition from the
+// verifier's latest outcome, or returns nil when the condition must not
+// exist (verification not wired, disabled, or the upstream probe off).
+//
+// The same three-way split as setVerifiedCondition, for the same reasons:
+//
+//   - Off: nil, and the caller removes any stale condition.
+//   - Wired but no request was sent — no round yet, the tunnel not Ready,
+//     or the handshake did not verify so there was no trusted session to
+//     send on: Unknown, with a reason that says which. "I did not ask" is
+//     not "nobody answered".
+//   - A real outcome: True for any HTTP status that is not a gateway
+//     failure, False for 502/503/504 or no response. The message carries
+//     what a responder needs: the status, the URL the probe used (so they
+//     can curl it), and — while it is failing — when it last worked,
+//     which is what separates "broke five minutes ago" from "never worked
+//     since this RemoteApp was created".
+func upstreamCondition(cr *accessv1alpha1.RemoteApp, verifications VerificationReader) *metav1.Condition {
+	if verifications == nil || !verifications.Enabled() || !verifications.UpstreamProbeEnabled() {
+		return nil
+	}
+
+	cond := &metav1.Condition{
+		Type:               accessv1alpha1.ConditionTypeUpstreamReachable,
+		ObservedGeneration: cr.Generation,
+	}
+
+	key := types.NamespacedName{Namespace: cr.Namespace, Name: cr.Name}
+	result, ok := verifications.Result(key)
+	switch {
+	case !ok:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonUpstreamPending
+		cond.Message = "no upstream probe result yet"
+	case result.Result == ResultNotReady:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonNotVerifiedNotReady
+		cond.Message = "tunnel is not ready; upstream not probed"
+	case result.Result != ResultVerified:
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonUpstreamNotVerified
+		cond.Message = "tunnel TLS did not verify; upstream not probed"
+	case result.Upstream.Result == UpstreamReachable:
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = reasonUpstreamReachable
+		cond.Message = fmt.Sprintf("upstream answered HTTP %s for %s",
+			statusCodeText(result.Upstream.StatusCode), result.Upstream.URL)
+	case result.Upstream.Result == UpstreamUnreachable:
+		cond.Status = metav1.ConditionFalse
+		cond.Reason = reasonUpstreamUnreachable
+		detail := result.Upstream.Detail
+		if result.Upstream.StatusCode != 0 {
+			detail = fmt.Sprintf("upstream returned HTTP %s for %s",
+				statusCodeText(result.Upstream.StatusCode), result.Upstream.URL)
+		}
+		cond.Message = detail + "; " + lastGoodProbe(verifications, key)
+	default:
+		// The handshake verified but no request was sent: the probe was
+		// enabled after this round's outcome was recorded, or a result
+		// value nobody classified. Unknown rather than dropped, so it
+		// shows up as "not classified" instead of as a passing tunnel.
+		cond.Status = metav1.ConditionUnknown
+		cond.Reason = reasonUpstreamPending
+		cond.Message = fmt.Sprintf("no upstream probe outcome (%q)", result.Upstream.Result)
+	}
+	return cond
+}
+
+// lastGoodProbe formats the last-success clause of an UpstreamUnreachable
+// message. Second precision, UTC, RFC 3339: stable across the rounds of
+// one failure window, so the message — and therefore status — does not
+// churn while the upstream stays down.
+func lastGoodProbe(verifications VerificationReader, key types.NamespacedName) string {
+	if t, ok := verifications.LastUpstreamSuccess(key); ok {
+		return "last good probe " + t.UTC().Truncate(time.Second).Format(time.RFC3339)
+	}
+	return "no good probe recorded since this replica started verifying"
+}
+
+// statusCodeText renders "504 Gateway Timeout" or just the number when
+// Go has no text for it.
+func statusCodeText(code int) string {
+	if text := http.StatusText(code); text != "" {
+		return fmt.Sprintf("%d %s", code, text)
+	}
+	return fmt.Sprint(code)
 }
 
 func boolToConditionStatus(b bool) metav1.ConditionStatus {

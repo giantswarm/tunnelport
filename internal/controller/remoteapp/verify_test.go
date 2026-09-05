@@ -33,9 +33,11 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -154,7 +156,7 @@ func serveTLS(t *testing.T, cert tls.Certificate) string {
 	return ln.Addr().String()
 }
 
-// --- probeTLS ---------------------------------------------------------
+// --- probeTunnel, handshake half ----------------------------------------
 
 // TestProbeTLS_VerifiesMatchingCertificate is the happy path: a leaf
 // whose SANs cover the FQDN, signed by the trusted CA.
@@ -162,7 +164,7 @@ func TestProbeTLS_VerifiesMatchingCertificate(t *testing.T) {
 	ca := newTestCA(t)
 	addr := serveTLS(t, ca.issue(t, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), testFQDN))
 
-	got := probeTLS(context.Background(), addr, testFQDN, ca.pool)
+	got := probeTunnel(context.Background(), probeTarget{addr: addr, serverName: testFQDN}, ca.pool)
 	if got.Result != ResultVerified {
 		t.Fatalf("Result = %q (detail %q), want %q", got.Result, got.Detail, ResultVerified)
 	}
@@ -184,7 +186,7 @@ func TestProbeTLS_SANMismatchIsCertInvalid(t *testing.T) {
 	// 40 stale workload_identity resources were.
 	addr := serveTLS(t, ca.issue(t, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), testWrongFQDN))
 
-	got := probeTLS(context.Background(), addr, testFQDN, ca.pool)
+	got := probeTunnel(context.Background(), probeTarget{addr: addr, serverName: testFQDN}, ca.pool)
 	if got.Result != ResultCertInvalid {
 		t.Fatalf("Result = %q (detail %q), want %q", got.Result, got.Detail, ResultCertInvalid)
 	}
@@ -209,7 +211,7 @@ func TestProbeTLS_UntrustedChainIsCertInvalid(t *testing.T) {
 	serving, verifying := newTestCA(t), newTestCA(t)
 	addr := serveTLS(t, serving.issue(t, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), testFQDN))
 
-	got := probeTLS(context.Background(), addr, testFQDN, verifying.pool)
+	got := probeTunnel(context.Background(), probeTarget{addr: addr, serverName: testFQDN}, verifying.pool)
 	if got.Result != ResultCertInvalid {
 		t.Fatalf("Result = %q (detail %q), want %q", got.Result, got.Detail, ResultCertInvalid)
 	}
@@ -226,7 +228,7 @@ func TestProbeTLS_ExpiredCertificateIsCertInvalid(t *testing.T) {
 	addr := serveTLS(t, ca.issue(t,
 		time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour), testFQDN))
 
-	got := probeTLS(context.Background(), addr, testFQDN, ca.pool)
+	got := probeTunnel(context.Background(), probeTarget{addr: addr, serverName: testFQDN}, ca.pool)
 	if got.Result != ResultCertInvalid {
 		t.Fatalf("Result = %q (detail %q), want %q", got.Result, got.Detail, ResultCertInvalid)
 	}
@@ -260,7 +262,7 @@ func TestProbeTLS_NonTLSListenerIsCertInvalid(t *testing.T) {
 		}
 	}()
 
-	got := probeTLS(context.Background(), ln.Addr().String(), testFQDN, newTestCA(t).pool)
+	got := probeTunnel(context.Background(), probeTarget{addr: ln.Addr().String(), serverName: testFQDN}, newTestCA(t).pool)
 	if got.Result != ResultCertInvalid {
 		t.Fatalf("Result = %q (detail %q), want %q", got.Result, got.Detail, ResultCertInvalid)
 	}
@@ -283,7 +285,7 @@ func TestProbeTLS_ClosedPortIsUnreachable(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 
-	got := probeTLS(context.Background(), addr, testFQDN, newTestCA(t).pool)
+	got := probeTunnel(context.Background(), probeTarget{addr: addr, serverName: testFQDN}, newTestCA(t).pool)
 	if got.Result != ResultUnreachable {
 		t.Fatalf("Result = %q (detail %q), want %q", got.Result, got.Detail, ResultUnreachable)
 	}
@@ -384,6 +386,21 @@ func TestVerifyConfigDefaults(t *testing.T) {
 	if got.TLSPort != tlsListenPortDefault {
 		t.Errorf("TLSPort = %d, want %d", got.TLSPort, tlsListenPortDefault)
 	}
+	if got.Jitter != DefaultVerifyJitter {
+		t.Errorf("Jitter = %v, want %v", got.Jitter, DefaultVerifyJitter)
+	}
+	if got.UpstreamTimeout != DefaultUpstreamProbeTimeout {
+		t.Errorf("UpstreamTimeout = %v, want %v", got.UpstreamTimeout, DefaultUpstreamProbeTimeout)
+	}
+	// The spread must leave the other half of the interval for the probes
+	// themselves, whatever interval an install picks: the smoke runs at
+	// 15s and must not end up with a 30s jitter.
+	if short := (VerifyConfig{Enabled: true, Interval: 16 * time.Second}).withDefaults(); short.Jitter != 8*time.Second {
+		t.Errorf("Jitter at a 16s interval = %v, want the interval/2 clamp (8s)", short.Jitter)
+	}
+	if explicit := (VerifyConfig{Enabled: true, Jitter: 5 * time.Second}).withDefaults(); explicit.Jitter != 5*time.Second {
+		t.Errorf("explicit Jitter = %v, want it kept", explicit.Jitter)
+	}
 	// A round must fit inside the cadence, or rounds pile up: the
 	// defaults have to satisfy ceil(N/concurrency)*timeout < interval for
 	// a realistic N. At 8-way concurrency and a 5s timeout, 2m covers
@@ -396,7 +413,10 @@ func TestVerifyConfigDefaults(t *testing.T) {
 
 // --- RunOnce ----------------------------------------------------------
 
-// remoteApp builds a RemoteApp fixture for the round tests.
+// remoteApp builds a RemoteApp fixture for the round tests. `ready` is
+// recorded on status for the fixture's own bookkeeping; newRoundVerifier
+// turns it into a Ready (or not) tunnel pod, because that — not
+// status.ready — is what the round's gate reads.
 func remoteApp(namespace, name string, ready bool) *accessv1alpha1.RemoteApp {
 	cr := &accessv1alpha1.RemoteApp{
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
@@ -410,14 +430,17 @@ func remoteApp(namespace, name string, ready bool) *accessv1alpha1.RemoteApp {
 	return cr
 }
 
-// newRoundVerifier wires a verifier over a fake client holding crs, with
-// a stub prober returning byAddr[addr] (defaulting to verified).
+// newRoundVerifier wires a verifier over a fake client holding crs and one
+// tunnel pod per CR (Ready iff the fixture says so), with a stub prober
+// returning byName[serverName] (defaulting to verified). The upstream
+// probe is off here: these rounds are about the handshake half and the
+// machinery around it; verify_upstream_test.go turns it on.
 func newRoundVerifier(t *testing.T, bundlePath string, byName map[string]Verification, crs ...*accessv1alpha1.RemoteApp) (*TLSVerifier, *VerificationStore) {
 	t.Helper()
-	store := NewVerificationStore(true)
-	objs := make([]client.Object, 0, len(crs))
+	store := NewVerificationStore(true, false)
+	objs := make([]client.Object, 0, 2*len(crs))
 	for _, cr := range crs {
-		objs = append(objs, cr)
+		objs = append(objs, cr, tunnelPodFor(cr.Namespace, cr.Name, cr.Name+"-pod", cr.Status.Ready))
 	}
 	v := &TLSVerifier{
 		Client: fake.NewClientBuilder().
@@ -433,12 +456,15 @@ func newRoundVerifier(t *testing.T, bundlePath string, byName map[string]Verific
 		},
 		Store:  store,
 		Events: make(chan event.TypedGenericEvent[*accessv1alpha1.RemoteApp], 16),
-		probe: func(_ context.Context, _, serverName string, _ *x509.CertPool) Verification {
-			if v, ok := byName[serverName]; ok {
+		probe: func(_ context.Context, t probeTarget, _ *x509.CertPool) Verification {
+			if v, ok := byName[t.serverName]; ok {
 				return v
 			}
-			return Verification{Result: ResultVerified, ServerName: serverName}
+			return Verification{Result: ResultVerified, ServerName: t.serverName, Upstream: UpstreamProbe{Result: UpstreamNotProbed}}
 		},
+		// Rounds must be instant in tests; the spread is covered by
+		// TestVerifyConfigDefaults and TestRunOnce_JitterSpreadsReadyTargets.
+		jitter: func(time.Duration) time.Duration { return 0 },
 	}
 	return v, store
 }
@@ -446,10 +472,35 @@ func newRoundVerifier(t *testing.T, bundlePath string, byName map[string]Verific
 func verifyTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(s); err != nil {
+		t.Fatalf("add core scheme: %v", err)
+	}
 	if err := accessv1alpha1.AddToScheme(s); err != nil {
 		t.Fatalf("add scheme: %v", err)
 	}
 	return s
+}
+
+// tunnelPodFor builds the pod fixture the Ready gate reads: labelled the way
+// renderDeployment labels a tunnel pod, with PodReady set as asked.
+func tunnelPodFor(namespace, remoteApp, name string, ready bool) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: namespace,
+			Name:      name,
+			Labels: map[string]string{
+				LabelRole:              LabelRoleValue,
+				LabelRemoteAppInstance: remoteApp,
+			},
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	if ready {
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	} else {
+		pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+	}
+	return pod
 }
 
 // writeBundle drops a valid CA bundle on disk and returns its path.
@@ -478,9 +529,9 @@ func TestRunOnce_SkipsNotReadyAndDeleting(t *testing.T) {
 	var probed []string
 	v, store := newRoundVerifier(t, writeBundle(t), nil, ready, notReady, deleting)
 	inner := v.probe
-	v.probe = func(ctx context.Context, addr, serverName string, roots *x509.CertPool) Verification {
-		probed = append(probed, serverName)
-		return inner(ctx, addr, serverName, roots)
+	v.probe = func(ctx context.Context, t probeTarget, roots *x509.CertPool) Verification {
+		probed = append(probed, t.serverName)
+		return inner(ctx, t, roots)
 	}
 
 	if err := v.RunOnce(context.Background(), v.Config); err != nil {
