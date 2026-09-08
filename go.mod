@@ -113,6 +113,6 @@ replace golang.org/x/text v0.38.0 => golang.org/x/text v0.40.0
 // Pin transitive modules flagged by the OSS Index scan (nancy) in CI.
 // go mod tidy would otherwise resolve them below the fixed versions,
 // because nothing imports them directly.
-replace golang.org/x/mod => golang.org/x/mod v0.40.0
+replace golang.org/x/mod => golang.org/x/mod v0.41.0
 
 replace github.com/go-jose/go-jose/v4 => github.com/go-jose/go-jose/v4 v4.1.5
