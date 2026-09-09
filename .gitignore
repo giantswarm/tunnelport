@@ -15,3 +15,6 @@ build
 
 # agent scratch space
 .scratch/
+
+# graphify knowledge graph (regenerable, rebuilt by the post-commit hook)
+graphify-out/
