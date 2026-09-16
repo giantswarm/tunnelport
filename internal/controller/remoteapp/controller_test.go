@@ -170,7 +170,7 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 	}
 
 	// Deployment uses operator config image, not anything from the CR.
-	if got := dep.Spec.Template.Spec.Containers[0].Image; got != testConfig().TbotImage {
+	if got := dep.Spec.Template.Spec.InitContainers[0].Image; got != testConfig().TbotImage {
 		t.Errorf("Deployment image: want %q (from operator config), got %q", testConfig().TbotImage, got)
 	}
 }
@@ -261,7 +261,7 @@ func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
 		if err := testClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, dep); err != nil {
 			return false, err
 		}
-		c := dep.Spec.Template.Spec.Containers[0]
+		c := dep.Spec.Template.Spec.InitContainers[0] // tbot, the native sidecar
 		if len(c.Ports) == 0 || c.Ports[0].ContainerPort != newPort {
 			return false, fmt.Errorf("Deployment container port not yet %d", newPort)
 		}

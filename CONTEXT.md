@@ -313,6 +313,15 @@ half-applicable defaults.
   not from the CR and not hardcoded. Cluster-wide defaults the platform team
   can tune; per-CR sizing is busywork because the tbot sidecar's profile
   doesn't vary per app.
+- **Container order.** tbot is a native sidecar — an init container with
+  `restartPolicy: Always` — carrying a startup probe on its diag `/readyz`;
+  ghostunnel is the pod's only regular container. The kubelet starts it only
+  once the startup probe has passed, so ghostunnel never reads
+  `/var/run/spiffe/svid.pem` before tbot has written it
+  (giantswarm/tunnelport#118 — as two regular containers it crash-looped on
+  every pod start). The probe is bounded to ten minutes of join attempts,
+  then tbot is restarted. On shutdown ghostunnel stops first, tbot last.
+  Requires Kubernetes ≥ 1.29.
 
 ### Central-side provisioning (out of scope for the operator)
 

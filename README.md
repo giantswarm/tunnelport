@@ -11,7 +11,7 @@ code.
 
 A platform engineer writes one `RemoteApp`. The operator reconciles it into a
 `ServiceAccount`, a `ConfigMap` carrying `tbot`'s rendered config, a
-`Deployment` (one `tbot` container, one `ghostunnel` sidecar) and a
+`Deployment` (`tbot` as a native sidecar, `ghostunnel` as the container it gates) and a
 `ClusterIP` `Service`. Workloads on the consumer MC call
 `https://<remoteapp-name>:8443` and traffic ends up at the backing app on a
 producer MC.
@@ -105,7 +105,10 @@ The `ghostunnel` sidecar terminates TLS on `8443` using a SPIFFE X.509-SVID
 minted by `tbot`'s `workload-identity-x509` service, signed by Teleport
 central's SPIFFE CA. The SVID and its private key live in an `emptyDir`
 shared with the sidecar; `ghostunnel` watches the files and reloads on
-rotation. Callers verify the SVID against a single trust-bundle `Secret`
+rotation. `tbot` runs as a native sidecar — an init container with
+`restartPolicy: Always` — whose startup probe on `/readyz` holds `ghostunnel`
+back until the first SVID is on disk, so `ghostunnel` never starts without a
+certificate. Callers verify the SVID against a single trust-bundle `Secret`
 (`tunnelport-spiffe-bundle`) materialised by a chart-managed singleton
 `tunnelport-trust-bundle` Deployment.
 
