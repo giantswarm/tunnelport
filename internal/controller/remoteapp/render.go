@@ -277,8 +277,24 @@ const (
 
 	// tbotContainerName is the name of the tbot container in the rendered
 	// tunnel pod. Same string as LabelRoleValue, named separately because
-	// status.go ranks container statuses by it.
+	// status.go ranks container statuses by it. tbot runs as a native
+	// sidecar — an init container with restartPolicy Always — so the
+	// kubelet reports it under InitContainerStatuses, not
+	// ContainerStatuses (status.go reads both).
 	tbotContainerName = LabelRoleValue
+
+	// tbotStartupProbePeriodSeconds and tbotStartupProbeFailureThreshold
+	// bound tbot's startup probe on /readyz: 5 s × 120 = 10 minutes for
+	// the Teleport join, the application tunnel and the first SVID before
+	// the kubelet restarts tbot and it joins afresh. The startup probe is
+	// what orders the pod: the kubelet starts the next container only
+	// once a sidecar's startup probe has passed, so ghostunnel never runs
+	// without svid.pem on disk (giantswarm/tunnelport#118). Ten minutes
+	// is deliberately long — a Teleport outage should not turn into a
+	// tbot restart storm; one rejoin every ten minutes is the cost of
+	// unwedging a join that hangs.
+	tbotStartupProbePeriodSeconds    int32 = 5
+	tbotStartupProbeFailureThreshold int32 = 120
 
 	// ghostunnelContainerName is the name of the TLS-terminating sidecar
 	// container (slice 02 / ADR 0007).
@@ -318,7 +334,20 @@ const (
 // Image and resources come from operator PodDefaults (Helm values via slice 6),
 // not from the CR.
 //
-// The container declares a readiness probe wired to tbot's diag /readyz
+// tbot is a native sidecar: an init container with restartPolicy Always
+// and a startup probe on its diag /readyz. The kubelet starts ghostunnel —
+// the pod's only regular container — only after that probe has passed,
+// i.e. once tbot has joined Teleport, opened the application tunnel and
+// written the SVID trio into the shared emptyDir. As two ordinary
+// containers they started together, ghostunnel exited with "unable to
+// load certificates: /var/run/spiffe/svid.pem: no such file or directory"
+// and crash-looped until tbot caught up — one or two restarts on every
+// pod start, which on a cluster whose spot nodes reschedule the tunnel
+// pods all day fires the container-restart alert (tunnelport#118). On
+// shutdown the kubelet stops sidecars after the regular containers, so
+// ghostunnel drains before tbot closes the tunnel.
+//
+// The tbot container declares a readiness probe wired to tbot's diag /readyz
 // (port "diag", 3001) so pod-Ready means tunnel-up — that's what
 // status.ready mirrors. It also declares a liveness probe (TCPSocket on
 // the diag port) so the kubelet restarts the pod if tbot's diag listener
@@ -364,6 +393,10 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 	// Teleport ProvisionToken's `allow` rule pins.
 	automountServiceAccountToken := true
 
+	// tbot's native-sidecar restart policy (KEP-753, GA since Kubernetes
+	// 1.33, on by default since 1.29).
+	sidecarRestartPolicy := corev1.ContainerRestartPolicyAlways
+
 	// Ghostunnel sidecar (slice 02 / ADR 0007). Terminates TLS for the
 	// rendered Service using the SVID tbot writes into the shared `svid`
 	// emptyDir. `--timed-reload=5m` is safe because tbot's
@@ -403,11 +436,12 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 			},
 		},
 		// TCPSocket on the tls listen port: ghostunnel exposes no health
-		// endpoint, and it can only accept connections once tbot has written
-		// the SVID into the shared emptyDir. Probing the port makes pod-Ready
-		// reflect the tunnel actually terminating TLS, not just the ghostunnel
-		// process being up — so a missing/failed SVID keeps the pod NotReady
-		// instead of silently serving nothing.
+		// endpoint. It starts only after tbot's startup probe has passed
+		// (tbot is a native sidecar, see renderDeployment), so the SVID is
+		// on disk by then; probing the port still makes pod-Ready reflect
+		// the tunnel actually terminating TLS, not just the ghostunnel
+		// process being up — a listener that fails to bind keeps the pod
+		// NotReady instead of silently serving nothing.
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				TCPSocket: &corev1.TCPSocketAction{
@@ -532,11 +566,16 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 							},
 						},
 					},
-					Containers: []corev1.Container{
+					InitContainers: []corev1.Container{
 						{
 							Name:      tbotContainerName,
 							Image:     cfg.TbotImage,
 							Resources: cfg.Resources,
+							// Native sidecar (KEP-753): restartPolicy Always
+							// on an init container keeps tbot running for
+							// the pod's whole life while its position in
+							// InitContainers orders it before ghostunnel.
+							RestartPolicy: &sidecarRestartPolicy,
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: &allowPrivilegeEscalation,
 								ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
@@ -581,12 +620,31 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},
+							// Startup probe on the same /readyz: the
+							// kubelet holds ghostunnel back until it
+							// passes, which is the whole ordering
+							// guarantee (see renderDeployment's comment).
+							// Bounded by tbotStartupProbeFailureThreshold
+							// so a join that never completes restarts
+							// tbot rather than hanging forever.
+							StartupProbe: &corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									HTTPGet: &corev1.HTTPGetAction{
+										Path: tbotDiagReadyz,
+										Port: intstr.FromString(tbotDiagPortName),
+									},
+								},
+								InitialDelaySeconds: 2,
+								PeriodSeconds:       tbotStartupProbePeriodSeconds,
+								TimeoutSeconds:      2,
+								FailureThreshold:    tbotStartupProbeFailureThreshold,
+							},
 							// Readiness wired to tbot's diag /readyz. Pod
 							// transitions to Ready only when the tunnel
 							// is established — that's what status.ready
-							// (slice 4) mirrors. Slice 5 is responsible
-							// for any liveness probe; this slice owns
-							// readiness only.
+							// (slice 4) mirrors. A sidecar's readiness
+							// counts towards pod readiness like any
+							// container's.
 							ReadinessProbe: &corev1.Probe{
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
@@ -656,8 +714,8 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 								},
 							},
 						},
-						ghostunnelContainer,
 					},
+					Containers: []corev1.Container{ghostunnelContainer},
 				},
 			},
 		},

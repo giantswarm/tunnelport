@@ -182,6 +182,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `smoke-app` registered at, instead of only its name, so a recurrence fails at
   that step rather than three minutes later as an opaque curl timeout.
 
+### Fixed
+
+- ghostunnel no longer restarts on every tunnel pod start
+  (giantswarm/tunnelport#118). tbot and ghostunnel were two ordinary
+  containers started together; ghostunnel exited at once with `unable to
+  load certificates: /var/run/spiffe/svid.pem: no such file or directory`
+  and crash-looped until tbot had joined Teleport and written the SVID — one
+  or two restarts per pod start. On gazelle, whose Karpenter spot nodes
+  reschedule the 57 tunnel pods all day, that fired
+  `AgentPlatformContainerRestartingTooOften` for `ghostunnel`. tbot is now a
+  native sidecar (an init container with `restartPolicy: Always`) with a
+  startup probe on its diag `/readyz`; the kubelet starts ghostunnel — the
+  pod's only regular container — once that probe has passed, so the
+  certificate is on disk before ghostunnel reads it. The startup probe is
+  bounded to ten minutes, after which a tbot that never joins is restarted
+  rather than left hanging. Status readers find tbot under
+  `initContainerStatuses` and, for pods from before this change, still under
+  `containerStatuses`, so `RemoteApp.status` stays truthful across the roll.
+  Requires Kubernetes 1.29 or newer (sidecar containers on by default; GA in
+  1.33). The e2e smoke asserts that a Ready tunnel pod has zero ghostunnel
+  restarts, on first start and after the tbot pod restart.
+
 ## [1.0.4] - 2026-06-16
 
 ### Fixed

@@ -158,18 +158,36 @@ func errorSeverity(reason string) int {
 	}
 }
 
+// allContainerStatuses returns the pod's init-container statuses followed by
+// its container statuses. tbot runs as a native sidecar (an init container
+// with restartPolicy Always), so the kubelet reports it under
+// InitContainerStatuses; a pod rendered by an operator version from before
+// the sidecar move carries it under ContainerStatuses until it rolls. Every
+// reader looks in both so status stays truthful across that roll.
+func allContainerStatuses(pod *corev1.Pod) []*corev1.ContainerStatus {
+	out := make([]*corev1.ContainerStatus, 0, len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	for i := range pod.Status.InitContainerStatuses {
+		out = append(out, &pod.Status.InitContainerStatuses[i])
+	}
+	for i := range pod.Status.ContainerStatuses {
+		out = append(out, &pod.Status.ContainerStatuses[i])
+	}
+	return out
+}
+
 // unreadyContainers returns the pod's unready container statuses with the
 // tbot container first. A tunnel pod runs tbot plus the ghostunnel sidecar,
-// and ghostunnel cannot bind its TLS listener until tbot has written the
-// SVID, so when both are unready tbot holds the cause and ghostunnel only
-// the symptom. Kubelet orders ContainerStatuses alphabetically, which puts
-// ghostunnel first and would otherwise send every reader of status.lastError
-// to investigate TLS instead of the Teleport join.
+// and ghostunnel cannot serve until tbot has written the SVID, so when both
+// are unready tbot holds the cause and ghostunnel only the symptom. With
+// tbot a native sidecar its status comes first anyway; for a pod from
+// before the move the kubelet orders ContainerStatuses alphabetically,
+// which puts ghostunnel first and would otherwise send every reader of
+// status.lastError to investigate TLS instead of the Teleport join.
 func unreadyContainers(pod *corev1.Pod) []*corev1.ContainerStatus {
-	out := make([]*corev1.ContainerStatus, 0, len(pod.Status.ContainerStatuses))
+	all := allContainerStatuses(pod)
+	out := make([]*corev1.ContainerStatus, 0, len(all))
 	tbot := -1
-	for i := range pod.Status.ContainerStatuses {
-		cs := &pod.Status.ContainerStatuses[i]
+	for _, cs := range all {
 		if cs.Ready {
 			continue
 		}
@@ -375,12 +393,13 @@ func summarizeRole(pods []corev1.Pod, container string) (bool, string) {
 	return false, "not ready"
 }
 
-// findContainerStatus returns the pod's status entry for one container name,
-// or nil when the pod carries no container by that name.
+// findContainerStatus returns the pod's status entry for one container name
+// — init containers (tbot, the native sidecar) and regular containers alike
+// — or nil when the pod carries no container by that name.
 func findContainerStatus(pod *corev1.Pod, container string) *corev1.ContainerStatus {
-	for i := range pod.Status.ContainerStatuses {
-		if pod.Status.ContainerStatuses[i].Name == container {
-			return &pod.Status.ContainerStatuses[i]
+	for _, cs := range allContainerStatuses(pod) {
+		if cs.Name == container {
+			return cs
 		}
 	}
 	return nil

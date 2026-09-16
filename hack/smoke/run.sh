@@ -255,6 +255,40 @@ restart_tunnel_and_wait_ready() {
     --timeout="${READY_WAIT}s" >/dev/null
   kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \
     --for=jsonpath='{.status.ready}'=true --timeout="${READY_WAIT}s" >/dev/null
+  assert_tunnel_pod_started_in_order
+}
+
+# assert_tunnel_pod_started_in_order pins the fix for the ghostunnel start
+# race (giantswarm/tunnelport#118). tbot is a native sidecar whose startup
+# probe gates ghostunnel, so a tunnel pod that reached Ready must have
+# started ghostunnel exactly once. Before the fix both were ordinary
+# containers started together: ghostunnel exited with "unable to load
+# certificates: /var/run/spiffe/svid.pem: no such file or directory" and
+# crash-looped until tbot had written the SVID -- one or two restarts on
+# every pod start, which on a cluster whose spot nodes reschedule the
+# tunnel pods all day fired the container-restart alert.
+assert_tunnel_pod_started_in_order() {
+  local pod_json tbot_sidecar_ready ghostunnel_restarts
+  pod_json="$(kubectl --context kind-consumer -n smoke get pods \
+    -l tunnelport.giantswarm.io/role=tbot,tunnelport.giantswarm.io/remoteapp=smoke-app \
+    -o json)"
+  tbot_sidecar_ready="$(jq -r \
+    '[.items[].status.initContainerStatuses[]? | select(.name=="tbot") | .ready] | if length == 0 then false else all end' \
+    <<<"${pod_json}")"
+  ghostunnel_restarts="$(jq -r \
+    '[.items[].status.containerStatuses[]? | select(.name=="ghostunnel") | .restartCount] | add // 0' \
+    <<<"${pod_json}")"
+  if [[ "${tbot_sidecar_ready}" != "true" ]]; then
+    warn "tbot is not a Ready native sidecar; initContainerStatuses: $(jq -c '[.items[].status.initContainerStatuses]' <<<"${pod_json}")"
+    exit 1
+  fi
+  if [[ "${ghostunnel_restarts}" != "0" ]]; then
+    warn "ghostunnel restarted ${ghostunnel_restarts} time(s) -- it started before tbot had written the SVID"
+    kubectl --context kind-consumer -n smoke logs \
+      -l tunnelport.giantswarm.io/remoteapp=smoke-app -c ghostunnel --previous --tail=5 || true
+    exit 1
+  fi
+  echo "tbot Ready as native sidecar; ghostunnel restarts: ${ghostunnel_restarts}"
 }
 
 
@@ -656,6 +690,9 @@ step "Waiting for status.ready=true on the RemoteApp"
 kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \
   --for=jsonpath='{.status.ready}'=true --timeout="${READY_WAIT}s"
 
+step "Asserting ghostunnel started after tbot (no restarts on first start)"
+assert_tunnel_pod_started_in_order
+
 step "Running curl assertion"
 kubectl --context kind-consumer apply -f hack/smoke/consumer/curl-pod.yaml >/dev/null
 kubectl --context kind-consumer -n smoke wait job/smoke-curl \
@@ -730,6 +767,10 @@ kubectl --context kind-consumer -n smoke rollout status deployment/smoke-app \
 # so the post-restart curl runs against a known-Ready RemoteApp.
 kubectl --context kind-consumer -n smoke wait remoteapp/smoke-app \
   --for=jsonpath='{.status.ready}'=true --timeout="${READY_WAIT}s"
+
+# A fresh pod is a fresh chance for the start race; the ordering must hold
+# on the second start as much as on the first.
+assert_tunnel_pod_started_in_order
 
 POST_RESTART_POD="$(kubectl --context kind-consumer -n smoke get pods \
   -l tunnelport.giantswarm.io/role=tbot \

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -278,7 +279,7 @@ func TestRenderDeployment_SVIDEmptyDirSharedWithTbot(t *testing.T) {
 		t.Errorf("%q must be an EmptyDir (shared with ghostunnel sidecar in slice 02); got %+v", volumeNameSVID, svid)
 	}
 
-	c := pod.Containers[0]
+	c := tbotContainer(t, dep)
 	var svidMount *corev1.VolumeMount
 	for i := range c.VolumeMounts {
 		if c.VolumeMounts[i].Name == volumeNameSVID {
@@ -356,12 +357,7 @@ func TestRenderDeployment_PodTemplateMountsConfigMapAndEmptyDir(t *testing.T) {
 	dep := renderDeployment(cr, fixtureConfig())
 
 	pod := dep.Spec.Template.Spec
-	// Slice 02 adds the ghostunnel sidecar; the tbot container we inspect
-	// in this test remains the first container.
-	if len(pod.Containers) != 2 {
-		t.Fatalf("expected 2 containers in pod (tbot + ghostunnel), got %d", len(pod.Containers))
-	}
-	c := pod.Containers[0]
+	c := tbotContainer(t, dep)
 
 	// ConfigMap volume mounted (read-only, name-only reference).
 	if !hasVolume(pod.Volumes, "tbot-config") {
@@ -449,7 +445,7 @@ func TestRenderDeployment_UsesOperatorConfigImageAndResources(t *testing.T) {
 
 	dep := renderDeployment(cr, cfg)
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := tbotContainer(t, dep)
 	if c.Image != cfg.TbotImage {
 		t.Errorf("container image: want %q (from config), got %q", cfg.TbotImage, c.Image)
 	}
@@ -470,7 +466,7 @@ func TestRenderDeployment_ContainerPortMatchesSpecPort(t *testing.T) {
 
 	dep := renderDeployment(cr, fixtureConfig())
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := tbotContainer(t, dep)
 	if len(c.Ports) == 0 {
 		t.Fatalf("container has no ports")
 	}
@@ -491,7 +487,7 @@ func TestRenderDeployment_ReadinessProbeHitsTbotDiagEndpoint(t *testing.T) {
 
 	dep := renderDeployment(cr, fixtureConfig())
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := tbotContainer(t, dep)
 
 	// diag port must be present and named so the probe can reference it.
 	var diagPort *corev1.ContainerPort
@@ -558,7 +554,7 @@ func TestRenderDeployment_PodAndContainerSecurityContext(t *testing.T) {
 	}
 
 	// Container-level securityContext.
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := tbotContainer(t, dep)
 	cc := c.SecurityContext
 	if cc == nil {
 		t.Fatalf("Container.SecurityContext must be set")
@@ -596,7 +592,7 @@ func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.
 		t.Errorf("tbot-tmp must be an EmptyDir; got %+v", tmp)
 	}
 
-	c := pod.Containers[0]
+	c := tbotContainer(t, dep)
 	var tmpMount *corev1.VolumeMount
 	for i := range c.VolumeMounts {
 		if c.VolumeMounts[i].Name == "tbot-tmp" {
@@ -654,7 +650,7 @@ func TestRenderDeployment_LivenessProbe(t *testing.T) {
 
 	dep := renderDeployment(cr, fixtureConfig())
 
-	c := dep.Spec.Template.Spec.Containers[0]
+	c := tbotContainer(t, dep)
 	if c.LivenessProbe == nil {
 		t.Fatalf("container missing livenessProbe")
 	}
@@ -704,19 +700,7 @@ func TestRenderDeployment_HasGhostunnelSidecar(t *testing.T) {
 	cfg := fixtureConfig()
 
 	dep := renderDeployment(cr, cfg)
-	containers := dep.Spec.Template.Spec.Containers
-
-	if len(containers) != 2 {
-		t.Fatalf("pod must have exactly 2 containers (tbot + ghostunnel); got %d: %v", len(containers), containerNames(containers))
-	}
-	if containers[0].Name != "tbot" {
-		t.Fatalf("first container must remain %q (unchanged); got %q", "tbot", containers[0].Name)
-	}
-	if containers[1].Name != "ghostunnel" {
-		t.Fatalf("second container must be %q; got %q", "ghostunnel", containers[1].Name)
-	}
-
-	gt := containers[1]
+	gt := ghostunnelContainer(t, dep)
 	if gt.Image != cfg.GhostunnelImage {
 		t.Errorf("ghostunnel image: want %q (from config), got %q", cfg.GhostunnelImage, gt.Image)
 	}
@@ -784,11 +768,7 @@ func TestRenderDeployment_GhostunnelReadinessProbe(t *testing.T) {
 	cfg := fixtureConfig()
 
 	dep := renderDeployment(cr, cfg)
-	containers := dep.Spec.Template.Spec.Containers
-	if len(containers) != 2 || containers[1].Name != "ghostunnel" {
-		t.Fatalf("expected ghostunnel as second container; got %v", containerNames(containers))
-	}
-	gt := containers[1]
+	gt := ghostunnelContainer(t, dep)
 
 	if gt.ReadinessProbe == nil {
 		t.Fatal("ghostunnel must have a readinessProbe")
@@ -817,6 +797,86 @@ func TestRenderDeployment_GhostunnelReadinessProbe(t *testing.T) {
 	if tlsPort.ContainerPort != tlsListenPortDefault {
 		t.Errorf("ghostunnel %q port: want %d, got %d", servicePortNameTLS, tlsListenPortDefault, tlsPort.ContainerPort)
 	}
+}
+
+// TestRenderDeployment_TbotNativeSidecarGatesGhostunnel pins the pod shape
+// that closes the ghostunnel start race (giantswarm/tunnelport#118): tbot
+// is a native sidecar — the only init container, restartPolicy Always — with
+// a startup probe on its diag /readyz, and ghostunnel is the only regular
+// container. The kubelet starts a regular container only after every
+// sidecar's startup probe has passed, so ghostunnel never starts before
+// tbot has written svid.pem. As two regular containers both started at
+// once and ghostunnel exited on the missing certificate on every pod start.
+func TestRenderDeployment_TbotNativeSidecarGatesGhostunnel(t *testing.T) {
+	cr := fixtureRemoteApp()
+	dep := renderDeployment(cr, fixtureConfig())
+	pod := dep.Spec.Template.Spec
+
+	if got := containerNames(pod.InitContainers); !slices.Equal(got, []string{tbotContainerName}) {
+		t.Fatalf("initContainers: want exactly [%s] (tbot as native sidecar), got %v", tbotContainerName, got)
+	}
+	if got := containerNames(pod.Containers); !slices.Equal(got, []string{ghostunnelContainerName}) {
+		t.Fatalf("containers: want exactly [%s], got %v", ghostunnelContainerName, got)
+	}
+
+	tbot := pod.InitContainers[0]
+	if tbot.RestartPolicy == nil || *tbot.RestartPolicy != corev1.ContainerRestartPolicyAlways {
+		t.Errorf("tbot restartPolicy: want Always (native sidecar, not a run-once init container), got %v", tbot.RestartPolicy)
+	}
+
+	sp := tbot.StartupProbe
+	if sp == nil {
+		t.Fatal("tbot must declare a startupProbe — it is what holds ghostunnel back until the SVID exists")
+	}
+	if sp.HTTPGet == nil || sp.HTTPGet.Path != tbotDiagReadyz || sp.HTTPGet.Port.StrVal != tbotDiagPortName {
+		t.Errorf("tbot startupProbe: want HTTPGet %s on port %q, got %+v", tbotDiagReadyz, tbotDiagPortName, sp.ProbeHandler)
+	}
+	if sp.PeriodSeconds != tbotStartupProbePeriodSeconds || sp.FailureThreshold != tbotStartupProbeFailureThreshold {
+		t.Errorf("tbot startupProbe budget: want %ds × %d, got %ds × %d",
+			tbotStartupProbePeriodSeconds, tbotStartupProbeFailureThreshold, sp.PeriodSeconds, sp.FailureThreshold)
+	}
+	// Minutes of join attempts before the kubelet restarts tbot: long
+	// enough that a Teleport outage is not a tbot restart storm.
+	if budget := sp.PeriodSeconds * sp.FailureThreshold; budget < 300 {
+		t.Errorf("tbot startupProbe budget: want at least 300 s, got %d s", budget)
+	}
+
+	// The sidecar keeps its readiness and liveness probes: readiness feeds
+	// pod Ready (status.ready), liveness restarts a wedged diag listener.
+	if tbot.ReadinessProbe == nil || tbot.LivenessProbe == nil {
+		t.Errorf("tbot must keep its readiness and liveness probes as a sidecar; got readiness=%v liveness=%v",
+			tbot.ReadinessProbe != nil, tbot.LivenessProbe != nil)
+	}
+	// Only init containers may set a container restartPolicy; ghostunnel
+	// follows the pod's.
+	if gt := pod.Containers[0]; gt.RestartPolicy != nil {
+		t.Errorf("ghostunnel must not set a container restartPolicy; got %v", *gt.RestartPolicy)
+	}
+}
+
+// tbotContainer returns the tbot native-sidecar init container of a rendered
+// Deployment.
+func tbotContainer(t *testing.T, dep *appsv1.Deployment) corev1.Container {
+	t.Helper()
+	return namedContainer(t, dep.Spec.Template.Spec.InitContainers, tbotContainerName)
+}
+
+// ghostunnelContainer returns the ghostunnel container of a rendered
+// Deployment — its only regular container.
+func ghostunnelContainer(t *testing.T, dep *appsv1.Deployment) corev1.Container {
+	t.Helper()
+	return namedContainer(t, dep.Spec.Template.Spec.Containers, ghostunnelContainerName)
+}
+
+func namedContainer(t *testing.T, cs []corev1.Container, name string) corev1.Container {
+	t.Helper()
+	for _, c := range cs {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no container %q; got %v", name, containerNames(cs))
+	return corev1.Container{}
 }
 
 func containerNames(cs []corev1.Container) []string {

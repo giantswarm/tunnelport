@@ -708,3 +708,69 @@ func findCond(cs []metav1.Condition, t string) *metav1.Condition {
 	}
 	return nil
 }
+
+// nativeSidecarTunnelPod is tunnelPod in the shape the kubelet reports since
+// tbot became a native sidecar (giantswarm/tunnelport#118): tbot under
+// InitContainerStatuses, ghostunnel alone under ContainerStatuses.
+func nativeSidecarTunnelPod(name, ghostunnelReason, tbotReason string) corev1.Pod {
+	pod := tunnelPod(name, ghostunnelReason, tbotReason)
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{pod.Status.ContainerStatuses[1]}
+	pod.Status.ContainerStatuses = pod.Status.ContainerStatuses[:1]
+	return pod
+}
+
+// Every status reader must find tbot under InitContainerStatuses: the
+// per-role conditions, the tbot-first error summary and the severity
+// ranking. A pod from before the sidecar move (tbot under ContainerStatuses,
+// tunnelPod above) keeps working until it rolls — both shapes coexist for
+// one rollout, and the tests above cover the old one.
+func TestStatus_ReadsTbotFromInitContainerStatuses(t *testing.T) {
+	cr := newRemoteApp()
+	roleConditions := func(t *testing.T, pod corev1.Pod) (identity, serving *metav1.Condition) {
+		t.Helper()
+		got := computeStatus(cr, []corev1.Pod{pod}, nil, "", nil)
+		identity = conditionByType(got.Conditions, accessv1alpha1.ConditionTypeIdentityIssued)
+		serving = conditionByType(got.Conditions, accessv1alpha1.ConditionTypeTunnelServing)
+		if identity == nil || serving == nil {
+			t.Fatalf("want both per-role conditions, got %v", got.Conditions)
+		}
+		return identity, serving
+	}
+
+	t.Run("both crashlooping blames the join", func(t *testing.T) {
+		pod := nativeSidecarTunnelPod("p", reasonCrashLoopBackOff, reasonCrashLoopBackOff)
+		identity, serving := roleConditions(t, pod)
+		if identity.Status != metav1.ConditionFalse || !strings.Contains(identity.Message, "2470 restarts") {
+			t.Errorf("IdentityIssued: want False with tbot's restart count, got %+v", identity)
+		}
+		if serving.Status != metav1.ConditionFalse || !strings.Contains(serving.Message, "2474 restarts") {
+			t.Errorf("TunnelServing: want False with ghostunnel's restart count, got %+v", serving)
+		}
+		if msg := summarizePodError(&pod); !strings.Contains(msg, "container=tbot") {
+			t.Errorf("summarizePodError: want tbot named first, got %q", msg)
+		}
+		if got, want := podErrorReason(&pod), reasonCrashLoopBackOff; got != want {
+			t.Errorf("podErrorReason: got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("identity down while the listener still serves", func(t *testing.T) {
+		identity, serving := roleConditions(t, nativeSidecarTunnelPod("p", "", reasonCrashLoopBackOff))
+		if identity.Status != metav1.ConditionFalse {
+			t.Errorf("IdentityIssued: want False, got %+v", identity)
+		}
+		if serving.Status != metav1.ConditionTrue {
+			t.Errorf("TunnelServing: want True, got %+v", serving)
+		}
+	})
+
+	t.Run("healthy sidecar and listener report both roles true", func(t *testing.T) {
+		identity, serving := roleConditions(t, nativeSidecarTunnelPod("p", "", ""))
+		if identity.Status != metav1.ConditionTrue {
+			t.Errorf("IdentityIssued: want True, got %+v", identity)
+		}
+		if serving.Status != metav1.ConditionTrue {
+			t.Errorf("TunnelServing: want True, got %+v", serving)
+		}
+	})
+}
