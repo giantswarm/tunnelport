@@ -109,6 +109,11 @@ type PodDefaults struct {
 	// GhostunnelListenPort is the TLS port the ghostunnel sidecar listens
 	// on inside the pod and that the rendered Service exposes as `tls`.
 	GhostunnelListenPort int32
+
+	// GhostunnelResources is the requests/limits applied to the ghostunnel
+	// container. Cluster-wide defaults like Resources above: RemoteApp.spec
+	// deliberately does not let CR authors override them.
+	GhostunnelResources corev1.ResourceRequirements
 }
 
 // renderScheme is a private scheme used by setOwnerRef so unit tests can
@@ -303,10 +308,11 @@ const (
 	// emptyDirSizeLimitValue bounds every emptyDir the rendered pod mounts.
 	// A sizeLimit both caps scratch growth and satisfies the Kyverno
 	// `require-emptydir-requests-and-limits` policy: that policy skips any
-	// emptyDir which already declares a sizeLimit, so the ghostunnel sidecar
-	// (which carries no resource requests/limits) and the tbot container do
-	// not need per-container ephemeral-storage entries. 50Mi is generous for
-	// tbot's small on-disk state (bot DB, the SVID PEM trio, /tmp scratch).
+	// emptyDir which already declares a sizeLimit, so neither the tbot
+	// container nor the ghostunnel sidecar needs a per-container
+	// ephemeral-storage entry next to its cpu/memory budget. 50Mi is
+	// generous for tbot's small on-disk state (bot DB, the SVID PEM trio,
+	// /tmp scratch).
 	emptyDirSizeLimitValue = "50Mi"
 
 	// servicePortNameTLS is the Service port name fronting the ghostunnel
@@ -406,8 +412,9 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 		listenPort = tlsListenPortDefault
 	}
 	ghostunnelContainer := corev1.Container{
-		Name:  ghostunnelContainerName,
-		Image: cfg.GhostunnelImage,
+		Name:      ghostunnelContainerName,
+		Image:     cfg.GhostunnelImage,
+		Resources: cfg.GhostunnelResources,
 		Args: []string{
 			"server",
 			"--cert=" + mountPathSVID + "/svid.pem",

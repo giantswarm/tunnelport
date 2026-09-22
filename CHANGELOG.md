@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The ghostunnel sidecar now carries CPU and memory requests and limits of its
+  own, from the new `tls.resources` chart values (giantswarm/tunnelport#PRNUM).
+  Every rendered tunnel Deployment put ghostunnel in the pod with `resources:
+  {}` while its sibling tbot container had a budget, so the container that
+  actually terminates TLS for the Service had no accounting at all: nothing
+  reserved for it, so it was the first to be starved under node CPU pressure,
+  and no ceiling, so a stuck or leaking TLS proxy was capped by nothing before
+  it threatened the node. On gazelle that is every one of the ~50 tunnel pods —
+  `dex-*`, `kubernetes-*`, `mcp-capi-*`, `mcp-kubernetes-*`, `mcp-prometheus-*`
+  and the two glean tunnels — all rendered from this one template. The defaults
+  are 25m/32Mi requests and 100m/128Mi limits, roughly half of `tbot.resources`
+  (ghostunnel is a thin proxy) with the roomier ceiling on memory because the
+  `kubernetes-*` tunnels carry kube-apiserver traffic. They reach the renderer
+  the way tbot's do — four `--ghostunnel-*-request/-limit` manager flags — and
+  are cluster-wide defaults: `RemoteApp.spec` deliberately does not let CR
+  authors override them. The emptyDir `sizeLimit` is still what keeps both
+  containers out of the Kyverno `require-emptydir-requests-and-limits` policy,
+  so neither needs a per-container ephemeral-storage entry; the comments that
+  justified that by ghostunnel having no resources at all are corrected.
+  Upgrading rolls every tunnel Deployment (one replica each, `maxSurge=1`,
+  `maxUnavailable=0`, so each tunnel gets its surge pod before the old one goes).
+
 - The operator now sends one HTTP request *through* each verified tunnel per
   verification round and reports whether the far end answered
   (giantswarm/tunnelport#110). On gazelle a Teleport app service whose

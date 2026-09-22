@@ -144,6 +144,19 @@ tls:
   # listens on inside the pod). The plaintext port name `tbot` is
   # preserved for selector / NetworkPolicy backward compatibility.
   port: 8443
+  # Roughly half of `tbot.resources` above: ghostunnel is a thin TLS
+  # proxy, but it needs a budget of its own. Without one it is the
+  # first container on the node to be starved under CPU pressure, and
+  # nothing caps a stuck or leaking proxy before it threatens the node.
+  # The memory ceiling is the roomier of the two because the
+  # `kubernetes-*` tunnels carry kube-apiserver traffic.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 128Mi
 
 # CRD packaging. With `crds.install: true` (the default) the chart
 # bundles the CRD inline in `templates/crds.yml` with
