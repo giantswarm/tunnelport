@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The ghostunnel sidecar now carries CPU and memory requests and limits of its
-  own, from the new `tls.resources` chart values (giantswarm/tunnelport#PRNUM).
+  own, from the new `tls.resources` chart values (giantswarm/tunnelport#120).
   Every rendered tunnel Deployment put ghostunnel in the pod with `resources:
   {}` while its sibling tbot container had a budget, so the container that
   actually terminates TLS for the Service had no accounting at all: nothing
