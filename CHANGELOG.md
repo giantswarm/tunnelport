@@ -19,9 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it threatened the node. On gazelle that is every one of the ~50 tunnel pods —
   `dex-*`, `kubernetes-*`, `mcp-capi-*`, `mcp-kubernetes-*`, `mcp-prometheus-*`
   and the two glean tunnels — all rendered from this one template. The defaults
-  are 25m/32Mi requests and 100m/128Mi limits, roughly half of `tbot.resources`
-  (ghostunnel is a thin proxy) with the roomier ceiling on memory because the
-  `kubernetes-*` tunnels carry kube-apiserver traffic. They reach the renderer
+  are 25m/32Mi requests and 200m/256Mi limits. The requests are half of
+  `tbot.resources` — ghostunnel is the thinner of the two, having neither cert
+  renewal nor the Teleport protocol to run — but the limits match tbot's,
+  because both containers sit on the same data path and encrypt every byte that
+  crosses a tunnel: half of tbot's ceiling would throttle ghostunnel first on
+  exactly the busiest tunnels, and a memory ceiling it reached would be an OOM
+  kill and a `TunnelPortTunnelCrashLooping` page rather than a capped proxy
+  (ghostunnel runs no `GOMEMLIMIT`, so the Go runtime cannot see the cgroup
+  ceiling to collect against it). A limit reserves nothing, so the headroom is
+  free until it is needed. They reach the renderer
   the way tbot's do — four `--ghostunnel-*-request/-limit` manager flags — and
   are cluster-wide defaults: `RemoteApp.spec` deliberately does not let CR
   authors override them. The emptyDir `sizeLimit` is still what keeps both

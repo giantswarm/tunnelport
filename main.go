@@ -160,9 +160,9 @@ func parseFlags() flags {
 		"CPU request applied to the ghostunnel container.")
 	flag.StringVar(&f.ghostunnelMemRequest, "ghostunnel-memory-request", "32Mi",
 		"Memory request applied to the ghostunnel container.")
-	flag.StringVar(&f.ghostunnelCPULimit, "ghostunnel-cpu-limit", "100m",
+	flag.StringVar(&f.ghostunnelCPULimit, "ghostunnel-cpu-limit", "200m",
 		"CPU limit applied to the ghostunnel container.")
-	flag.StringVar(&f.ghostunnelMemLimit, "ghostunnel-memory-limit", "128Mi",
+	flag.StringVar(&f.ghostunnelMemLimit, "ghostunnel-memory-limit", "256Mi",
 		"Memory limit applied to the ghostunnel container.")
 	// Active TLS verification (giantswarm/giantswarm#37521 gap 2). The
 	// operator dials each Ready RemoteApp's own rendered Service with

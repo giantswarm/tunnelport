@@ -77,6 +77,9 @@ func fixtureConfig() PodDefaults {
 		GhostunnelImage:          "registry.example.com/ghostunnel:v1.2.3",
 		GhostunnelReloadInterval: "5m",
 		GhostunnelListenPort:     tlsListenPortDefault,
+		// Deliberately NOT the chart's ghostunnel defaults, and not tbot's
+		// either: distinct quantities on both containers are what catches a
+		// renderer that stamps one container's budget onto the other.
 		GhostunnelResources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:    resource.MustParse("25m"),

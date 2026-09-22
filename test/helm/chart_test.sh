@@ -147,17 +147,19 @@ assert "tls.resources.requests.cpu flows to --ghostunnel-cpu-request" \
 assert "tls.resources.requests.memory flows to --ghostunnel-memory-request" \
   "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-memory-request=32Mi'"
 assert "tls.resources.limits.cpu flows to --ghostunnel-cpu-limit" \
-  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-cpu-limit=100m'"
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-cpu-limit=200m'"
 assert "tls.resources.limits.memory flows to --ghostunnel-memory-limit" \
-  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-memory-limit=128Mi'"
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-memory-limit=256Mi'"
 
 # 4b. Overridden values flow through too — guards against accidental hardcoding.
+# The request stays under the default limit: a request above its limit is
+# rejected by the API server, so it is not a shape worth pinning here.
 # shellcheck disable=SC2034 # referenced by assert "..." strings below.
 RENDERED_TLS_OVERRIDE="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
-  --set tls.resources.requests.cpu=321m \
+  --set tls.resources.requests.cpu=61m \
   --set tls.resources.limits.memory=777Mi)"
 assert "overridden tls.resources.requests.cpu flows" \
-  "printf '%s' \"\${RENDERED_TLS_OVERRIDE}\" | grep -E -- '--ghostunnel-cpu-request=321m'"
+  "printf '%s' \"\${RENDERED_TLS_OVERRIDE}\" | grep -E -- '--ghostunnel-cpu-request=61m'"
 assert "overridden tls.resources.limits.memory flows" \
   "printf '%s' \"\${RENDERED_TLS_OVERRIDE}\" | grep -E -- '--ghostunnel-memory-limit=777Mi'"
 

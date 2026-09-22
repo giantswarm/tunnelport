@@ -48,8 +48,8 @@ Teleport-exposed app as if it were a local Service.
 | tls.port | int | `8443` |  |
 | tls.resources.requests.cpu | string | `"25m"` |  |
 | tls.resources.requests.memory | string | `"32Mi"` |  |
-| tls.resources.limits.cpu | string | `"100m"` |  |
-| tls.resources.limits.memory | string | `"128Mi"` |  |
+| tls.resources.limits.cpu | string | `"200m"` |  |
+| tls.resources.limits.memory | string | `"256Mi"` |  |
 | crds.install | bool | `true` |  |
 | networkPolicy.enabled | bool | `true` |  |
 | verification.enabled | bool | `true` |  |
