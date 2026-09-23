@@ -46,6 +46,10 @@ Teleport-exposed app as if it were a local Service.
 | tls.image.digest | string | `"sha256:ab209cc0c8eb7020a826ea8052aade2b77d7d9ce3724fab7ec34aba5cdf2e153"` |  |
 | tls.reloadInterval | string | `"5m"` |  |
 | tls.port | int | `8443` |  |
+| tls.resources.requests.cpu | string | `"25m"` |  |
+| tls.resources.requests.memory | string | `"32Mi"` |  |
+| tls.resources.limits.cpu | string | `"200m"` |  |
+| tls.resources.limits.memory | string | `"256Mi"` |  |
 | crds.install | bool | `true` |  |
 | networkPolicy.enabled | bool | `true` |  |
 | verification.enabled | bool | `true` |  |

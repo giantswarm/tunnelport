@@ -92,6 +92,10 @@ spec:
         - --ghostunnel-image={{ include "tunnelport.ghostunnelImage" . }}
         - --ghostunnel-reload-interval={{ .Values.tls.reloadInterval }}
         - --ghostunnel-listen-port={{ .Values.tls.port }}
+        - --ghostunnel-cpu-request={{ .Values.tls.resources.requests.cpu }}
+        - --ghostunnel-memory-request={{ .Values.tls.resources.requests.memory }}
+        - --ghostunnel-cpu-limit={{ .Values.tls.resources.limits.cpu }}
+        - --ghostunnel-memory-limit={{ .Values.tls.resources.limits.memory }}
         - --teleport-cluster-name={{ required "teleport.clusterName is required (ADR 0005)" .Values.teleport.clusterName }}
         - --teleport-proxy-addr={{ required "teleport.proxyAddr is required (ADR 0005)" .Values.teleport.proxyAddr }}
         {{- if .Values.tbot.insecure }}

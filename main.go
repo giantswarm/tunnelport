@@ -89,6 +89,10 @@ type flags struct {
 	ghostunnelImage          string
 	ghostunnelReloadInterval string
 	ghostunnelListenPort     int
+	ghostunnelCPURequest     string
+	ghostunnelMemRequest     string
+	ghostunnelCPULimit       string
+	ghostunnelMemLimit       string
 
 	verifyTunnels         bool
 	verifyInterval        time.Duration
@@ -152,6 +156,14 @@ func parseFlags() flags {
 	flag.IntVar(&f.ghostunnelListenPort, "ghostunnel-listen-port", 8443,
 		"Port the ghostunnel sidecar listens on inside the pod; the rendered "+
 			"Service exposes it as the `tls` port with the same value.")
+	flag.StringVar(&f.ghostunnelCPURequest, "ghostunnel-cpu-request", "25m",
+		"CPU request applied to the ghostunnel container.")
+	flag.StringVar(&f.ghostunnelMemRequest, "ghostunnel-memory-request", "32Mi",
+		"Memory request applied to the ghostunnel container.")
+	flag.StringVar(&f.ghostunnelCPULimit, "ghostunnel-cpu-limit", "200m",
+		"CPU limit applied to the ghostunnel container.")
+	flag.StringVar(&f.ghostunnelMemLimit, "ghostunnel-memory-limit", "256Mi",
+		"Memory limit applied to the ghostunnel container.")
 	// Active TLS verification (giantswarm/giantswarm#37521 gap 2). The
 	// operator dials each Ready RemoteApp's own rendered Service with
 	// ServerName set to the Service FQDN and verifies the served chain
@@ -330,6 +342,16 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 		GhostunnelImage:          f.ghostunnelImage,
 		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
 		GhostunnelListenPort:     ghostunnelListenPortOrExit(f),
+		GhostunnelResources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    parseQuantityOrExit("ghostunnel-cpu-request", f.ghostunnelCPURequest),
+				corev1.ResourceMemory: parseQuantityOrExit("ghostunnel-memory-request", f.ghostunnelMemRequest),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    parseQuantityOrExit("ghostunnel-cpu-limit", f.ghostunnelCPULimit),
+				corev1.ResourceMemory: parseQuantityOrExit("ghostunnel-memory-limit", f.ghostunnelMemLimit),
+			},
+		},
 	}
 }
 

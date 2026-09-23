@@ -10,8 +10,8 @@
 #
 #   1. `helm lint` clean.
 #   2. RBAC has no `pods/log` and no `secrets` write verbs (ADR 0003 / 0001).
-#   3. `tbot.image` and `tbot.resources` Helm values flow through to the
-#      manager Deployment's CLI flags.
+#   3. `tbot.image`, `tbot.resources`, `tls.image` and `tls.resources` Helm
+#      values flow through to the manager Deployment's CLI flags.
 #   4. CRD bundle is gated on `crds.install` and carries
 #      `helm.sh/resource-policy: keep`.
 #   5. Every rendered object carries a non-empty
@@ -135,6 +135,33 @@ assert "overridden tbot.resources.requests.cpu flows" \
   "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-cpu-request=123m'"
 assert "overridden tbot.resources.limits.memory flows" \
   "printf '%s' \"\${RENDERED_OVERRIDE}\" | grep -E -- '--tbot-memory-limit=999Mi'"
+
+echo "==> ghostunnel value flow assertions"
+
+# 4a. tls.resources flows to the four --ghostunnel-* resource flags. The sidecar
+# rendered `resources: {}` until giantswarm/giantswarm#37977: no accounting at
+# all, so it was first to starve under node CPU pressure and nothing capped a
+# leaking TLS proxy.
+assert "tls.resources.requests.cpu flows to --ghostunnel-cpu-request" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-cpu-request=25m'"
+assert "tls.resources.requests.memory flows to --ghostunnel-memory-request" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-memory-request=32Mi'"
+assert "tls.resources.limits.cpu flows to --ghostunnel-cpu-limit" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-cpu-limit=200m'"
+assert "tls.resources.limits.memory flows to --ghostunnel-memory-limit" \
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-memory-limit=256Mi'"
+
+# 4b. Overridden values flow through too — guards against accidental hardcoding.
+# The request stays under the default limit: a request above its limit is
+# rejected by the API server, so it is not a shape worth pinning here.
+# shellcheck disable=SC2034 # referenced by assert "..." strings below.
+RENDERED_TLS_OVERRIDE="$(helm template tunnelport "${CHART}" "${TELEPORT_FLAGS[@]}" \
+  --set tls.resources.requests.cpu=61m \
+  --set tls.resources.limits.memory=777Mi)"
+assert "overridden tls.resources.requests.cpu flows" \
+  "printf '%s' \"\${RENDERED_TLS_OVERRIDE}\" | grep -E -- '--ghostunnel-cpu-request=61m'"
+assert "overridden tls.resources.limits.memory flows" \
+  "printf '%s' \"\${RENDERED_TLS_OVERRIDE}\" | grep -E -- '--ghostunnel-memory-limit=777Mi'"
 
 echo "==> Teleport binding flow assertions (ADR 0005)"
 

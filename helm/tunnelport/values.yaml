@@ -144,6 +144,28 @@ tls:
   # listens on inside the pod). The plaintext port name `tbot` is
   # preserved for selector / NetworkPolicy backward compatibility.
   port: 8443
+  # Without a budget of its own ghostunnel is the first container on the
+  # node to be starved under CPU pressure, and nothing caps a stuck or
+  # leaking proxy before it threatens the node.
+  #
+  # The requests are half of `tbot.resources` above — ghostunnel is the
+  # thinner of the two, having neither cert renewal nor the Teleport
+  # protocol to run — but the limits MATCH tbot's, because both
+  # containers sit on the same data path and encrypt every byte that
+  # crosses a tunnel. Half of tbot's ceiling would throttle ghostunnel
+  # first on exactly the busiest tunnels (`kubernetes-*` carry
+  # kube-apiserver traffic), and a memory ceiling it reached would be an
+  # OOM kill and a CrashLoopBackOff page, not a capped proxy — ghostunnel
+  # runs no GOMEMLIMIT, so the Go runtime cannot see the cgroup ceiling
+  # to collect against it. A limit reserves nothing, so the headroom is
+  # free until it is needed.
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
 
 # CRD packaging. With `crds.install: true` (the default) the chart
 # bundles the CRD inline in `templates/crds.yml` with

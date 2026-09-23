@@ -77,6 +77,19 @@ func fixtureConfig() PodDefaults {
 		GhostunnelImage:          "registry.example.com/ghostunnel:v1.2.3",
 		GhostunnelReloadInterval: "5m",
 		GhostunnelListenPort:     tlsListenPortDefault,
+		// Deliberately NOT the chart's ghostunnel defaults, and not tbot's
+		// either: distinct quantities on both containers are what catches a
+		// renderer that stamps one container's budget onto the other.
+		GhostunnelResources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("25m"),
+				corev1.ResourceMemory: resource.MustParse("32Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+		},
 	}
 }
 
@@ -611,9 +624,9 @@ func TestRenderDeployment_TmpEmptyDirSatisfiesReadOnlyRootFilesystem(t *testing.
 // TestRenderDeployment_EmptyDirsHaveSizeLimit pins the sizeLimit on every
 // rendered emptyDir. A sizeLimit bounds scratch growth and satisfies the
 // Kyverno `require-emptydir-requests-and-limits` policy, which skips any
-// emptyDir already declaring a sizeLimit — so the ghostunnel sidecar (no
-// resource requests/limits) does not trip the policy. Regression guard for
-// giantswarm/giantswarm#36885.
+// emptyDir already declaring a sizeLimit — so neither container needs a
+// per-container ephemeral-storage entry next to its cpu/memory budget.
+// Regression guard for giantswarm/giantswarm#36885.
 func TestRenderDeployment_EmptyDirsHaveSizeLimit(t *testing.T) {
 	cr := fixtureRemoteApp()
 
@@ -703,6 +716,30 @@ func TestRenderDeployment_HasGhostunnelSidecar(t *testing.T) {
 	gt := ghostunnelContainer(t, dep)
 	if gt.Image != cfg.GhostunnelImage {
 		t.Errorf("ghostunnel image: want %q (from config), got %q", cfg.GhostunnelImage, gt.Image)
+	}
+
+	// The budget comes from the operator's config, like tbot's. Without one
+	// the container is the first to be starved under node CPU pressure and
+	// nothing caps a leaking proxy (giantswarm/giantswarm#37977).
+	for _, tc := range []struct {
+		what string
+		got  corev1.ResourceList
+		want corev1.ResourceList
+	}{
+		{"requests", gt.Resources.Requests, cfg.GhostunnelResources.Requests},
+		{"limits", gt.Resources.Limits, cfg.GhostunnelResources.Limits},
+	} {
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			want := tc.want[name]
+			got, ok := tc.got[name]
+			if !ok {
+				t.Errorf("ghostunnel %s: no %s (the container would render resources: {})", tc.what, name)
+				continue
+			}
+			if got.Cmp(want) != 0 {
+				t.Errorf("ghostunnel %s %s: want %s (from config), got %s", tc.what, name, (&want).String(), (&got).String())
+			}
+		}
 	}
 
 	wantArgs := []string{
