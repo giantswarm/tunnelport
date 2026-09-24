@@ -18,10 +18,14 @@ named after the CR — those are out of this chart's hands.
 {{- end -}}
 
 {{/*
-Chart label (helm.sh/chart). Sanitised per Helm convention.
+Chart label (helm.sh/chart). Sanitised per Helm convention. A label value is at
+most 63 characters and begins and ends alphanumeric: the cut of a long version
+(a branch build's <version>-dev.<branch>.<date>.<time>.<sha>, or the
+<version>+<digest> helm-controller installs) can land on any run of ".", "_"
+(from "+") and "-", so the whole run is trimmed.
 */}}
 {{- define "tunnelport.chart" -}}
-{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimAll "-._" -}}
 {{- end -}}
 
 {{/*
@@ -34,11 +38,14 @@ The team label reads the `io.giantswarm.application.team` annotation, which is
 the key `app-build-suite` keeps when it packages the chart. The literal
 fallback covers a source tree whose Chart.yaml uses the other spelling: the
 lookup returns an empty string there, and an empty team label routes nowhere.
+
+The version label is cut like the chart label and trims the same run of ".",
+"_" and "-" (see tunnelport.chart).
 */}}
 {{- define "tunnelport.labels" -}}
 helm.sh/chart: {{ include "tunnelport.chart" . }}
 {{ include "tunnelport.selectorLabels" . }}
-app.kubernetes.io/version: {{ .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | quote }}
+app.kubernetes.io/version: {{ .Chart.Version | replace "+" "_" | trunc 63 | trimAll "-._" | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 application.giantswarm.io/team: {{ index .Chart.Annotations "io.giantswarm.application.team" | default "bumblebee" | quote }}
 {{- end -}}

@@ -165,6 +165,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `helm.sh/chart` and `app.kubernetes.io/version` are valid label values for any
+  chart version (giantswarm/tunnelport#123). Both cut the version at 63
+  characters and trimmed a single trailing `-`, so a long version, such as a
+  branch build or the `<version>+<digest>` helm-controller installs from OCI,
+  could leave the label ending in `.`, `_` or `-`, and the API server refused
+  every object the chart renders. The whole run of `.`, `_` and `-` is trimmed
+  now.
 - The two existing alerts pointed at `runbook_url`s that did not exist, under
   the legacy `ops-recipes` path. Both now point at real runbooks under
   `support-and-ops/runbooks/`, and every alert's URL carries the

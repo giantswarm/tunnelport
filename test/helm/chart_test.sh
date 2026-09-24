@@ -28,6 +28,9 @@
 #      off switch, the externally supplied trust bundle that lets an install
 #      without the singleton bot still verify, and the events.k8s.io grant
 #      the transition Events need.
+#  10. `helm.sh/chart` and `app.kubernetes.io/version` are valid label values
+#      for any chart version, the long ones whose 63-character cut lands on a
+#      separator included.
 #
 # We use `grep` on the rendered YAML rather than yq so the test runs in
 # any CI image with bash + helm.
@@ -275,6 +278,37 @@ RENDERED_OTHER="$(helm template tunnelport "${OTHER_SPELLING}/tunnelport" "${TEL
 
 assert "team label survives the other annotation spelling" \
   "team_values \"\${RENDERED_OTHER}\" | grep -c . >/dev/null && ! team_values \"\${RENDERED_OTHER}\" | grep -v '^bumblebee\$'"
+
+echo "==> version label assertions"
+# A label value is at most 63 characters and begins and ends alphanumeric, or
+# the API server refuses the object. helm.sh/chart and app.kubernetes.io/version
+# both cut the chart version at 63 characters, and long versions are real:
+# branch builds are <version>-dev.<branch>.<date>.<time>.h<sha>, and
+# helm-controller installs an OCI chart as <version>+<digest>. The first three
+# versions make the chart label's cut land on ".", on "_" (from "+") and on a
+# run of "-"; the last three do the same to the version label's cut.
+version_label_values() {
+  printf '%s' "$1" \
+    | sed -En 's#^[[:space:]]*(helm\.sh/chart|app\.kubernetes\.io/version):[[:space:]]*##p' \
+    | sed -e 's|^"\(.*\)"$|\1|'
+}
+
+LONG_VERSION="$(mktemp -d)"
+trap 'rm -rf "${OTHER_SPELLING}" "${LONG_VERSION}"' EXIT
+cp -r "${CHART}" "${LONG_VERSION}/tunnelport"
+for version in \
+  0.1.1-dev.renovate-helm-unittes.2026-09-22.14-54-24.h1a2b3c4 \
+  0.1.1-dev.renovate-helm-unittes.2026-09-22.14-54-24+h1a2b3c4 \
+  0.1.1-dev.renovate-helm-unittes.2026-09-22.14-54---.h1a2b3c4 \
+  0.1.1-dev.renovate-helm-unittest-chart-lab.2026-09-22.14-54-24.h1a2b3c4 \
+  0.1.1-dev.renovate-helm-unittests.2026-09-22.14-54-24.h1a2b3c4+0123456789ab \
+  0.1.1-dev.renovate-helm-unittest-chart-label.2026-09-22.14-54---.h1a2b3c4; do
+  sed -i "s|^version: .*|version: ${version}|" "${LONG_VERSION}/tunnelport/Chart.yaml"
+  # shellcheck disable=SC2034 # referenced by the assert "..." string below.
+  RENDERED_LONG="$(helm template tunnelport "${LONG_VERSION}/tunnelport" "${TELEPORT_FLAGS[@]}")"
+  assert "version labels are valid for chart version ${version}" \
+    "version_label_values \"\${RENDERED_LONG}\" | grep -c . >/dev/null && ! version_label_values \"\${RENDERED_LONG}\" | grep -Ev '^([A-Za-z0-9][-A-Za-z0-9_.]{0,61})?[A-Za-z0-9]\$'"
+done
 
 echo "==> metrics scrape assertions"
 
