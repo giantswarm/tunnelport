@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"regexp"
 	"time"
@@ -156,7 +157,7 @@ func parseFlags() flags {
 	flag.IntVar(&f.ghostunnelListenPort, "ghostunnel-listen-port", 8443,
 		"Port the ghostunnel sidecar listens on inside the pod; the rendered "+
 			"Service exposes it as the `tls` port with the same value.")
-	flag.StringVar(&f.ghostunnelCPURequest, "ghostunnel-cpu-request", "25m",
+	flag.StringVar(&f.ghostunnelCPURequest, "ghostunnel-cpu-request", "10m",
 		"CPU request applied to the ghostunnel container.")
 	flag.StringVar(&f.ghostunnelMemRequest, "ghostunnel-memory-request", "32Mi",
 		"Memory request applied to the ghostunnel container.")
@@ -279,6 +280,42 @@ func parseQuantityOrExit(name, value string) resource.Quantity {
 	return q
 }
 
+// resourcesOrExit parses the four resource flags of one container
+// (--<container>-{cpu,memory}-{request,limit}) and exits when a request is
+// above its limit. Every RemoteApp shares these defaults, so such a pair
+// would not fail at startup but at the API server, for every rendered
+// Deployment, visible only in the RemoteApps' conditions.
+func resourcesOrExit(container, cpuRequest, memRequest, cpuLimit, memLimit string) corev1.ResourceRequirements {
+	r := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    parseQuantityOrExit(container+"-cpu-request", cpuRequest),
+			corev1.ResourceMemory: parseQuantityOrExit(container+"-memory-request", memRequest),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    parseQuantityOrExit(container+"-cpu-limit", cpuLimit),
+			corev1.ResourceMemory: parseQuantityOrExit(container+"-memory-limit", memLimit),
+		},
+	}
+	if err := requestsWithinLimits(container, r); err != nil {
+		setupLog.Error(err, "resource request above its limit")
+		os.Exit(1)
+	}
+	return r
+}
+
+// requestsWithinLimits reports the first CPU or memory request above its
+// limit, naming both flags.
+func requestsWithinLimits(container string, r corev1.ResourceRequirements) error {
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		request, limit := r.Requests[name], r.Limits[name]
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("--%s-%s-request %s is above --%s-%s-limit %s",
+				container, name, request.String(), container, name, limit.String())
+		}
+	}
+	return nil
+}
+
 // DNS-1123 subdomain pattern for the Teleport cluster name. Same shape
 // the CRD enforced on `spec.clusterName` before ADR 0005 moved the
 // field to an operator flag.
@@ -322,16 +359,8 @@ func requireOrExit(name, value string, pattern *regexp.Regexp) string {
 func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 	return remoteappctrl.PodDefaults{
 		TbotImage: f.tbotImage,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    parseQuantityOrExit("tbot-cpu-request", f.tbotCPURequest),
-				corev1.ResourceMemory: parseQuantityOrExit("tbot-memory-request", f.tbotMemRequest),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    parseQuantityOrExit("tbot-cpu-limit", f.tbotCPULimit),
-				corev1.ResourceMemory: parseQuantityOrExit("tbot-memory-limit", f.tbotMemLimit),
-			},
-		},
+		Resources: resourcesOrExit("tbot",
+			f.tbotCPURequest, f.tbotMemRequest, f.tbotCPULimit, f.tbotMemLimit),
 		Insecure: f.tbotInsecure,
 		TeleportClusterName: requireOrExit(
 			"teleport-cluster-name", f.teleportClusterName, teleportClusterNamePattern,
@@ -342,16 +371,8 @@ func buildReconcilerConfig(f flags) remoteappctrl.PodDefaults {
 		GhostunnelImage:          f.ghostunnelImage,
 		GhostunnelReloadInterval: f.ghostunnelReloadInterval,
 		GhostunnelListenPort:     ghostunnelListenPortOrExit(f),
-		GhostunnelResources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    parseQuantityOrExit("ghostunnel-cpu-request", f.ghostunnelCPURequest),
-				corev1.ResourceMemory: parseQuantityOrExit("ghostunnel-memory-request", f.ghostunnelMemRequest),
-			},
-			Limits: corev1.ResourceList{
-				corev1.ResourceCPU:    parseQuantityOrExit("ghostunnel-cpu-limit", f.ghostunnelCPULimit),
-				corev1.ResourceMemory: parseQuantityOrExit("ghostunnel-memory-limit", f.ghostunnelMemLimit),
-			},
-		},
+		GhostunnelResources: resourcesOrExit("ghostunnel",
+			f.ghostunnelCPURequest, f.ghostunnelMemRequest, f.ghostunnelCPULimit, f.ghostunnelMemLimit),
 	}
 }
 
@@ -417,6 +438,12 @@ func main() {
 	f := parseFlags()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&f.zapOpts)))
+
+	// Every flag is validated before the manager contacts the API server,
+	// so a bad value fails on its own error rather than behind a
+	// connection one.
+	podDefaults := buildReconcilerConfig(f)
+	verifyCfg := buildVerifyConfig(f)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -551,7 +578,6 @@ func main() {
 	// and tunnelport_remoteapp_upstream_probe_status, so the alerts and
 	// `kubectl get remoteapp` can never disagree about a tunnel — they
 	// read the same map.
-	verifyCfg := buildVerifyConfig(f)
 	verifications := remoteappctrl.NewVerificationStore(verifyCfg.Enabled, verifyCfg.UpstreamProbe)
 	if err := verifications.Register(); err != nil {
 		setupLog.Error(err, "Failed to register TLS verification metrics")
@@ -570,7 +596,7 @@ func main() {
 
 	if err := (&remoteappctrl.Reconciler{
 		Client:             mgr.GetClient(),
-		PodDefaults:        buildReconcilerConfig(f),
+		PodDefaults:        podDefaults,
 		Recorder:           recorder,
 		Verifications:      verifications,
 		VerificationEvents: verificationEvents,

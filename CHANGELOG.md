@@ -148,6 +148,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ghostunnel's default CPU request is 10m instead of 25m, set from measured
+  usage: the busiest of 57 ghostunnel containers peaked at about 7m over seven
+  days, and 25m reserved about 40 times what they use. Memory is unchanged.
+- The manager refuses to start when a `--tbot-*` or `--ghostunnel-*` CPU or
+  memory request is above its limit, naming both flags. Before, it started and
+  the API server rejected the Deployment of every RemoteApp.
+- Without `KUBEBUILDER_ASSETS`, `go test ./...` runs the unit tests of
+  `internal/controller/remoteapp` and `internal/crdacceptance` and skips only
+  the envtest-backed ones, naming `make test-ci`. Before, both packages
+  reported `ok` after running no test at all.
+
 - The manager's metrics endpoint moved to plain HTTP on port 8080
   (`ports.metrics`, `--metrics-secure=false`), which is what the new PodMonitor
   scrapes. The authn/authz variant gates `/metrics` behind

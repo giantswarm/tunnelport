@@ -36,6 +36,7 @@ import (
 )
 
 func TestRemoteApp_AcceptsValidCR(t *testing.T) {
+	requireEnvtest(t)
 	cr := &accessv1alpha1.RemoteApp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "tracer",
@@ -54,6 +55,7 @@ func TestRemoteApp_AcceptsValidCR(t *testing.T) {
 }
 
 func TestRemoteApp_ReplicasIsOptionalAndNotDefaultedByCRD(t *testing.T) {
+	requireEnvtest(t)
 	cr := &accessv1alpha1.RemoteApp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "no-replicas",
@@ -82,6 +84,7 @@ func TestRemoteApp_ReplicasIsOptionalAndNotDefaultedByCRD(t *testing.T) {
 }
 
 func TestRemoteApp_StatusSubresourceDoesNotBumpGeneration(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 
 	cr := &accessv1alpha1.RemoteApp{
@@ -135,6 +138,7 @@ func TestRemoteApp_StatusSubresourceDoesNotBumpGeneration(t *testing.T) {
 }
 
 func TestRemoteApp_RejectsMissingTokenName(t *testing.T) {
+	requireEnvtest(t)
 	cr := &accessv1alpha1.RemoteApp{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bad-tokenname-empty",
@@ -155,6 +159,7 @@ func TestRemoteApp_RejectsMissingTokenName(t *testing.T) {
 // TestRemoteApp_RejectsInvalidTokenName covers the DNS-1123-subdomain
 // constraint on TokenName.
 func TestRemoteApp_RejectsInvalidTokenName(t *testing.T) {
+	requireEnvtest(t)
 	cases := []struct {
 		name      string
 		tokenName string
@@ -188,6 +193,7 @@ func TestRemoteApp_RejectsInvalidTokenName(t *testing.T) {
 }
 
 func TestRemoteApp_RejectsInvalidPort(t *testing.T) {
+	requireEnvtest(t)
 	cases := []struct {
 		name string
 		port int32
@@ -223,6 +229,7 @@ func TestRemoteApp_RejectsInvalidPort(t *testing.T) {
 // would make the probe URL depend on how the request is assembled, and
 // whitespace would break the request line.
 func TestRemoteApp_ProbePathValidation(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string
@@ -266,6 +273,7 @@ func TestRemoteApp_ProbePathValidation(t *testing.T) {
 // form, so the CRD's minLength never sees it and the operator falls back
 // to `/`.
 func TestRemoteApp_EmptyProbeBlockIsAccepted(t *testing.T) {
+	requireEnvtest(t)
 	cr := &accessv1alpha1.RemoteApp{
 		ObjectMeta: metav1.ObjectMeta{Name: "probe-empty", Namespace: "default"},
 		Spec: accessv1alpha1.RemoteAppSpec{

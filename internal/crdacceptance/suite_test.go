@@ -41,15 +41,24 @@ var (
 	scheme    = runtime.NewScheme()
 )
 
+// requireEnvtest skips a test that needs the envtest API server when
+// KUBEBUILDER_ASSETS is unset and TestMain started none.
+func requireEnvtest(t *testing.T) {
+	t.Helper()
+	if testEnv == nil {
+		t.Skip("KUBEBUILDER_ASSETS unset; run `make test-ci` for the envtest-backed tests")
+	}
+}
+
 func TestMain(m *testing.M) {
 	// envtest assets aren't always provisioned: the golden CI go-build runs a
-	// plain `go test ./...` without them. Skip the envtest-backed suite when
-	// KUBEBUILDER_ASSETS is unset. The full suite runs in the architect/go-test
-	// CI job (make test-ci) and locally via `make test-ci`, both of which
-	// provision envtest and export KUBEBUILDER_ASSETS.
+	// plain `go test ./...` without them. Without KUBEBUILDER_ASSETS no API
+	// server starts; the tests still run and every envtest-backed test skips
+	// itself through requireEnvtest, so `go test -v` names what did not run.
+	// The full suite runs in the architect/go-test CI job and locally via
+	// `make test-ci`, both of which provision envtest.
 	if os.Getenv("KUBEBUILDER_ASSETS") == "" {
-		fmt.Fprintln(os.Stderr, "KUBEBUILDER_ASSETS unset; skipping envtest suite")
-		return
+		os.Exit(m.Run())
 	}
 
 	if err := accessv1alpha1.AddToScheme(scheme); err != nil {

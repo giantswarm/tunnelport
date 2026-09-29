@@ -92,6 +92,7 @@ func getRemoteApp(ctx context.Context, t *testing.T, key types.NamespacedName) *
 // kubebuilder pattern: status.observedGeneration must catch up to
 // metadata.generation after a successful reconcile.
 func TestStatus_ObservedGenerationTracksSpecChanges(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -134,6 +135,7 @@ func TestStatus_ObservedGenerationTracksSpecChanges(t *testing.T) {
 // verifies the RemoteApp status flips Ready=true and lastError=empty.
 // envtest has no kubelet, so the test owns the Pod's Status subresource.
 func TestStatus_HealthyPodFlipsReadyTrue(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -185,6 +187,7 @@ func TestStatus_HealthyPodFlipsReadyTrue(t *testing.T) {
 // the tbot pod no longer mounts a token Secret, so this test asserts
 // the propagation path, not a specific failure cause.
 func TestStatus_PendingPodSurfacesVolumeMountFailure(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -228,6 +231,7 @@ func TestStatus_PendingPodSurfacesVolumeMountFailure(t *testing.T) {
 // crashloop branch — restart count and last termination reason must be
 // in lastError, but logs must NOT be (ADR 0003).
 func TestStatus_CrashLoopingPodSurfacesRestartsAndExitCode(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -277,6 +281,7 @@ func TestStatus_CrashLoopingPodSurfacesRestartsAndExitCode(t *testing.T) {
 // changing a Pod's Status (without touching the RemoteApp) must trigger
 // a reconcile, otherwise lastError would lag pod state arbitrarily.
 func TestStatus_PodEventReenqueuesParentRemoteApp(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
