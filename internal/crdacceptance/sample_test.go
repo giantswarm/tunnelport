@@ -32,6 +32,7 @@ import (
 // sample, leaving consumers (kustomize bases, docs, dev workflows) broken.
 
 func TestSampleRemoteApp_IsAcceptedByAPIServer(t *testing.T) {
+	requireEnvtest(t)
 	path := filepath.Join("..", "..", "config", "samples", "access_v1alpha1_remoteapp.yaml")
 	raw, err := os.ReadFile(path)
 	if err != nil {

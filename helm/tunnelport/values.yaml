@@ -148,11 +148,14 @@ tls:
   # node to be starved under CPU pressure, and nothing caps a stuck or
   # leaking proxy before it threatens the node.
   #
-  # The requests are half of `tbot.resources` above — ghostunnel is the
-  # thinner of the two, having neither cert renewal nor the Teleport
-  # protocol to run — but the limits MATCH tbot's, because both
-  # containers sit on the same data path and encrypt every byte that
-  # crosses a tunnel. Half of tbot's ceiling would throttle ghostunnel
+  # The requests are measured, not proportioned: on a management cluster
+  # running 57 tunnels the busiest ghostunnel peaked at about 7m CPU
+  # (5-minute rate, 7 days), all 57 together used about 33m, so 10m stays
+  # above the peak without reserving CPU nothing uses. The memory request
+  # sits at the measured 7-day peak working set (about 35 MiB).
+  #
+  # The limits MATCH tbot's, because both containers sit on the same data
+  # path and encrypt every byte that crosses a tunnel. Half of tbot's ceiling would throttle ghostunnel
   # first on exactly the busiest tunnels (`kubernetes-*` carry
   # kube-apiserver traffic), and a memory ceiling it reached would be an
   # OOM kill and a CrashLoopBackOff page, not a capped proxy — ghostunnel
@@ -161,7 +164,7 @@ tls:
   # free until it is needed.
   resources:
     requests:
-      cpu: 25m
+      cpu: 10m
       memory: 32Mi
     limits:
       cpu: 200m

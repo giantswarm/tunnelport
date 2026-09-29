@@ -112,6 +112,7 @@ func waitForEvent(ctx context.Context, t *testing.T, cr *accessv1alpha1.RemoteAp
 }
 
 func TestStatus_UpstreamUnreachableFoldsIntoReadyAndEmitsEvents(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 

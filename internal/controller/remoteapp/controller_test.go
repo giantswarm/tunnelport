@@ -118,6 +118,7 @@ func eventually(t *testing.T, cond func() (bool, error)) {
 }
 
 func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -194,6 +195,7 @@ func equalPodTemplate(a, b corev1.PodTemplateSpec) bool {
 }
 
 func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -273,6 +275,7 @@ func TestReconciler_PortChangeUpdatesAllThreeAndRollsDeployment(t *testing.T) {
 }
 
 func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -314,6 +317,7 @@ func TestReconciler_ReplicasChangeScalesWithoutRolling(t *testing.T) {
 }
 
 func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -385,6 +389,7 @@ func TestReconciler_AppNameChangeUpdatesConfigMapAndRollsDeployment(t *testing.T
 // gone. After a reconcile completes (proxied by the SA being
 // materialised), none of the three objects exist in the CR's namespace.
 func TestReconciler_DoesNotApplyTrustBundleObjects(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
@@ -416,6 +421,7 @@ func TestReconciler_DoesNotApplyTrustBundleObjects(t *testing.T) {
 }
 
 func TestReconciler_OwnerReferencesEnableCascadeDelete(t *testing.T) {
+	requireEnvtest(t)
 	ctx := context.Background()
 	ns := uniqueNS(t, ctx)
 
