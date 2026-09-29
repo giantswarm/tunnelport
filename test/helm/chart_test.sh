@@ -146,7 +146,7 @@ echo "==> ghostunnel value flow assertions"
 # all, so it was first to starve under node CPU pressure and nothing capped a
 # leaking TLS proxy.
 assert "tls.resources.requests.cpu flows to --ghostunnel-cpu-request" \
-  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-cpu-request=25m'"
+  "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-cpu-request=10m'"
 assert "tls.resources.requests.memory flows to --ghostunnel-memory-request" \
   "printf '%s' \"\${RENDERED}\" | grep -E -- '--ghostunnel-memory-request=32Mi'"
 assert "tls.resources.limits.cpu flows to --ghostunnel-cpu-limit" \
