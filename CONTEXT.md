@@ -267,7 +267,7 @@ land on the manager pod as `--teleport-cluster-name` /
 is empty.
 
 Everything else stays per-CR: `appName`, `port`, `tokenName`, and the
-optional `replicas`. A given consumer MC therefore hosts RemoteApps
+optional `replicas`, `nodeSelector`, `tolerations`, `affinity` and `probe`. A given consumer MC therefore hosts RemoteApps
 that all target the same Teleport cluster; multi-Teleport on one MC
 is an explicit non-goal — the answer is a second operator install in
 its own namespace. See [ADR 0005](./docs/adr/0005-operator-owns-teleport-cluster-and-proxy.md)
@@ -306,6 +306,19 @@ half-applicable defaults.
   if Central is briefly unreachable during a roll, the new pod stays
   `NotReady` and the old pod keeps serving — graceful auto-rollback on
   transient upstream failures.
+- **Disruptions.** Every RemoteApp gets a PodDisruptionBudget with
+  `maxUnavailable: 1` over its tbot pods, and the pods carry a preferred
+  anti-affinity by hostname. At `replicas: 2` a node drain evicts one proxy
+  pod at a time and the replicas run on different nodes, so a remote app
+  (an identity provider, say) stays reachable while a node goes away. Both
+  apply at every replica count, so scaling changes no pod template; at one
+  replica the budget still allows the eviction. The anti-affinity is
+  preferred, not required, so the rolling update's surge pod can still
+  schedule on a cluster with as many nodes as replicas.
+- **Placement.** `spec.nodeSelector`, `spec.tolerations` and
+  `spec.affinity` are copied onto the tbot pods, e.g. to keep the proxy in
+  front of an identity provider off spot capacity. A `podAntiAffinity` in
+  `spec.affinity` replaces the default one.
 - The tbot **image** comes from a Helm value on the operator chart, not from
   the CR. Single global version per consumer MC; the platform team upgrades
   tbot via chart values.

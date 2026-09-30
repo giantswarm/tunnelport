@@ -95,6 +95,19 @@ rules:
   - patch
   - update
   - watch
+# The per-CR PodDisruptionBudget over the tbot pods. Server-Side Apply
+# needs no `update`, and OwnerReferences GC it with the CR, so no
+# `delete` either (same shape as serviceaccounts above).
+- apiGroups:
+  - policy
+  resources:
+  - poddisruptionbudgets
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - patch
 
 # ADR 0008 removed the per-CR trust-bundle Secret/Role/RoleBinding;
 # the operator no longer renders any Secret, Role, or RoleBinding. The

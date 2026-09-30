@@ -15,9 +15,10 @@ limitations under the License.
 */
 
 // Package remoteapp contains the controller-runtime reconciler that
-// materialises a RemoteApp CR into a ConfigMap, Deployment, and Service,
-// owned by the CR via OwnerReferences. The rendering is split into pure
-// functions (renderConfigMap / renderDeployment / renderService) so they
+// materialises a RemoteApp CR into a ConfigMap, Deployment,
+// PodDisruptionBudget and Service, owned by the CR via OwnerReferences. The
+// rendering is split into pure functions (renderConfigMap /
+// renderDeployment / renderPodDisruptionBudget / renderService) so they
 // can be unit-tested without a live API server.
 package remoteapp
 
@@ -28,6 +29,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -508,6 +510,9 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 					// ADR 0004.
 					ServiceAccountName:           cr.Name,
 					AutomountServiceAccountToken: &automountServiceAccountToken,
+					NodeSelector:                 cr.Spec.NodeSelector,
+					Tolerations:                  cr.Spec.Tolerations,
+					Affinity:                     podAffinity(cr),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
 						RunAsUser:    &runAsUser,
@@ -725,6 +730,62 @@ func renderDeployment(cr *accessv1alpha1.RemoteApp, cfg PodDefaults) *appsv1.Dep
 					Containers: []corev1.Container{ghostunnelContainer},
 				},
 			},
+		},
+	}
+}
+
+// podAffinity returns the tbot pods' affinity: spec.affinity as given, plus a
+// preferred anti-affinity by hostname unless spec.affinity sets a
+// podAntiAffinity of its own, so the replicas of a multi-replica proxy land
+// on different nodes. It is added at every replica count: a scale from one
+// to two replicas then changes no pod template and rolls nothing, and at one
+// replica it spreads the rolling update's surge pod. Preferred, not
+// required: a required rule would leave the surge pod Pending on a cluster
+// with as many nodes as replicas.
+func podAffinity(cr *accessv1alpha1.RemoteApp) *corev1.Affinity {
+	affinity := cr.Spec.Affinity.DeepCopy()
+	if affinity != nil && affinity.PodAntiAffinity != nil {
+		return affinity
+	}
+	if affinity == nil {
+		affinity = &corev1.Affinity{}
+	}
+	affinity.PodAntiAffinity = &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+			{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					LabelSelector: &metav1.LabelSelector{MatchLabels: canonicalLabels(cr)},
+					TopologyKey:   corev1.LabelHostname,
+				},
+			},
+		},
+	}
+	return affinity
+}
+
+// renderPodDisruptionBudget returns the PodDisruptionBudget over this
+// RemoteApp's tbot pods: at most one of them may be evicted at a time, so a
+// node drain or a Karpenter consolidation never takes every replica of a
+// multi-replica proxy down together. It is rendered at every replica count;
+// at one replica it allows the eviction, as having no budget would, and
+// spares the reconciler a delete path when replicas changes.
+func renderPodDisruptionBudget(cr *accessv1alpha1.RemoteApp, _ PodDefaults) *policyv1.PodDisruptionBudget {
+	labels := canonicalLabels(cr)
+	maxUnavailable := intstr.FromInt(1)
+	return &policyv1.PodDisruptionBudget{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "policy/v1",
+			Kind:       "PodDisruptionBudget",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Name,
+			Namespace: cr.Namespace,
+			Labels:    labels,
+		},
+		Spec: policyv1.PodDisruptionBudgetSpec{
+			MaxUnavailable: &maxUnavailable,
+			Selector:       &metav1.LabelSelector{MatchLabels: labels},
 		},
 	}
 }

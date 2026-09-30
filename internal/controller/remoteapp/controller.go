@@ -41,6 +41,7 @@ limitations under the License.
 // +kubebuilder:rbac:groups=access.giantswarm.io,resources=remoteapps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=access.giantswarm.io,resources=remoteapps/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;patch
@@ -55,6 +56,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -171,6 +173,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		{kindServiceAccount, renderServiceAccount(cr, r.PodDefaults)},
 		{"ConfigMap", renderConfigMap(cr, r.PodDefaults)},
 		{"Deployment", renderDeployment(cr, r.PodDefaults)},
+		{"PodDisruptionBudget", renderPodDisruptionBudget(cr, r.PodDefaults)},
 		{"Service", renderService(cr, r.PodDefaults)},
 	} {
 		if err := r.applyOwned(ctx, cr, step.obj); err != nil {
@@ -244,7 +247,7 @@ func (r *Reconciler) applyOwned(ctx context.Context, cr *accessv1alpha1.RemoteAp
 	)
 }
 
-// SetupWithManager wires this Reconciler to its CR type and the four
+// SetupWithManager wires this Reconciler to its CR type and the five
 // owned object types. Owns(...) gives us watches with predictable
 // requeue-on-child-change semantics.
 //
@@ -262,6 +265,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&accessv1alpha1.RemoteApp{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&corev1.ServiceAccount{}).
