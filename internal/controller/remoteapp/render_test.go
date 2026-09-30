@@ -17,6 +17,7 @@ limitations under the License.
 package remoteapp
 
 import (
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	accessv1alpha1 "github.com/giantswarm/tunnelport/api/v1alpha1"
@@ -361,6 +363,100 @@ func TestRenderDeployment_RespectsExplicitReplicas(t *testing.T) {
 
 	if dep.Spec.Replicas == nil || *dep.Spec.Replicas != 3 {
 		t.Errorf("Deployment replicas: want 3, got %v", dep.Spec.Replicas)
+	}
+}
+
+func TestRenderDeployment_PlacementPassesThrough(t *testing.T) {
+	cr := fixtureRemoteApp()
+	cr.Spec.NodeSelector = map[string]string{"karpenter.sh/capacity-type": "on-demand"}
+	cr.Spec.Tolerations = []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule}}
+	cr.Spec.Affinity = &corev1.Affinity{
+		NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+					MatchExpressions: []corev1.NodeSelectorRequirement{{
+						Key: corev1.LabelTopologyZone, Operator: corev1.NodeSelectorOpIn, Values: []string{"eu-west-1a"},
+					}},
+				}},
+			},
+		},
+	}
+
+	pod := renderDeployment(cr, fixtureConfig()).Spec.Template.Spec
+
+	if !reflect.DeepEqual(pod.NodeSelector, cr.Spec.NodeSelector) {
+		t.Errorf("nodeSelector: want %v, got %v", cr.Spec.NodeSelector, pod.NodeSelector)
+	}
+	if !reflect.DeepEqual(pod.Tolerations, cr.Spec.Tolerations) {
+		t.Errorf("tolerations: want %v, got %v", cr.Spec.Tolerations, pod.Tolerations)
+	}
+	if pod.Affinity == nil || !reflect.DeepEqual(pod.Affinity.NodeAffinity, cr.Spec.Affinity.NodeAffinity) {
+		t.Errorf("nodeAffinity: want %v, got %v", cr.Spec.Affinity.NodeAffinity, pod.Affinity)
+	}
+	if cr.Spec.Affinity.PodAntiAffinity != nil {
+		t.Error("rendering must not write the default anti-affinity into the CR's spec")
+	}
+}
+
+func TestRenderDeployment_DefaultAntiAffinitySpreadsReplicasByHostname(t *testing.T) {
+	for _, replicas := range []int32{1, 2} {
+		cr := fixtureRemoteApp()
+		cr.Spec.Replicas = &replicas
+
+		affinity := renderDeployment(cr, fixtureConfig()).Spec.Template.Spec.Affinity
+
+		if affinity == nil || affinity.PodAntiAffinity == nil {
+			t.Fatalf("replicas=%d: want a default podAntiAffinity, got %v", replicas, affinity)
+		}
+		if n := len(affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution); n != 0 {
+			t.Errorf("replicas=%d: the default anti-affinity must be preferred only, got %d required terms", replicas, n)
+		}
+		terms := affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution
+		if len(terms) != 1 {
+			t.Fatalf("replicas=%d: want 1 preferred term, got %d", replicas, len(terms))
+		}
+		if got := terms[0].PodAffinityTerm.TopologyKey; got != corev1.LabelHostname {
+			t.Errorf("replicas=%d: topologyKey: want %q, got %q", replicas, corev1.LabelHostname, got)
+		}
+		if got := terms[0].PodAffinityTerm.LabelSelector.MatchLabels; !reflect.DeepEqual(got, canonicalLabels(cr)) {
+			t.Errorf("replicas=%d: labelSelector: want %v, got %v", replicas, canonicalLabels(cr), got)
+		}
+	}
+}
+
+func TestRenderDeployment_OwnPodAntiAffinityReplacesDefault(t *testing.T) {
+	cr := fixtureRemoteApp()
+	own := &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchLabels: canonicalLabels(cr)},
+			TopologyKey:   corev1.LabelTopologyZone,
+		}},
+	}
+	cr.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: own}
+
+	got := renderDeployment(cr, fixtureConfig()).Spec.Template.Spec.Affinity.PodAntiAffinity
+
+	if !reflect.DeepEqual(got, own) {
+		t.Errorf("podAntiAffinity: want the CR's own %v, got %v", own, got)
+	}
+}
+
+func TestRenderPodDisruptionBudget_AllowsOneEvictionAtATime(t *testing.T) {
+	cr := fixtureRemoteApp()
+
+	pdb := renderPodDisruptionBudget(cr, fixtureConfig())
+
+	if pdb.Name != cr.Name || pdb.Namespace != cr.Namespace {
+		t.Errorf("PDB: want %s/%s, got %s/%s", cr.Namespace, cr.Name, pdb.Namespace, pdb.Name)
+	}
+	if got := pdb.Spec.MaxUnavailable; got == nil || got.IntValue() != 1 {
+		t.Errorf("maxUnavailable: want 1, got %v", got)
+	}
+	if pdb.Spec.MinAvailable != nil {
+		t.Errorf("minAvailable must be unset, got %v", pdb.Spec.MinAvailable)
+	}
+	if got, want := pdb.Spec.Selector.MatchLabels, renderDeployment(cr, fixtureConfig()).Spec.Selector.MatchLabels; !reflect.DeepEqual(got, want) {
+		t.Errorf("selector: want the Deployment's %v, got %v", want, got)
 	}
 }
 

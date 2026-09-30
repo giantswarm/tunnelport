@@ -25,6 +25,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -133,10 +134,16 @@ func TestReconciler_AppliesRemoteAppRendersAllThreeOwnedObjects(t *testing.T) {
 	svc := &corev1.Service{}
 	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, svc)
 
+	pdb := &policyv1.PodDisruptionBudget{}
+	eventuallyGet(t, ctx, client.ObjectKey{Namespace: ns, Name: cr.Name}, pdb)
+	if got := pdb.Spec.MaxUnavailable; got == nil || got.IntValue() != 1 {
+		t.Errorf("PodDisruptionBudget maxUnavailable: want 1, got %v", got)
+	}
+
 	// Each owned object carries an OwnerReference back to the CR with
 	// Controller=true and BlockOwnerDeletion=true so kubectl-driven
 	// cascade deletes wait for the children to GC.
-	for _, obj := range []client.Object{cm, dep, svc} {
+	for _, obj := range []client.Object{cm, dep, pdb, svc} {
 		ors := obj.GetOwnerReferences()
 		if len(ors) != 1 {
 			t.Errorf("%T %s: ownerReferences want 1, got %d", obj, obj.GetName(), len(ors))

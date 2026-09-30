@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -69,6 +70,22 @@ type RemoteAppSpec struct {
 	// so absence remains observable in the API.
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
+
+	// NodeSelector is copied onto the tbot pods, so an installation can pin
+	// a proxy that fronts an identity provider to on-demand capacity.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations are copied onto the tbot pods.
+	// +optional
+	// +listType=atomic
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Affinity is copied onto the tbot pods. Unless it sets a podAntiAffinity
+	// of its own, the operator adds a preferred anti-affinity by hostname so
+	// the replicas land on different nodes.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
 
 	// Probe tunes the operator's end-to-end probe through this tunnel (the
 	// UpstreamReachable condition). Absent means the defaults: one

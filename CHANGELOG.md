@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- RemoteApp proxies survive the loss of a node (giantswarm/tunnelport#128).
+  Every RemoteApp now gets a PodDisruptionBudget over its tbot pods
+  (`maxUnavailable: 1`), and the pods carry a preferred anti-affinity by
+  hostname, so at `spec.replicas: 2` a node drain or a Karpenter consolidation
+  evicts one proxy pod at a time and the replicas land on different nodes. The
+  new `spec.nodeSelector`, `spec.tolerations` and `spec.affinity` are copied
+  onto the pods, so an installation can pin the proxy in front of an identity
+  provider to on-demand capacity; an own `podAntiAffinity` in `spec.affinity`
+  replaces the default one. The operator's ClusterRole gains
+  `policy/poddisruptionbudgets` (get, list, watch, create, patch). Existing
+  tunnel Deployments roll once on the upgrade, one surge pod at a time.
+
 - The ghostunnel sidecar now carries CPU and memory requests and limits of its
   own, from the new `tls.resources` chart values (giantswarm/tunnelport#120).
   Every rendered tunnel Deployment put ghostunnel in the pod with `resources:
