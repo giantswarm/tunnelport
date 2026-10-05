@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bump OpenTelemetry past v1.45.0 for CVE-2026-81870. The expired `.nancy-ignore` entries are gone: gRPC (v1.83.2) and grpc-gateway (v2.29.0) were already past the versions they named.
+
 ### Added
 
 - RemoteApp proxies survive the loss of a node (giantswarm/tunnelport#128).
