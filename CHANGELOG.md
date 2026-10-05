@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Bump OpenTelemetry to v1.47.0, gRPC to v1.84.0 and grpc-gateway to v2.31.0 for CVE-2026-81870, CVE-2026-84303, CVE-2026-84304 and CVE-2026-37236; their expired `.nancy-ignore` entries are gone.
+- Bump OpenTelemetry past v1.45.0 for CVE-2026-81870. The expired `.nancy-ignore` entries are gone: gRPC (v1.83.2) and grpc-gateway (v2.29.0) were already past the versions they named.
 
 ### Added
 
